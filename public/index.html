@@ -281,6 +281,14 @@ button:disabled{cursor:not-allowed}
 .abtn:not(:disabled):hover{background:var(--panel2);border-color:var(--ink-faint)}
 .abtn:disabled{opacity:.35}
 .abtn .hint{font-size:9.5px;color:var(--ink-faint);font-weight:400;text-align:right}
+/* An action that also has a keyboard shortcut wears it, so the binding is
+   discoverable without a legend nobody reads. */
+.abtn .lbl{display:flex;align-items:center;gap:7px;min-width:0}
+.abtn .kbd{
+  font:600 9.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  padding:3px 5px;border-radius:4px;flex:none;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--ink-faint);
+}
 .abtn.primary{border-color:var(--good);color:var(--good)}
 .abtn.primary:not(:disabled):hover{background:rgba(75,214,160,.1)}
 .abtn.danger{border-color:rgba(240,87,107,.4);color:var(--bad)}
@@ -908,9 +916,23 @@ function renderActions() {
   wrap.innerHTML = "";
   const P = G.players[G.turn];
 
-  const add = (label, hint, cls, enabled, fn) => {
+  /**
+   * `key` tags the button with a shortcut. The keyboard handler finds it by
+   * that tag and clicks it, which is the point: every condition worked out
+   * below — the disabled states, and the many branches where a button is not
+   * rendered at all — applies to the keyboard automatically. There is no second
+   * copy of "may I draw right now?" to drift out of step with this one.
+   */
+  const add = (label, hint, cls, enabled, fn, key) => {
     const b = el("button", "abtn " + (cls || ""));
-    b.appendChild(el("span", null, label));
+    const head = el("span", "lbl");
+    head.appendChild(el("span", null, label));
+    if (key) {
+      b.dataset.key = key;
+      const cap = ACTION_KEYS.find((k) => k.action === key);
+      if (cap) head.appendChild(el("kbd", "kbd", cap.cap));
+    }
+    b.appendChild(head);
     if (hint) b.appendChild(el("span", "hint", hint));
     b.disabled = !enabled;
     if (enabled) b.addEventListener("click", fn);
@@ -979,7 +1001,7 @@ function renderActions() {
   const canDraw = G.phase === "declare" && !G.hasActed && G.castThisTurn === 0 && !G.drewThisTurn
     && P.noDraw <= 0 && G.deck.length > 0;
   add("Draw a Spell Card", canDraw ? "one card · ends your turn" : drawWhy(P), "", canDraw,
-    () => act({ t: "draw" }));
+    () => act({ t: "draw" }), "draw");
 
   const selPiece = UI.sel != null ? G.board[UI.sel] : null;
   const canTransform = selPiece && selPiece.owner === G.turn && !selPiece.form && P.noTransform <= 0;
@@ -997,7 +1019,7 @@ function renderActions() {
     add("Opponent reacts…", `${PLAYERS[1 - G.turn].name} may cast an any-turn card`, "", true, openReaction);
 
   add("End Turn", G.phase === "declare" && !G.hasActed ? "you have not acted" : "pass to your opponent",
-    "primary", true, () => act({ t: "endTurn" }));
+    "primary", true, () => act({ t: "endTurn" }), "endTurn");
 }
 
 function drawWhy(P) {
@@ -1947,6 +1969,49 @@ function renderRules() {
    WIRING
    ══════════════════════════════════════════════════════════════════════════ */
 
+/* ══════════════════════════════════════════════════════════════════════════
+   KEYBOARD
+
+   The two actions worth reaching for without the mouse: ending a turn, and
+   drawing a card. One table, read from both ends — renderActions() takes `cap`
+   to print the keycap on the button, and onActionKey() takes `match` to find
+   the button again.
+
+   Nothing here re-decides whether an action is legal. It finds the button and
+   clicks it, so a key can never do something the button would have refused.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const ACTION_KEYS = [
+  // "Spacebar" is the old Edge/IE name for the same key; harmless to accept.
+  { action: "endTurn", cap: "Space", match: (k) => k === " " || k === "Spacebar" },
+  { action: "draw",    cap: "1",     match: (k) => k === "1" },
+];
+
+function onActionKey(ev) {
+  if (ev.defaultPrevented || ev.repeat) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;   // leave browser shortcuts alone
+
+  // Never take a key away from something being typed into — the room-code box
+  // is a text field — or from a control that already handles it: Space on a
+  // focused button is a click, and handling it here too would fire twice.
+  const t = ev.target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(t.tagName))) return;
+
+  const hit = ACTION_KEYS.find((k) => k.match(ev.key));
+  if (!hit || !G || !UI) return;
+
+  // Anything covering the board owns the keyboard. Returning without
+  // preventDefault leaves Space free to scroll a long modal, which is what a
+  // player pressing it there actually meant.
+  if (UI.modalOpen || !UI.revealed) return;
+  if (!$("modal").hidden || !$("curtain").hidden || !$("rules").hidden) return;
+
+  ev.preventDefault();                                  // Space must not scroll the board away
+  if (FX.lock > 0) return;                              // a game-altering spell is resolving
+  const btn = $("actions").querySelector(`[data-key="${hit.action}"]`);
+  if (btn && !btn.disabled) btn.click();
+}
+
 /** The FX button carries its own state, since it cycles three ways. */
 function renderFxButton() {
   const b = $("btnFx");
@@ -1958,6 +2023,7 @@ function renderFxButton() {
 }
 
 function wire() {
+  window.addEventListener("keydown", onActionKey);
   $("curtainGo").addEventListener("click", () => {
     UI.revealed = true;
     $("curtain").hidden = true;
