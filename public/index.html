@@ -730,6 +730,17 @@ function renderBoard() {
     if (G.lastMove && i === G.lastMove.to) node.classList.add("lastto");
   }
 
+  // The Herald's banner reaches exactly one diagonal step — a friendly pawn
+  // landing adjacent to it may advance one extra square. That is a real rule
+  // with real consequences and the board never said a word about it, so the
+  // squares it covers are lit for as long as the Herald lives. adjacentTo()
+  // already returns exactly the on-board diagonal neighbours.
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (!p || p.form !== "herald") continue;
+    for (const j of adjacentTo(i, () => true)) CELL_NODES[j].classList.add("heraldzone");
+  }
+
   // Temporal Cascade's stolen turns are otherwise a line in the log and nothing
   // else. While they last, the board itself runs cold.
   $("board").classList.toggle("fx-cascade",

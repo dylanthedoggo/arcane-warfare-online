@@ -68,6 +68,41 @@
 .fx-ring.dashed{border-style:dashed}
 .fx-ring.square{border-radius:16%}
 
+/* ── shockwaves ─────────────────────────────────────────────────────────
+   A ring that crosses the whole board, and therefore NOT a .fx-ring.
+
+   Every other ring here grows with transform:scale(), which is cheap and
+   composited — but scale multiplies the border too. That is harmless at the
+   1.3-4.5x these effects use. A wave reaching the far corner of a 12x12 board
+   needs upwards of 31 cells of diameter, and a 2px stroke scaled 31 times is a
+   60px blob, not a shockwave.
+
+   So this one grows by animating its own box instead, centred by a transform
+   that never changes, which leaves the stroke under our control — see
+   fxShockwave(), which thins it as the wave expands.
+   ───────────────────────────────────────────────────────────────────────── */
+.fx-wave{
+  border-radius:50%;
+  border:5px solid currentColor;
+  transform:translate(-50%,-50%);
+  will-change:width,height,opacity;
+}
+.fx-wave.square{border-radius:12%}
+
+/* Debris: a shard stretched along its own direction of travel. */
+.fx-streak{
+  border-radius:40%;
+  background:linear-gradient(90deg,currentColor,transparent);
+  will-change:transform,opacity;
+}
+
+/* What an event leaves behind on the square it happened on. */
+.fx-afterglow{
+  border-radius:50%;
+  background:radial-gradient(circle,currentColor 0%,transparent 68%);
+  will-change:opacity;
+}
+
 .fx-mote{border-radius:50%;background:currentColor;will-change:transform,opacity}
 .fx-spark{
   border-radius:50%;
@@ -190,6 +225,27 @@
 }
 .piece.alchemist{animation:fx-alchshimmer 4s ease-in-out infinite}
 
+/* The Herald's banner reaches exactly one diagonal step: a friendly pawn landing
+   adjacent to it may advance one extra square. That radius is a real rule with
+   real consequences and the board never said a word about it — so the four
+   squares around a Herald are lit for as long as it lives.
+
+   Drawn on ::before because the cell's box-shadow is already spoken for by
+   .selected/.lastfrom/.lastto, and .marker::after by the move dots. */
+.cell.heraldzone::before{
+  content:"";
+  position:absolute;inset:0;
+  background:radial-gradient(circle,rgba(120,255,220,.22) 0%,rgba(120,255,220,.07) 55%,transparent 78%);
+  box-shadow:inset 0 0 0 1px rgba(120,255,220,.28);
+  pointer-events:none;
+  z-index:1;                       /* under the pieces (2), over the square */
+  animation:fx-heraldbreathe 3.4s ease-in-out infinite;
+}
+@keyframes fx-heraldbreathe{
+  0%,100%{opacity:.72}
+  50%    {opacity:1}
+}
+
 /* Temporal Cascade — the board is cold for as long as the extra turns last. */
 #board.fx-cascade{
   filter:saturate(.86) hue-rotate(-6deg);
@@ -208,5 +264,6 @@
    ══════════════════════════════════════════════════════════════════════════ */
 @media (prefers-reduced-motion:reduce){
   .piece.veiled,.piece.marked,.piece.alchemist,.piece.armored::before{animation:none}
+  .cell.heraldzone::before{animation:none;opacity:.85}
   #board.fx-cascade{transition:none}
 }

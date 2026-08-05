@@ -40,6 +40,18 @@
 
 const FX = {
   mode: "full",          // "full" | "reduced" | "off"
+
+  /**
+   * Two dials, so the whole system can be nudged without editing 38 recipes.
+   *
+   * The numbers written into the recipes below are the design; these scale all
+   * of them at once. `rate` stretches every duration, delay and hold; `density`
+   * multiplies every particle count. Turn `rate` up if effects still feel rushed
+   * and `density` down if the board gets noisy.
+   */
+  rate: 1,
+  density: 1.9,
+
   seen: 0,               // high-water mark over G.fxSeq
   queue: [],
   playing: false,
@@ -264,7 +276,12 @@ FX.run = async function () {
   }
 };
 
-const sleepFX = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+/* Every wait in this file goes through here, so FX.rate stretches the gaps
+   between beats exactly as much as it stretches the beats themselves. */
+const sleepFX = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms * FX.rate)));
+
+/** Round a designed particle count through the density dial. */
+const fxN = (n) => Math.max(1, Math.round(n * FX.density));
 
 /* ══════════════════════════════════════════════════════════════════════════
    GEOMETRY
@@ -323,9 +340,13 @@ function fxNode(cls, css) {
 /** Animate, then remove. Returns a promise that never rejects. */
 function fxPlay(el, frames, ms, opts) {
   let a;
+  const o = Object.assign({ easing: "ease-out", fill: "forwards" }, opts || {});
+  // The rate dial has to reach the delay as well as the duration, or a staggered
+  // set of waves would slow down while its stagger stayed put and bunch together.
+  o.duration = Math.max(1, ms * FX.rate);
+  if (o.delay) o.delay = o.delay * FX.rate;
   try {
-    a = el.animate(frames, Object.assign(
-      { duration: Math.max(1, ms), easing: "ease-out", fill: "forwards" }, opts || {}));
+    a = el.animate(frames, o);
   } catch (e) {
     el.remove();
     return Promise.resolve();
@@ -410,7 +431,7 @@ function fxShatter(i, pd, opts) {
   opts = opts || {};
   const c = opts.at || fxCtr(i);
   const S = fxSize();
-  const n = opts.shards || 14;
+  const n = fxN(opts.shards || 14);
   const color = opts.color
     || (pd && pd.form && FX_FORM[pd.form]) || (pd ? FX_OWNER(pd.owner) : FX_C.dead);
   const pull = opts.toward || null;      // Eye For An Eye drags shards inward
@@ -450,7 +471,7 @@ function fxDissolve(i, pd, opts) {
 
   // Motes drift UP as the body sinks. The two directions are the whole point:
   // something is leaving, not being knocked over.
-  const motes = opts.motes == null ? 8 : opts.motes;
+  const motes = fxN(opts.motes == null ? 8 : opts.motes);
   const gather = opts.gather || null;    // Juggernaut/Alchemist pull them in
   for (let k = 0; k < motes; k++) {
     const sz = S * rand(0.03, 0.07);
@@ -488,6 +509,159 @@ function fxRing(c, color, a, b, ms, opts) {
   ], ms, { easing: opts.easing || "ease-out" });
 }
 
+/**
+ * Distance from a point to the FARTHEST corner of the board.
+ *
+ * This is the radius that guarantees a wave covers the whole board no matter
+ * which square it starts on — a capture in the corner has to travel a lot
+ * further than one in the middle, and both should die at the edge rather than
+ * one stopping short and the other overshooting into nothing.
+ */
+function fxReach(c) {
+  const b = fxBoardRect();
+  return Math.max(
+    Math.hypot(c.x, c.y),
+    Math.hypot(b.width - c.x, c.y),
+    Math.hypot(c.x, b.height - c.y),
+    Math.hypot(b.width - c.x, b.height - c.y)
+  );
+}
+
+/**
+ * A shockwave: a ring that crosses the entire board and dissipates as it goes.
+ *
+ * Deliberately not built on fxRing. That one grows with transform:scale(), which
+ * scales the border along with the box — fine at the 1.3-4.5x the local rings
+ * use, useless here, where reaching the far corner of a 12x12 board means a
+ * diameter of thirty-odd cells and would turn a 2px stroke into a 60px disc.
+ *
+ * So this grows by animating its own width and height, held centred by a
+ * transform that never changes. That puts the stroke under our control, and the
+ * stroke is most of the effect: 5px at the point of impact thinning to 1px at
+ * the rim is what reads as a wave losing energy rather than a circle inflating.
+ *
+ * The opacity curve is weighted late on purpose. An ease-out fade would be gone
+ * by the halfway mark and the wave would look like it stopped in the middle of
+ * the board; this one is still faintly there when it arrives at the edge, which
+ * is the whole point of sending it that far.
+ *
+ * `opts.reach` (0-1) stops it short — for an impact that was blocked rather than
+ * landed. `opts.count` fires several staggered waves; one wave reads as a
+ * diagram, three read as force.
+ */
+function fxShockwave(c, color, ms, opts) {
+  opts = opts || {};
+  const full = fxReach(c) * (opts.reach == null ? 1 : opts.reach);
+  const count = opts.count == null ? 3 : opts.count;
+  const start = fxSize() * (opts.from == null ? 0.5 : opts.from);
+  const out = [];
+
+  for (let k = 0; k < count; k++) {
+    // Trailing waves are dimmer, thinner and slightly shorter — an echo, not a
+    // copy. Without the falloff three waves just look like a thick one.
+    const fade = 1 - k * 0.28;
+    const el = fxNode("fx-wave" + (opts.cls ? " " + opts.cls : ""), {
+      left: c.x + "px", top: c.y + "px",
+      width: start + "px", height: start + "px",
+      color,
+    });
+    const end = full * 2 * (1 - k * 0.06);
+    out.push(fxPlay(el, [
+      { width: start + "px", height: start + "px",
+        borderWidth: (5 * fade) + "px", opacity: 0.85 * fade },
+      { width: (end * .4) + "px", height: (end * .4) + "px",
+        borderWidth: (3.2 * fade) + "px", opacity: 0.55 * fade, offset: .4 },
+      { width: (end * .75) + "px", height: (end * .75) + "px",
+        borderWidth: (1.9 * fade) + "px", opacity: 0.22 * fade, offset: .75 },
+      // Scaled by `fade` like every other stop, or a trailing wave that started
+      // thinner than 1px would get THICKER as it died. Floored so it cannot
+      // vanish into a sub-pixel before it reaches the edge.
+      { width: end + "px", height: end + "px",
+        borderWidth: Math.max(0.5, 1 * fade) + "px", opacity: 0 },
+    ], ms, { delay: k * 70, easing: "cubic-bezier(.16,.72,.34,1)" }));
+  }
+  return Promise.all(out);
+}
+
+/**
+ * Kick the board.
+ *
+ * Applied to #boardstack rather than #board, and that is not incidental:
+ * #fxlayer is a SIBLING of #board inside the stack, so shaking the board alone
+ * would leave every ghost in flight sitting still while the squares it is
+ * travelling between move out from under it. Shaking the wrapper moves both.
+ */
+function fxShake(px, ms) {
+  if (FX.mode !== "full") return Promise.resolve();
+  const stack = document.getElementById("boardstack");
+  if (!stack || fxPrefersReducedMotion()) return Promise.resolve();
+
+  const steps = 7;
+  const frames = [{ transform: "translate(0,0)" }];
+  for (let k = 1; k < steps; k++) {
+    const decay = 1 - k / steps;             // energy bleeding off
+    frames.push({
+      transform: `translate(${rand(-px, px) * decay}px,${rand(-px, px) * decay}px)`,
+      offset: k / steps,
+    });
+  }
+  frames.push({ transform: "translate(0,0)" });
+  try {
+    stack.animate(frames, { duration: ms * FX.rate, easing: "linear" });
+  } catch (e) {}
+  return Promise.resolve();
+}
+
+const fxPrefersReducedMotion = () =>
+  !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+/**
+ * What an event leaves behind on the square it happened on.
+ *
+ * Everything else in this file vanishes completely the moment it ends, so a
+ * board a second after a capture looks exactly like a board where nothing
+ * happened. This is the trace.
+ */
+function fxAfterglow(i, color, ms, opts) {
+  opts = opts || {};
+  const S = fxSize();
+  const c = fxCtr(i);
+  const d = S * (opts.spread || 1.9);
+  const el = fxNode("fx-afterglow", {
+    left: (c.x - d / 2) + "px", top: (c.y - d / 2) + "px",
+    width: d + "px", height: d + "px", color,
+  });
+  return fxPlay(el, [
+    { opacity: 0 },
+    { opacity: opts.peak == null ? .5 : opts.peak, offset: .12 },
+    { opacity: 0 },
+  ], ms || 900, { easing: "cubic-bezier(.1,.5,.3,1)" });
+}
+
+/** Debris: shards stretched along their direction of travel. */
+function fxStreaks(c, color, n, ms, opts) {
+  opts = opts || {};
+  const S = fxSize();
+  const bias = opts.bias;             // a direction to throw along, if any
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const ang = bias != null ? bias + rand(-0.7, 0.7) : rand(0, Math.PI * 2);
+    const len = S * rand(.28, .62);
+    const el = fxNode("fx-streak", {
+      left: c.x + "px", top: (c.y - S * .028) + "px",
+      width: len + "px", height: (S * .056) + "px",
+      color,
+      transformOrigin: "0 50%",
+    });
+    const d = S * rand(.55, 1.35);
+    out.push(fxPlay(el, [
+      { transform: `rotate(${ang}rad) translateX(0) scaleX(.4)`, opacity: .9 },
+      { transform: `rotate(${ang}rad) translateX(${d}px) scaleX(1)`, opacity: 0 },
+    ], ms * rand(.75, 1.15), { delay: rand(0, ms * .12) }));
+  }
+  return Promise.all(out);
+}
+
 /** A soft flash of light. */
 function fxGlow(c, color, spread, ms, opts) {
   opts = opts || {};
@@ -509,6 +683,7 @@ function fxSparks(c, color, n, ms, opts) {
   opts = opts || {};
   const S = fxSize();
   const out = [];
+  n = fxN(n);
   for (let k = 0; k < n; k++) {
     const sz = S * rand(0.035, 0.07);
     const ang = rand(0, Math.PI * 2);
@@ -630,24 +805,39 @@ function fxCastTell(caster) {
    passes over the victim, not after it has already landed.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/*
+ * Holds grow by roughly half again, while the effects themselves grow by nearly
+ * double. That gap is deliberate. Effects then run INTO each other instead of
+ * queueing politely end to end, which is most of what makes a board feel busy
+ * rather than narrated — a three-hop chain-jump now has overlapping shockwaves,
+ * compounding with the arc that already climbs hop by hop.
+ *
+ * `step` is the exception, here and everywhere: it keeps its old 230ms exactly.
+ * It is the quiet baseline all of this is measured against, and raising it would
+ * flatten the contrast the rest of the pass exists to create.
+ */
 const FX_HOLD = {
-  move:        (e) => (e.kind === "capture" ? 200 : e.kind === "swap" ? 380 : e.kind === "mind" ? 260 : 230),
-  death:       (e) => (e.kind === "sacrifice" ? 260 : e.kind === "eye" ? 300 : 210),
-  armor:       () => 300,
-  eyeTether:   () => 70,
-  promote:     () => 400,
-  transform:   (e) => (e.form === "juggernaut" ? 520 : 380),
-  sentinelHalt:() => 150,
-  spell:       (e) => (FX_BIG[e.id] ? 520 : 200),
-  hopscotch:   () => 420,
-  evasive:     () => 380,
-  mirror:      () => 560,
-  veil:        () => 470,
-  mind:        () => 640,
-  eye:         () => 560,
-  chronos:     () => 1150,
-  cascade:     () => 1200,
-  martyr:      () => 1150,
+  move:        (e) => (e.kind === "capture" ? 300
+                     : e.kind === "swap"    ? 560
+                     : e.kind === "phase"   ? 520
+                     : e.kind === "mind"    ? 400
+                     : 230),                            // step and herald: untouched
+  death:       (e) => (e.kind === "sacrifice" ? 400 : e.kind === "eye" ? 450 : 320),
+  armor:       () => 450,
+  eyeTether:   () => 110,
+  promote:     () => 600,
+  transform:   (e) => (e.form === "juggernaut" ? 780 : 570),
+  sentinelHalt:() => 230,
+  spell:       (e) => (FX_BIG[e.id] ? 700 : 300),
+  hopscotch:   () => 630,
+  evasive:     () => 570,
+  mirror:      () => 840,
+  veil:        () => 700,
+  mind:        () => 900,
+  eye:         () => 840,
+  chronos:     () => 1500,
+  cascade:     () => 1600,
+  martyr:      () => 1550,
 };
 
 FX.holdOf = function (e) {
@@ -700,29 +890,44 @@ FX_PLAY.move = function (e) {
   else FX.chain = 0;
   const step = Math.min(FX.chain, 3);
 
-  const ms = e.kind === "capture" ? 420 : e.kind === "mind" ? 300 : 230;
-  const lift = (e.kind === "capture" ? 0.4 : 0.18) + step * 0.08;
+  // A plain step is the one thing in this file that did NOT get louder. It is
+  // the baseline — every other effect is read against how quiet this one is.
+  const quiet = e.kind === "step" || e.kind === "herald";
+
+  const ms = e.kind === "capture" ? 760 : e.kind === "mind" ? 540 : quiet ? 230 : 420;
+  const lift = (e.kind === "capture" ? 0.46 : 0.18) + step * 0.1;
 
   FX.mask(e.to);
   const g = fxGhost(e.from, pd);
-  // The square comes back the moment the ghost lands — the glow below outlives
-  // the travel by a couple of hundred milliseconds and must not gate it.
+  // The square comes back the moment the ghost lands — the wave below outlives
+  // the travel by half a second and must not gate it.
   const done = FX.landing(e.to, fxGlide(g, e.from, e.to, ms, {
     lift,
-    peak: e.kind === "capture" ? 1.4 : 1.15,
+    peak: e.kind === "capture" ? 1.5 : 1.15,
     pd,
-    trailCount: e.kind === "capture" ? 3 + step : 2,
+    trailCount: e.kind === "capture" ? 4 + step : 2,
   }));
 
   const land = fxCtr(e.to);
+  const own = FX_OWNER(pd.owner);
   const extras = [
-    sleepFX(ms * 0.86).then(() => fxGlow(land, FX_OWNER(pd.owner), 0.8, 220, { peak: .32 })),
+    sleepFX(ms * 0.86).then(() => fxGlow(land, own, quiet ? 0.8 : 1.4, quiet ? 220 : 380,
+      { peak: quiet ? .32 : .5 })),
   ];
 
   // The Herald's bonus step is owed to a piece the player did not click, so it
   // says where it came from: the banner's colour trails the pawn.
   if (e.kind === "herald") {
-    extras.push(fxRing(fxCtr(e.from), FX_OWNER(pd.owner), .5, 1.5, 320));
+    extras.push(fxRing(fxCtr(e.from), own, .5, 1.5, 320));
+  }
+
+  // A capture lands with everything: the impact wave belongs to the death event
+  // that follows, but the arrival itself gets its own weight.
+  if (e.kind === "capture") {
+    extras.push(sleepFX(ms * .82).then(() => Promise.all([
+      fxShake(4 + step, 180),
+      fxStreaks(land, own, 5, 420, { bias: Math.atan2(land.y - fxCtr(e.from).y, land.x - fxCtr(e.from).x) }),
+    ])));
   }
 
   // A borrowed step. The grip that seized this piece was drawn a whole action
@@ -762,7 +967,7 @@ function fxSwap(e) {
   if (!a) return Promise.resolve();
   FX.mask(e.to);
   FX.mask(e.from);
-  const ms = 380;
+  const ms = 680;
   const ca = fxCtr(e.from), cb = fxCtr(e.to);
   const mid = { x: (ca.x + cb.x) / 2, y: (ca.y + cb.y) / 2 };
 
@@ -781,11 +986,23 @@ function fxSwap(e) {
   const out = [
     FX.landing(e.to, one(a, e.from, e.to, S * .18)),
     FX.landing(e.from, one(b, e.to, e.from, -S * .18)),
-    fxGlow(mid, FX_C.arcane, 1.6, ms, { peak: .6 }),
-    fxRing(mid, FX_C.arcane, .2, 2.2, ms),
+    fxGlow(mid, FX_C.arcane, 2.2, ms, { peak: .7 }),
+    fxRing(mid, FX_C.arcane, .2, 2.6, ms),
+    // Two pieces changing places across the whole board is arcane, not physical
+    // — the wave goes out from the midpoint of the exchange.
+    sleepFX(ms * .4).then(() => Promise.all([
+      fxShockwave(mid, FX_C.arcane, 800, { count: 3 }),
+      fxSparks(ca, FX_C.arcane, 6, 620),
+      fxSparks(cb, FX_C.arcane, 6, 620),
+      fxShake(4, 220),
+    ])),
   ];
   // Swapping with an ENEMY costs you a card. Say so, in the hue that means cost.
-  if (b && a && b.owner !== a.owner) out.push(sleepFX(ms * .45).then(() => fxGlow(mid, FX_C.dead, 1.1, 240, { peak: .5 })));
+  if (b && a && b.owner !== a.owner)
+    out.push(sleepFX(ms * .45).then(() => Promise.all([
+      fxGlow(mid, FX_C.dead, 1.7, 420, { peak: .6 }),
+      fxShockwave(mid, FX_C.dead, 700, { count: 1, reach: .55 }),
+    ])));
   return Promise.all(out);
 }
 
@@ -796,7 +1013,7 @@ function fxSwap(e) {
  */
 function fxPhase(e) {
   const pd = e.piece;
-  const ms = 420;
+  const ms = 700;
   FX.mask(e.to);
   const a = fxCtr(e.from), b = fxCtr(e.to);
   const S = fxSize();
@@ -820,12 +1037,22 @@ function fxPhase(e) {
   // Whatever it passed over: the square between the two ends.
   const midIdx = fxBetween(e.from, e.to);
   const flick = midIdx != null && G.board[midIdx]
-    ? sleepFX(ms * .35).then(() => fxGlow(fxCtr(midIdx), FX_C.frost, 1.2, 260, { peak: .7 }))
+    ? sleepFX(ms * .35).then(() => Promise.all([
+        fxGlow(fxCtr(midIdx), FX_C.frost, 1.8, 460, { peak: .85 }),
+        // It went THROUGH this piece. Ring the square it passed clean out of.
+        fxRing(fxCtr(midIdx), FX_C.frost, .4, 2.2, 520, { cls: "dashed" }),
+      ]))
     : Promise.resolve();
 
   return Promise.all([
     flatten, streak, flick,
-    sleepFX(ms * .75).then(() => fxRing(b, FX_C.frost, .4, 1.4, 300, { cls: "dashed" })),
+    fxShockwave(a, FX_C.frost, 700, { count: 2, reach: .7 }),
+    sleepFX(ms * .7).then(() => Promise.all([
+      fxShockwave(b, FX_C.frost, 700, { count: 2 }),
+      fxRing(b, FX_C.frost, .4, 1.7, 520, { cls: "dashed" }),
+      fxSparks(b, FX_C.frost, 7, 620),
+      fxShake(4, 200),
+    ])),
   ]);
 }
 
@@ -842,27 +1069,68 @@ function fxBetween(from, to) {
 FX_PLAY.death = function (e) {
   const pd = e.piece;
   if (!pd) return Promise.resolve();
+  const c = fxCtr(e.at);
+  const own = FX_OWNER(pd.owner);
 
-  // Given up, not struck down. Every sacrifice in the rules comes through here.
-  if (e.kind === "sacrifice") return fxDissolve(e.at, pd, { ms: 380 });
-
-  // Dragged down by its own prey — the shards are pulled back the way it came.
-  if (e.kind === "eye") {
+  // Given up, not struck down. Every sacrifice in the rules comes through here,
+  // and its wave runs INWARD — the exact inverse of an impact, because nothing
+  // hit this piece. It was offered.
+  if (e.kind === "sacrifice") {
     return Promise.all([
-      fxShatter(e.at, pd, { ms: 320, shards: 12, toward: FX._eyeAnchor || null }),
-      fxGlow(fxCtr(e.at), FX_C.dead, 1.4, 340, { peak: .7 }),
+      fxDissolve(e.at, pd, { ms: 690 }),
+      fxCollapse(c, own, 760, { count: 2 }),
+      fxAfterglow(e.at, own, 900, { peak: .38 }),
     ]);
   }
 
-  const c = fxCtr(e.at);
+  // Dragged down by its own prey — shards pulled back the way it came.
+  if (e.kind === "eye") {
+    return Promise.all([
+      fxShatter(e.at, pd, { ms: 620, shards: 14, toward: FX._eyeAnchor || null }),
+      fxGlow(c, FX_C.dead, 2.0, 620, { peak: .8 }),
+      fxShockwave(c, FX_C.dead, 940, { count: 3 }),
+      fxShake(6, 260),
+      fxAfterglow(e.at, FX_C.dead, 1000, { peak: .55 }),
+    ]);
+  }
+
+  // A kill. Core blowout, three waves to the board edge, debris, sparks, trace.
   const transformed = !!pd.form;
+  const heavy = transformed || pd.rank === "queen";
   return Promise.all([
-    fxGlow(c, "#ffffff", 1.0, 110, { peak: .9 }),
-    sleepFX(40).then(() => fxShatter(e.at, pd, { ms: 320, shards: transformed ? 16 : 14 })),
+    fxGlow(c, "#ffffff", 1.5, 190, { peak: .95 }),
+    fxShockwave(c, FX_C.dead, 760, { count: 3 }),
+    sleepFX(40).then(() => fxShatter(e.at, pd, { ms: 620, shards: transformed ? 17 : 14 })),
+    sleepFX(40).then(() => fxStreaks(c, transformed ? (FX_FORM[pd.form] || own) : own, 6, 560)),
+    fxSparks(c, FX_C.dead, 8, 700),
+    fxShake(heavy ? 6 : 4, heavy ? 240 : 180),
+    fxAfterglow(e.at, FX_C.dead, 1000, { peak: .55 }),
     // A transformed piece is worth double, and the board should say so.
-    transformed ? fxSparks(c, FX_C.gain, 4, 420) : Promise.resolve(),
+    transformed ? fxSparks(c, FX_C.gain, 5, 760) : Promise.resolve(),
   ]);
 };
+
+/** A shockwave run backwards: it converges on the square instead of leaving it. */
+function fxCollapse(c, color, ms, opts) {
+  opts = opts || {};
+  const full = fxReach(c) * (opts.reach == null ? .62 : opts.reach);
+  const count = opts.count == null ? 2 : opts.count;
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    const fade = 1 - k * 0.3;
+    const el = fxNode("fx-wave", {
+      left: c.x + "px", top: c.y + "px",
+      width: (full * 2) + "px", height: (full * 2) + "px",
+      color,
+    });
+    out.push(fxPlay(el, [
+      { width: (full * 2) + "px", height: (full * 2) + "px", borderWidth: "1px", opacity: 0 },
+      { width: (full * .9) + "px", height: (full * .9) + "px", borderWidth: "2.4px", opacity: .5 * fade, offset: .45 },
+      { width: (fxSize() * .3) + "px", height: (fxSize() * .3) + "px", borderWidth: "4px", opacity: 0 },
+    ], ms, { delay: k * 90, easing: "cubic-bezier(.4,.05,.5,1)" }));
+  }
+  return Promise.all(out);
+}
 
 /**
  * Armour held. This must never, for one frame, look like a death: no red, no
@@ -875,11 +1143,19 @@ FX_PLAY.armor = function (e) {
   const away = { x: c.x - src.x, y: c.y - src.y };
   const len = Math.hypot(away.x, away.y) || 1;
 
-  const out = [fxGlow(c, "#ffffff", 1.2, 200, { peak: .85 })];
+  const out = [
+    fxGlow(c, "#ffffff", 1.6, 320, { peak: .9 }),
+    // Stopped, not landed — so the wave is stopped too. It travels less than
+    // half way and dies, which is the difference between this and a kill.
+    fxShockwave(c, "#cfd6ef", 620, { count: 2, reach: .45 }),
+    fxStreaks(c, "#cfd6ef", 7, 520),
+    fxShake(3, 200),
+  ];
 
-  // Six segments of the ring spin off and fade.
-  for (let k = 0; k < 6; k++) {
-    const ang = (k / 6) * Math.PI * 2;
+  // Segments of the ring spin off and fade.
+  const segs = fxN(6);
+  for (let k = 0; k < segs; k++) {
+    const ang = (k / segs) * Math.PI * 2;
     const sz = S * .2;
     const seg = fxNode("fx-ring dashed", {
       left: (c.x + Math.cos(ang) * S * .42 - sz / 2) + "px",
@@ -903,7 +1179,7 @@ FX_PLAY.armor = function (e) {
       { transform: "translate(0,0) scale(1)" },
       { transform: `translate(${away.x / len * S * .08}px,${away.y / len * S * .08}px) scale(.88)`, offset: .3 },
       { transform: "translate(0,0) scale(1)" },
-    ], 340, { easing: "cubic-bezier(.3,1.4,.5,1)" }).then(() => FX.unmask(e.at)));
+    ], 620, { easing: "cubic-bezier(.3,1.4,.5,1)" }).then(() => FX.unmask(e.at)));
   }
   return Promise.all(out);
 };
@@ -943,10 +1219,10 @@ FX_PLAY.promote = function (e) {
     filter: "blur(2px)",
   });
 
-  // The crown descending IS the arrival. The ring and sparks that follow it are
+  // The crown descending IS the arrival. The waves and sparks that follow it are
   // celebration, and the new queen must already be standing there for them.
   const crowned = FX.landing(e.at,
-    sleepFX(200).then(() => fxGlyph(c, "♛", FX_C.time, 300, { size: .62, drop: .7 }))
+    sleepFX(360).then(() => fxGlyph(c, "♛", FX_C.time, 540, { size: .62, drop: .7 }))
   ).then(() => {
     const n = FX.pieceNode(e.at);
     if (n) n.animate(
@@ -955,18 +1231,25 @@ FX_PLAY.promote = function (e) {
   });
 
   return Promise.all([
-    fxRing(c, FX_C.time, 1.6, .55, 200),                       // anticipation
-    sleepFX(100).then(() => fxPlay(col, [
+    fxRing(c, FX_C.time, 1.6, .55, 360),                       // anticipation
+    sleepFX(180).then(() => fxPlay(col, [
       { transform: "scaleY(.1) translateY(40%)", opacity: 0 },
-      { transform: "scaleY(1) translateY(0)", opacity: .85, offset: .45 },
+      { transform: "scaleY(1) translateY(0)", opacity: .9, offset: .45 },
       { transform: "scaleY(1.05) translateY(-6%)", opacity: 0 },
-    ], 330, { easing: "cubic-bezier(.2,.8,.3,1)" })),
+    ], 600, { easing: "cubic-bezier(.2,.8,.3,1)" })),
     crowned,
-    sleepFX(360).then(() => Promise.all([
-      fxRing(c, FX_C.time, .3, 1.8, 260, { cls: "thick" }),
-      fxSparks(c, (k) => (k % 2 ? FX_C.time : own), 10, 420),
-      // Crowning pays 2 FP, and this is the one moment that is worth saying.
-      fxSparks(c, FX_C.gain, 2, 520),
+    // The crown lands and the board feels it, twice over: white for the crown
+    // itself, then a slower gold echo in the new queen's own colour.
+    sleepFX(620).then(() => Promise.all([
+      fxShockwave(c, FX_C.time, 950, { count: 3 }),
+      sleepFX(140).then(() => fxShockwave(c, own, 900, { count: 2, from: .8 })),
+      fxGlow(c, FX_C.time, 2.4, 520, { peak: .85 }),
+      fxShake(7, 300),
+      fxSparks(c, (k) => (k % 2 ? FX_C.time : own), 11, 780),
+      fxStreaks(c, own, 8, 640),
+      // Crowning pays 2 FP, and this is the one moment worth saying it.
+      fxSparks(c, FX_C.gain, 2, 900),
+      fxAfterglow(e.at, own, 1200, { peak: .6, spread: 2.4 }),
     ])),
   ]);
 };
@@ -981,12 +1264,28 @@ FX_PLAY.transform = function (e) {
   const S = fxSize();
   const sig = FX_TRANSFORM[e.form];
 
+  // Waves per form. A transformation is permanent and irreversible — a piece
+  // becoming something it can never stop being — so every one of them announces
+  // itself across the whole board, in the hue that form owns.
+  const WAVE = {
+    juggernaut: { count: 2, ms: 1100 },   // heavy, slow, armoured
+    phaser:     { count: 3, ms: 700 },    // fast and electric
+    sentinel:   { count: 2, ms: 900, cls: "square" },   // it is terrain now
+    herald:     { count: 1, ms: 860 },
+    enchanter:  { count: 3, ms: 950 },    // interference
+    alchemist:  { count: 2, ms: 900 },
+  }[e.form] || { count: 2, ms: 810 };
+
   const base = Promise.all([
-    fxGlow(c, own, 1.3, 200, { peak: .7 }),
-    sleepFX(100).then(() => Promise.all([
-      fxGlyph(c, F.glyph || "✦", hue, 300, { size: .6 }),
-      fxRing(c, hue, .35, 1.9, 300, { cls: "thick" }),
+    fxGlow(c, own, 1.8, 340, { peak: .8 }),
+    fxShockwave(c, hue, WAVE.ms, { count: WAVE.count, cls: WAVE.cls }),
+    fxShake(5, 240),
+    sleepFX(160).then(() => Promise.all([
+      fxGlyph(c, F.glyph || "✦", hue, 540, { size: .6 }),
+      fxRing(c, hue, .35, 2.2, 540, { cls: "thick" }),
+      fxSparks(c, hue, 7, 700),
     ])),
+    fxAfterglow(e.at, hue, 1200, { peak: .5, spread: 2.2 }),
   ]);
 
   return sig ? Promise.all([base, sig(e, { c, S, own, hue })]) : base;
@@ -996,7 +1295,7 @@ const FX_TRANSFORM = {
   /* Paid for with a pawn, and you can watch it being paid: the motes of the
      sacrifice fly INTO the Juggernaut. Then the armour locks on, ending exactly
      where the real .armored ring begins its slow spin. */
-  juggernaut: (e, k) => sleepFX(200).then(() => {
+  juggernaut: (e, k) => sleepFX(340).then(() => {
     const out = [];
     for (let n = 0; n < 6; n++) {
       const ang = (n / 6) * Math.PI * 2;
@@ -1008,7 +1307,7 @@ const FX_TRANSFORM = {
       out.push(fxPlay(seg, [
         { transform: `translate(${Math.cos(ang) * k.S}px,${Math.sin(ang) * k.S}px) scale(.5)`, opacity: 0 },
         { transform: `translate(${Math.cos(ang) * k.S * .46}px,${Math.sin(ang) * k.S * .46}px) scale(1)`, opacity: 1 },
-      ], 320, { easing: "cubic-bezier(.2,.9,.3,1)" }));
+      ], 560, { easing: "cubic-bezier(.2,.9,.3,1)" }));
     }
     return Promise.all(out);
   }),
@@ -1023,9 +1322,9 @@ const FX_TRANSFORM = {
         { transform: "translateX(0)", opacity: .5 },
         { transform: `translateX(${dir * k.S * .16}px)`, opacity: .5, offset: .45 },
         { transform: "translateX(0)", opacity: 0 },
-      ], 380, { easing: "ease-in-out" }));
+      ], 680, { easing: "ease-in-out" }));
     }
-    out.push(sleepFX(300).then(() => fxGlow(k.c, FX_C.frost, 1.5, 220, { peak: .9 })));
+    out.push(sleepFX(520).then(() => fxGlow(k.c, FX_C.frost, 2.1, 400, { peak: .95 })));
     return Promise.all(out);
   },
 
@@ -1039,10 +1338,12 @@ const FX_TRANSFORM = {
         { borderRadius: "50%", transform: "scale(1)" },
         { borderRadius: "30%", transform: "scale(1.12)", offset: .45 },
         { borderRadius: "14%", transform: "scale(1.077)" },
-      ], 420, { easing: "cubic-bezier(.3,1.5,.5,1)" }),
-      sleepFX(360).then(() => Promise.all([
-        fxRing(k.c, FX_C.stone, .8, 2.1, 320, { cls: "square thick" }),
-        fxSparks(k.c, FX_C.stone, 7, 340),
+      ], 740, { easing: "cubic-bezier(.3,1.5,.5,1)" }),
+      sleepFX(620).then(() => Promise.all([
+        fxRing(k.c, FX_C.stone, .8, 2.4, 560, { cls: "square thick" }),
+        fxSparks(k.c, FX_C.stone, 8, 600),
+        fxStreaks(k.c, FX_C.stone, 7, 560),
+        fxShake(6, 280),                    // terrain arriving
       ])),
     ]);
   },
@@ -1051,7 +1352,7 @@ const FX_TRANSFORM = {
      reaches — a friendly pawn landing ADJACENT gets the bonus step. The effect
      is the rule. */
   herald: (e, k) => {
-    const out = [sleepFX(120).then(() => {
+    const out = [sleepFX(210).then(() => {
       const w = k.S * .7, h = k.S * .34;
       const flag = fxNode("", {
         left: k.c.x + "px", top: (k.c.y - h / 2) + "px",
@@ -1063,9 +1364,12 @@ const FX_TRANSFORM = {
         { transform: "scaleX(0)", opacity: .95 },
         { transform: "scaleX(1)", opacity: .95, offset: .5 },
         { transform: "scaleX(1)", opacity: 0 },
-      ], 420);
+      ], 740);
     })];
-    for (const d of [0, 200]) out.push(sleepFX(180 + d).then(() => fxRing(k.c, k.own, .5, 3.2, 480, { from: .55 })));
+    // Pulses out to exactly the radius the rule reaches, which is the same
+    // radius the permanent .heraldzone aura will now hold from here on.
+    for (const d of [0, 340]) out.push(sleepFX(310 + d).then(() => fxRing(k.c, k.own, .5, 3.2, 840, { from: .55 })));
+    out.push(sleepFX(420).then(() => fxSparks(k.c, k.own, 6, 760)));
     return Promise.all(out);
   },
 
@@ -1074,7 +1378,8 @@ const FX_TRANSFORM = {
   enchanter: (e, k) => Promise.all([
     (() => {
       const out = [];
-      for (let n = 0; n < 10; n++) {
+      const orbiting = fxN(10);
+      for (let n = 0; n < orbiting; n++) {
         const a0 = rand(0, Math.PI * 2);
         const sz = k.S * rand(.04, .08);
         const m = fxNode("fx-mote", {
@@ -1085,17 +1390,17 @@ const FX_TRANSFORM = {
           { transform: `translate(${Math.cos(a0) * k.S}px,${Math.sin(a0) * k.S}px)`, opacity: 0 },
           { transform: `translate(${Math.cos(a0 + 2.2) * k.S * .6}px,${Math.sin(a0 + 2.2) * k.S * .6}px)`, opacity: 1, offset: .5 },
           { transform: "translate(0,0) scale(.2)", opacity: 0 },
-        ], 520, { easing: "ease-in-out" }));
+        ], 900, { easing: "ease-in-out" }));
       }
       return Promise.all(out);
     })(),
-    fxRing(k.c, FX_C.arcane, .4, 4.5, 600, { from: .4 }),
-    sleepFX(140).then(() => fxRing(k.c, FX_C.arcane, .4, 3.6, 560, { from: .35 })),
+    fxRing(k.c, FX_C.arcane, .4, 4.5, 1000, { from: .4 }),
+    sleepFX(240).then(() => fxRing(k.c, FX_C.arcane, .4, 3.6, 950, { from: .35 })),
   ]),
 
   /* It will never move again; it makes Focus instead. Green, and the flask
      fills from the bottom. */
-  alchemist: (e, k) => sleepFX(140).then(() => {
+  alchemist: (e, k) => sleepFX(250).then(() => {
     const w = k.S * .5;
     const jar = fxNode("", {
       left: (k.c.x - w / 2) + "px", top: (k.c.y - w / 2) + "px",
@@ -1108,8 +1413,8 @@ const FX_TRANSFORM = {
         { transform: "scaleY(0)", opacity: .8 },
         { transform: "scaleY(1)", opacity: .55, offset: .6 },
         { transform: "scaleY(1)", opacity: 0 },
-      ], 460, { easing: "cubic-bezier(.4,.2,.2,1)" }),
-      fxSparks(k.c, FX_C.gain, 6, 460),
+      ], 820, { easing: "cubic-bezier(.4,.2,.2,1)" }),
+      fxSparks(k.c, FX_C.gain, 7, 820),
     ]);
   }),
 };
@@ -1121,10 +1426,14 @@ FX_PLAY.sentinelHalt = function (e) {
   const out = [];
   for (const w of (e.walls || [])) {
     const c = fxCtr(w);
-    out.push(fxRing(c, FX_C.stone, .8, 1.5, 300, { cls: "square thick", from: 1 }));
-    out.push(fxLine(c, to, "fx-beam", FX_C.stone, 3, 280));
+    out.push(fxRing(c, FX_C.stone, .8, 1.8, 540, { cls: "square thick", from: 1 }));
+    out.push(fxLine(c, to, "fx-beam", FX_C.stone, 4, 500));
+    // Terrain refusing to move. The wave is square-cornered and short — it is
+    // the Sentinel's own shape, and it does not travel because nothing gave.
+    out.push(fxShockwave(c, FX_C.stone, 620, { count: 2, reach: .38, cls: "square" }));
   }
-  out.push(fxRing(to, FX_C.stone, 1.3, .9, 280, { cls: "square" }));
+  out.push(fxRing(to, FX_C.stone, 1.3, .9, 500, { cls: "square" }));
+  out.push(fxShake(3, 200));
   return Promise.all(out);
 };
 
@@ -1138,15 +1447,23 @@ FX_PLAY.sentinelHalt = function (e) {
  */
 FX_PLAY.spell = function (e) {
   const S = SPELLS[e.id] || {};
+  const own = FX_OWNER(e.caster);
   const out = [fxCastTell(e.caster)];
   if (FX_BIG[e.id]) {
     // These four hold input. The lock is released when the banner ends, and by
     // run()'s finally as a backstop, so a thrown effect cannot strand it.
     FX.lock++;
     out.push(
-      fxBanner(S.name || e.id, S.flavor || null, FX_OWNER(e.caster), 1250)
+      fxBanner(S.name || e.id, S.flavor || null, own, 1800)
         .then(() => { FX.lock = Math.max(0, FX.lock - 1); })
     );
+    // A rolling shake rather than a single kick — these bend the rules, and
+    // that should feel less like a hit and more like the ground giving.
+    out.push(fxShake(12, 600));
+    out.push(sleepFX(420).then(() => fxShake(8, 500)));
+  } else {
+    // Even an ordinary spell announces itself from the caster's edge.
+    out.push(sleepFX(120).then(() => fxShockwave(fxMid(), own, 1050, { count: 2, from: 1.6 })));
   }
   return Promise.all(out);
 };
@@ -1168,15 +1485,23 @@ FX_PLAY.hopscotch = function (e) {
     { transform: `translate(${dx * .68}px,${dy * .68 - S * .3}px) scale(1.25)`, offset: .68 },
     { transform: `translate(${dx * .58}px,${dy * .58 - S * .28}px) scale(1.22)`, offset: .76 },
     { transform: `translate(${dx}px,${dy}px) scale(1)` },
-  ], 470, { easing: "linear" }));
+  ], 820, { easing: "linear" }));
 
   // What it leaves behind at the square it is being pulled out of.
   const after = fxGhost(e.from, pd);
   after.classList.add("fx-trail");
   return Promise.all([
     stutter,
-    fxPlay(after, [{ opacity: .4, filter: "saturate(.2)" }, { opacity: 0 }], 260),
-    sleepFX(400).then(() => fxGlow(b, FX_C.frost, .9, 240, { peak: .4 })),
+    fxPlay(after, [{ opacity: .4, filter: "saturate(.2)" }, { opacity: 0 }], 460),
+    // Time going backwards, so the wave does too — it converges on the square
+    // the piece is being pulled back to.
+    sleepFX(200).then(() => fxCollapse(b, FX_C.frost, 900, { count: 3, reach: .9 })),
+    sleepFX(700).then(() => Promise.all([
+      fxGlow(b, FX_C.frost, 1.6, 460, { peak: .6 }),
+      fxShockwave(b, FX_C.frost, 800, { count: 2 }),
+      fxShake(4, 220),
+      fxAfterglow(e.to, FX_C.frost, 900, { peak: .4 }),
+    ])),
   ]);
 };
 
@@ -1186,7 +1511,7 @@ FX_PLAY.evasive = function (e) {
   FX.mask(e.to);
   const g = fxGhost(e.from, pd);
   const a = fxCtr(e.from), b = fxCtr(e.to);
-  const ms = 420;
+  const ms = 690;
 
   const out = [FX.landing(e.to, fxPlay(g, [
     { transform: "translate(0,0) rotate(0) scale(1)" },
@@ -1204,9 +1529,15 @@ FX_PLAY.evasive = function (e) {
       { opacity: 0 }, { opacity: .35, offset: .18 }, { opacity: 0 },
     ], ms * .6, { delay: ms * t * .55, fill: "both" }));
   }
-  out.push(fxGlow(a, "#cfd6ef", .8, 260, { peak: .3 }));
+  out.push(fxGlow(a, "#cfd6ef", 1.3, 460, { peak: .4 }));
+  out.push(fxStreaks(a, "#cfd6ef", 6, 520,
+    { bias: Math.atan2(a.y - b.y, a.x - b.x) }));   // dust kicked back the way it fled
+  out.push(fxShockwave(a, "#cfd6ef", 700, { count: 2, reach: .55 }));
   // It bought the escape with its next move; the pending-penalty hue says so.
-  out.push(sleepFX(ms * .8).then(() => fxRing(b, FX_C.frost, .5, 1.4, 320, { cls: "dashed" })));
+  out.push(sleepFX(ms * .8).then(() => Promise.all([
+    fxRing(b, FX_C.frost, .5, 1.7, 560, { cls: "dashed" }),
+    fxAfterglow(e.to, FX_C.frost, 800, { peak: .35 }),
+  ])));
   return Promise.all(out);
 };
 
@@ -1230,7 +1561,7 @@ FX_PLAY.mirror = function (e) {
         { transform: "translateX(0) scaleY(1)", opacity: .9 },
         { transform: `translateX(${off}px) scaleY(.2)`, opacity: 0 },
       ];
-      out.push(fxPlay(sl, reverse ? frames.slice().reverse() : frames, 220,
+      out.push(fxPlay(sl, reverse ? frames.slice().reverse() : frames, 380,
         { easing: reverse ? "cubic-bezier(.2,.9,.3,1)" : "ease-in" }));
     }
     return Promise.all(out);
@@ -1239,14 +1570,21 @@ FX_PLAY.mirror = function (e) {
   const a = fxCtr(e.from), b = fxCtr(e.to);
   const out = [
     shatterSlices(a, false),
-    sleepFX(150).then(() => fxSweep(Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI, 320)),
+    fxCollapse(a, FX_C.time, 620, { count: 2, reach: .7 }),   // she is pulled out
+    sleepFX(260).then(() => fxSweep(Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI, 560)),
     // Reassembling on the far side IS the arrival; the Distortion Field ripples
     // below run on afterwards and must not hold the queen off her square.
-    FX.landing(e.to, sleepFX(320).then(() => shatterSlices(b, true))),
-    sleepFX(470).then(() => fxGlow(b, FX_C.time, 1.4, 260, { peak: .7 })),
+    FX.landing(e.to, sleepFX(540).then(() => shatterSlices(b, true))),
+    sleepFX(800).then(() => Promise.all([
+      fxGlow(b, FX_C.time, 2.2, 460, { peak: .8 }),
+      fxShockwave(b, FX_C.time, 900, { count: 3 }),           // and slammed back in
+      fxSparks(b, FX_C.time, 8, 700),
+      fxShake(5, 240),
+      fxAfterglow(e.to, FX_C.time, 900, { peak: .45 }),
+    ])),
   ];
   for (const j of (e.ripples || []))
-    out.push(sleepFX(500).then(() => fxRing(fxCtr(j), FX_C.frost, .4, 1.6, 300, { cls: "dashed" })));
+    out.push(sleepFX(860).then(() => fxRing(fxCtr(j), FX_C.frost, .4, 2, 560, { cls: "dashed" })));
   return Promise.all(out);
 };
 
@@ -1256,11 +1594,17 @@ FX_PLAY.mirror = function (e) {
 FX_PLAY.veil = function (e) {
   const c = fxCtr(e.at), S = fxSize();
   const out = [
-    fxRing(c, FX_C.stun, 2.2, 1, 240, { cls: "thick", from: .2, easing: "cubic-bezier(.3,1.3,.4,1)" }),
-    sleepFX(220).then(() => fxGlow(c, FX_C.stun, 1.3, 220, { peak: .85 })),
+    fxRing(c, FX_C.stun, 2.2, 1, 420, { cls: "thick", from: .2, easing: "cubic-bezier(.3,1.3,.4,1)" }),
+    sleepFX(390).then(() => Promise.all([
+      fxGlow(c, FX_C.stun, 2.0, 400, { peak: .9 }),
+      fxShockwave(c, FX_C.stun, 1050, { count: 3 }),   // the stun rolls outward
+      fxShake(4, 220),
+      fxAfterglow(e.at, FX_C.stun, 900, { peak: .45 }),
+    ])),
   ];
-  for (let k = 0; k < 12; k++) {
-    const ang = (k / 12) * Math.PI * 2;
+  const arcs = fxN(12);
+  for (let k = 0; k < arcs; k++) {
+    const ang = (k / arcs) * Math.PI * 2;
     const len = S * rand(.14, .26);
     const el = fxNode("fx-beam", {
       left: (c.x + Math.cos(ang) * S * .42) + "px",
@@ -1272,9 +1616,9 @@ FX_PLAY.veil = function (e) {
     out.push(fxPlay(el, [
       { opacity: 0 }, { opacity: 1, offset: .2 }, { opacity: 0, offset: .35 },
       { opacity: 1, offset: .6 }, { opacity: 0 },
-    ], 420, { delay: 200 + rand(0, 120), easing: "steps(1,end)" }));
+    ], 740, { delay: 350 + rand(0, 210), easing: "steps(1,end)" }));
   }
-  out.push(sleepFX(340).then(() => fxRing(c, FX_C.stun, 1, 1.9, 260)));
+  out.push(sleepFX(600).then(() => fxRing(c, FX_C.stun, 1, 2.2, 460)));
   return Promise.all(out);
 };
 
@@ -1290,14 +1634,22 @@ FX_PLAY.eye = function (e) {
     boxShadow: `0 0 18px ${FX_C.dead}`,
   });
   return Promise.all([
-    fxRing(c, FX_C.dead, 2, .9, 220, { cls: "thick", from: .3 }),
-    sleepFX(180).then(() => fxPlay(iris, [
+    fxRing(c, FX_C.dead, 2, .9, 400, { cls: "thick", from: .3 }),
+    sleepFX(300).then(() => fxPlay(iris, [
       { transform: "scaleY(.04)", opacity: 0 },
       { transform: "scaleY(1)", opacity: 1, offset: .35 },
       { transform: "scaleY(1)", opacity: 1, offset: .72 },
       { transform: "scaleY(.04)", opacity: 0 },
-    ], 460, { easing: "cubic-bezier(.3,.9,.3,1)" })),
-    sleepFX(420).then(() => fxRing(c, FX_C.dead, .8, 2, 300)),
+    ], 820, { easing: "cubic-bezier(.3,.9,.3,1)" })),
+    // The eye opens and the threat spreads. The opponent has to SEE this —
+    // the whole card only works if they do — so it goes to the edges.
+    sleepFX(560).then(() => Promise.all([
+      fxShockwave(c, FX_C.dead, 1050, { count: 3 }),
+      fxRing(c, FX_C.dead, .8, 2.3, 560),
+      fxSparks(c, FX_C.dead, 7, 700),
+      fxShake(4, 220),
+      fxAfterglow(e.at, FX_C.dead, 1000, { peak: .5 }),
+    ])),
   ]);
 };
 
@@ -1313,34 +1665,41 @@ FX_PLAY.mind = function (e) {
   const own = FX_OWNER(e.caster);
   const out = [];
 
-  for (let k = 0; k < 3; k++) {
-    const off = (k - 1) * S * .8;
+  const arms = Math.max(3, fxN(3));
+  for (let k = 0; k < arms; k++) {
+    const off = (k - (arms - 1) / 2) * S * .8;
     const from = { x: src.x + off, y: src.y };
-    out.push(fxLine(from, c, "fx-tendril", own, Math.max(3, S * .1), 900, {
+    out.push(fxLine(from, c, "fx-tendril", own, Math.max(3, S * .1), 1350, {
       frames: [
         { transform: `rotate(${Math.atan2(c.y - from.y, c.x - from.x) * 180 / Math.PI}deg) scaleX(0) scaleY(1)`, opacity: .9 },
         { transform: `rotate(${Math.atan2(c.y - from.y, c.x - from.x) * 180 / Math.PI}deg) scaleX(1) scaleY(1.3)`, opacity: .9, offset: .45 },
         { transform: `rotate(${Math.atan2(c.y - from.y, c.x - from.x) * 180 / Math.PI}deg) scaleX(1) scaleY(.7)`, opacity: .75, offset: .7 },
         { transform: `rotate(${Math.atan2(c.y - from.y, c.x - from.x) * 180 / Math.PI}deg) scaleX(1) scaleY(1)`, opacity: 0 },
       ],
-      opts: { delay: k * 60, easing: "cubic-bezier(.4,.1,.3,1)" },
+      opts: { delay: k * 90, easing: "cubic-bezier(.4,.1,.3,1)" },
     }));
   }
 
   // The piece changes hands: it takes on the caster's colour, then jerks.
   const p = G.board[e.at];
   if (p) {
-    out.push(sleepFX(420).then(() => {
+    out.push(sleepFX(630).then(() => {
       const g = fxGhost(e.at, { owner: e.caster, rank: p.rank, form: p.form });
       return fxPlay(g, [
         { opacity: 0, transform: "translate(0,0)" },
         { opacity: .75, transform: "translate(0,0)", offset: .3 },
         { opacity: .75, transform: `translate(${rand(-1, 1) * S * .1}px,${-S * .06}px)`, offset: .62 },
         { opacity: .6, transform: "translate(0,0)" },
-      ], 620, { easing: "cubic-bezier(.4,1.6,.5,1)" });
+      ], 950, { easing: "cubic-bezier(.4,1.6,.5,1)" });
     }));
   }
-  out.push(sleepFX(460).then(() => fxRing(c, FX_C.arcane, 1.6, .9, 280, { cls: "thick", from: .8 })));
+  // The grip closes, and the board registers it.
+  out.push(sleepFX(690).then(() => Promise.all([
+    fxRing(c, FX_C.arcane, 1.6, .9, 460, { cls: "thick", from: .8 }),
+    fxShockwave(c, FX_C.arcane, 1100, { count: 3 }),
+    fxGlow(c, own, 2.0, 520, { peak: .75 }),
+    fxAfterglow(e.at, FX_C.arcane, 1100, { peak: .5 }),
+  ])));
   return Promise.all(out);
 };
 
@@ -1373,32 +1732,35 @@ FX_PLAY.chronos = function (e) {
     { transform: "scale(1)", opacity: .9, offset: .25 },
     { transform: "scale(1)", opacity: .9, offset: .78 },
     { transform: "scale(1.5)", opacity: 0 },
-  ], 1050));
+  ], 1800));
   out.push(fxPlay(hand, [
     { transform: "rotate(0deg)", opacity: .9 },
-    { transform: "rotate(-1080deg)", opacity: .9, offset: .78 },
-    { transform: "rotate(-1260deg)", opacity: 0 },
-  ], 1050, { easing: "cubic-bezier(.3,0,.6,1)" }));
+    { transform: "rotate(-1440deg)", opacity: .9, offset: .78 },
+    { transform: "rotate(-1680deg)", opacity: 0 },
+  ], 1800, { easing: "cubic-bezier(.3,0,.6,1)" }));
 
-  // Rings contracting inward, then expanding back out on the far side.
+  // Time collapsing inward, then blowing back out on the far side of the swap.
   for (let k = 0; k < 3; k++) {
-    out.push(sleepFX(180 + k * 90).then(() => fxRing(mid, FX_C.time, 2.4, .2, 460, { base: R / fxSize(), from: .4 })));
-    out.push(sleepFX(640 + k * 90).then(() => fxRing(mid, FX_C.time, .2, 2.4, 460, { base: R / fxSize(), from: .4 })));
+    out.push(sleepFX(240 + k * 130).then(() => fxCollapse(mid, FX_C.time, 800, { count: 1, reach: 1 })));
+    out.push(sleepFX(980 + k * 130).then(() => fxShockwave(mid, FX_C.time, 900, { count: 1 })));
   }
 
   // The board itself dips out and comes back on the restored state.
   if (board) {
     board.animate([
       { filter: "saturate(1)", opacity: 1 },
-      { filter: "saturate(.15)", opacity: .35, offset: .45 },
-      { filter: "saturate(.15)", opacity: .35, offset: .55 },
+      { filter: "saturate(.1)", opacity: .28, offset: .45 },
+      { filter: "saturate(.1)", opacity: .28, offset: .55 },
       { filter: "saturate(1)", opacity: 1 },
-    ], { duration: 1050, easing: "ease-in-out" });
+    ], { duration: 1800 * FX.rate, easing: "ease-in-out" });
   }
 
-  // And then: this is what moved.
+  // And then: this is what moved. The one genuinely useful part of the effect.
   for (const i of (e.changed || []).slice(0, 40))
-    out.push(sleepFX(640).then(() => fxRing(fxCtr(i), FX_C.time, .5, 1.5, 420, { cls: "thick", from: .9 })));
+    out.push(sleepFX(1000).then(() => Promise.all([
+      fxRing(fxCtr(i), FX_C.time, .5, 1.8, 700, { cls: "thick", from: .95 }),
+      fxAfterglow(i, FX_C.time, 900, { peak: .5 }),
+    ])));
 
   return Promise.all(out);
 };
@@ -1408,7 +1770,7 @@ FX_PLAY.cascade = function (e) {
   const b = fxBoardRect();
   const own = e.caster;
   const out = [
-    fxWash(FX_C.frost, 1250, { peak: .26 }),
+    fxWash(FX_C.frost, 1900, { peak: .3 }),
   ];
 
   // The leading edge, sweeping in from the caster's side.
@@ -1420,14 +1782,16 @@ FX_PLAY.cascade = function (e) {
   out.push(fxPlay(edge, [
     { transform: "translateY(0)", opacity: .9 },
     { transform: `translateY(${own === 0 ? -b.height * 1.22 : b.height * 1.22}px)`, opacity: 0 },
-  ], 620, { easing: "cubic-bezier(.2,.7,.3,1)" }));
+  ], 940, { easing: "cubic-bezier(.2,.7,.3,1)" }));
 
-  // Three pulses, one per turn taken. Numbered, so the count is unmistakable.
+  // Three pulses, one per turn taken. Numbered, so the count is unmistakable,
+  // and each one throws a real wave the length of the board.
   const mid = fxMid();
   for (let k = 0; k < 3; k++) {
-    out.push(sleepFX(340 + k * 190).then(() => Promise.all([
-      fxRing(mid, FX_C.frost, .2, 3.4, 420, { base: b.width / fxSize() / 2, from: .7 }),
-      fxGlyph(mid, String(k + 1), FX_C.frost, 380, { size: 1.1 }),
+    out.push(sleepFX(520 + k * 300).then(() => Promise.all([
+      fxShockwave(mid, FX_C.frost, 900, { count: 2 }),
+      fxGlyph(mid, String(k + 1), FX_C.frost, 620, { size: 1.1 }),
+      fxShake(7 - k, 260),
     ])));
   }
   return Promise.all(out);
@@ -1443,7 +1807,8 @@ FX_PLAY.martyr = function (e) {
   // The motes of the sacrifice hang above the square rather than drifting off —
   // the death event has already played; these are what it left behind.
   const held = [];
-  for (let k = 0; k < 10; k++) {
+  const hovering = fxN(10);
+  for (let k = 0; k < hovering; k++) {
     const sz = S * rand(.04, .08);
     const m = fxNode("fx-mote", {
       left: (c.x + rand(-S * .3, S * .3) - sz / 2) + "px",
@@ -1454,7 +1819,7 @@ FX_PLAY.martyr = function (e) {
       { transform: "translate(0,0)", opacity: 0 },
       { transform: "translate(0,0)", opacity: .9, offset: .18 },
       { transform: `translate(${rand(-.1, .1) * S}px,${-S * .9}px) scale(.2)`, opacity: 0 },
-    ], 900, { easing: "cubic-bezier(.4,0,.5,1)" }));
+    ], 1300, { easing: "cubic-bezier(.4,0,.5,1)" }));
   }
 
   const w = S * .55;
@@ -1467,25 +1832,32 @@ FX_PLAY.martyr = function (e) {
 
   return Promise.all([
     ...held,
-    sleepFX(300).then(() => fxPlay(col, [
+    sleepFX(440).then(() => fxPlay(col, [
       { transform: "scaleY(.05) scaleX(.4)", opacity: 0 },
-      { transform: "scaleY(1) scaleX(1)", opacity: .9, offset: .4 },
-      { transform: "scaleY(1) scaleX(1.1)", opacity: .9, offset: .72 },
+      { transform: "scaleY(1) scaleX(1)", opacity: .92, offset: .4 },
+      { transform: "scaleY(1) scaleX(1.1)", opacity: .92, offset: .72 },
       { transform: "scaleY(1) scaleX(.6)", opacity: 0 },
-    ], 800, { easing: "cubic-bezier(.2,.8,.3,1)" })),
-    // She is standing there as soon as she has materialised. The ring and
-    // sparks are for her, not instead of her.
-    FX.landing(e.at, sleepFX(600).then(() => {
+    ], 1180, { easing: "cubic-bezier(.2,.8,.3,1)" })),
+    // She is standing there as soon as she has materialised. Everything after
+    // is for her, not instead of her.
+    FX.landing(e.at, sleepFX(880).then(() => {
       const g = fxGhost(e.at, { owner: e.owner, rank: "queen", form: null });
       return fxPlay(g, [
         { transform: "translateY(-90%) scale(1.6)", opacity: 0 },
         { transform: "translateY(0) scale(1)", opacity: 1, offset: .6 },
         { transform: "scale(1)", opacity: 1 },
-      ], 400, { easing: "cubic-bezier(.2,.9,.3,1)" });
+      ], 590, { easing: "cubic-bezier(.2,.9,.3,1)" });
     })),
-    sleepFX(940).then(() => Promise.all([
-      fxRing(c, FX_C.time, .4, 2.4, 320, { cls: "thick" }),
-      fxSparks(c, (k) => (k % 2 ? FX_C.time : own), 8, 420),
+    // A queen coming back from the dead is the loudest thing in the ruleset.
+    sleepFX(1380).then(() => Promise.all([
+      fxShockwave(c, FX_C.time, 1000, { count: 3 }),
+      sleepFX(150).then(() => fxShockwave(c, own, 950, { count: 2, from: .8 })),
+      fxRing(c, FX_C.time, .4, 2.8, 620, { cls: "thick" }),
+      fxGlow(c, FX_C.time, 2.6, 560, { peak: .9 }),
+      fxSparks(c, (k) => (k % 2 ? FX_C.time : own), 10, 820),
+      fxStreaks(c, own, 8, 700),
+      fxShake(9, 340),
+      fxAfterglow(e.at, own, 1300, { peak: .6, spread: 2.6 }),
     ])),
   ]);
 };
