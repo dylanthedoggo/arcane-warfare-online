@@ -294,6 +294,8 @@ function newGame(firstPlayer = 0, seed = null) {
     removed: [],            // Temporal Cascade after use
     castsSinceShuffle: 0,
     log: [],
+    fx: [],                 // presentation transcript — see the fx() section
+    fxSeq: 1,               // monotonic; never rewinds, even through a restore
     over: null,             // { winner, reason }
     history: [],            // snapshots taken at the start of each turn
     mindControl: null,      // { piece } while a Mind Control move is pending
@@ -313,15 +315,30 @@ function newGame(firstPlayer = 0, seed = null) {
 }
 
 /* Snapshot/restore. `history` is stripped from the copy so snapshots do not
-   nest exponentially. */
+   nest exponentially, and `fx` because restore() discards it anyway — carrying
+   forty copies of a transcript nobody will ever replay is pure weight.
+   viewFor() puts a real `fx` back on the wire view; see there. */
 function snapshot(g) {
-  const { history, ...rest } = g;
+  const { history, fx: _fx, ...rest } = g;
   return structuredClone(rest);
 }
 function restore(snap) {
   const history = G.history;
+  // The effect counter survives the rewind and the transcript does not.
+  //
+  // Both halves matter. If `fxSeq` went backwards the client's high-water mark
+  // would sit above it and silently swallow every effect until the counter
+  // caught up again — a rewind would cost you the next several animations. And
+  // the restored `fx` is a transcript of a past that is being unmade, so
+  // replaying it would show the player moves that no longer happened.
+  //
+  // It also means the machine's search, which sandboxes speculative spells
+  // behind snapshot/restore, throws away the effects it imagined for free.
+  const fxSeq = G.fxSeq;
   G = structuredClone(snap);
   G.history = history;
+  G.fxSeq = fxSeq;
+  G.fx = [];
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -337,6 +354,42 @@ function pieceLabel(p) {
   const base = p.rank === "queen" ? "Queen" : "Pawn";
   return p.form ? `${FORMS[p.form].name} ${base}` : base;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PRESENTATION EVENTS
+
+   The board rebuilds itself from scratch on every render, so the interface
+   cannot tell a capture from a teleport by diffing squares — by the time it
+   looks, the victim is simply gone. And online it never even sees the actions:
+   the server sends whole-state snapshots, so a client that did not act has no
+   idea what just happened.
+
+   So the referee says so. `G.fx` is a short list of what it just did, written
+   at the same moments as the log lines and, like everything else on G, plain
+   cloneable data — which means viewFor() carries it across the wire for free
+   and BOTH players see the same animation. Nothing here may ever be read by a
+   rule; it is a transcript, not state.
+
+   `fxSeq` is the client's high-water mark. It is deliberately monotonic and
+   never rewinds — see restore(), which is what makes replaying idempotent when
+   the same state arrives twice.
+
+   Discipline: an event may carry only what the referee log already makes
+   public. Casting a spell is announced, so naming one is fine. A discard is
+   logged as a COUNT, so a discard event must never name the card.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const FX_KEEP = 48;          // a headless self-play game must not grow this forever
+
+function fx(type, data) {
+  if (!G || !G.fx) return;
+  G.fx.push(Object.assign({ n: G.fxSeq++, type }, data));
+  if (G.fx.length > FX_KEEP) G.fx.shift();
+}
+
+/** Enough of a piece to draw a convincing ghost of it after it is gone. */
+const fxPiece = p =>
+  p ? { owner: p.owner, rank: p.rank, form: p.form, armor: !!p.armor } : null;
 
 /* ══════════════════════════════════════════════════════════════════════════
    RULES ENGINE  —  pure queries over state, zero interface knowledge.
@@ -756,10 +809,16 @@ function awardFP(owner, n, why) {
  * Remove the piece at `i` from the board and run every consequence:
  * fallen-queen bookkeeping for Martyr's Pledge, the Phaser card returning to
  * the deck, and the probation on a revived queen.
+ *
+ * Every piece that ever leaves the board leaves through here, which makes this
+ * the one place the death effect has to be recorded. `kind` is what tells the
+ * interface whether it was killed or given up — the rules draw that line
+ * sharply and so should the animation.
  */
-function removePiece(i, why = "captured") {
+function removePiece(i, why = "captured", kind = "capture") {
   const p = G.board[i];
   if (!p) return null;
+  fx("death", { at: i, kind, piece: fxPiece(p) });
   G.board[i] = null;
   const P = G.players[p.owner];
 
@@ -788,6 +847,7 @@ function promoteIfDue(i) {
   const p = G.board[i];
   if (!p || p.rank !== "pawn" || rowOf(i) !== promoRow(p.owner)) return false;
   p.rank = "queen";
+  fx("promote", { at: i, owner: p.owner, form: p.form });
   awardFP(p.owner, 2, `a pawn was crowned at ${sq(i)}`);
   // A freshly crowned queen lifts the probation on a Martyr's Pledge revival.
   const P = G.players[p.owner];
@@ -806,6 +866,7 @@ function resolveCapture(fromIdx, mv) {
 
   if (victim.armor) {
     victim.armor = false;
+    fx("armor", { at: mv.victim, from: fromIdx });
     log(`${pieceLabel(victim)} at ${sq(mv.victim)} loses its armor but survives.`, "rule");
     awardFP(attacker.owner, 1, "armor stripped");
   } else {
@@ -823,7 +884,10 @@ function resolveCapture(fromIdx, mv) {
   attacker.captures++;
 
   if (retaliated) {
-    removePiece(mv.to, "is dragged down by Eye For An Eye");
+    // The tether is drawn from the square that was marked to the square the
+    // killer landed on, so the animation can pull one back into the other.
+    fx("eyeTether", { from: mv.victim, to: mv.to });
+    removePiece(mv.to, "is dragged down by Eye For An Eye", "eye");
     log("Eye For An Eye — the capturer dies with its prey.", "big");
   }
   return { destroyed, retaliated };
@@ -869,6 +933,17 @@ function performMove(from, mv, opts = {}) {
   const owner = p.owner;
   G.lastMove = { from, to: mv.to };
 
+  // Recorded before anything moves, while the squares still hold the pieces the
+  // animation needs to draw. `chained` marks a hop that continues a sequence
+  // rather than starting one, which is all the interface needs to count its own
+  // way up and show a triple-jump building instead of repeating.
+  fx("move", {
+    from, to: mv.to, kind: mv.kind,
+    piece: fxPiece(p),
+    other: mv.kind === "swap" ? fxPiece(G.board[mv.to]) : null,
+    chained: G.chain != null,
+  });
+
   if (mv.kind === "capture") {
     const before = G.chain != null;
     const res = resolveCapture(from, mv);
@@ -888,6 +963,8 @@ function performMove(from, mv, opts = {}) {
       return;
     }
     if (sentinelHalts(mv.to, owner)) {
+      const walls = adjacentTo(mv.to, (q) => isEnemy(q, owner) && isSentinel(q));
+      fx("sentinelHalt", { at: mv.to, walls });
       log(`A Sentinel adjacent to ${sq(mv.to)} forces the chain to stop.`, "rule");
       G.chain = null;
       // The Sentinel ends the JUMP SEQUENCE, not the move. The pawn is standing
@@ -1215,12 +1292,13 @@ function applyTransform(i, form, choices = {}) {
 
   P.fp -= F.cost;
   p.form = form;
+  fx("transform", { at: i, form, owner, rank: p.rank });
   log(`${PLAYERS[owner].name} transforms the ${p.rank} at ${sq(i)} into a ${F.name}. (−${F.cost} FP)`, "p" + owner);
 
   switch (form) {
     case "juggernaut": {
       const victim = choices.sacrifice;
-      removePiece(victim, "is sacrificed as Juggernaut armor");
+      removePiece(victim, "is sacrificed as Juggernaut armor", "sacrifice");
       p.armor = true;
       effNext(p, "frozen", 1);
       log("The Juggernaut is armored, cannot move next turn, and this consumes your turn.", "rule");
@@ -1248,13 +1326,13 @@ function applyTransform(i, form, choices = {}) {
       log("The Herald is frozen next turn.", "rule");
       break;
     case "enchanter": {
-      for (const idx of choices.sacrifices || []) removePiece(idx, "is sacrificed to the Enchanter");
+      for (const idx of choices.sacrifices || []) removePiece(idx, "is sacrificed to the Enchanter", "sacrifice");
       effNext(p, "frozen", 2);
       log("The Enchanter is frozen for its next 2 turns.", "rule");
       break;
     }
     case "alchemist": {
-      removePiece(choices.sacrifice, "is sacrificed to the Alchemist");
+      removePiece(choices.sacrifice, "is sacrificed to the Alchemist", "sacrifice");
       effNext(P, "noDraw", 1);
       effNext(P, "costCap", 2);
       P.costCapMax = 1;
@@ -1308,6 +1386,7 @@ function castSpell(id, caster, payload = {}) {
   P.fp -= S.cost;
   consumeCard(id, caster);
   if (caster === G.turn) G.castThisTurn++;
+  fx("spell", { id, caster });
   log(`${PLAYERS[caster].name} casts ${S.name}. (−${S.cost} FP)`, "p" + caster);
 
   switch (id) {
@@ -1316,7 +1395,11 @@ function castSpell(id, caster, payload = {}) {
     case "hopscotch": {
       const lc = G.lastCapture;
       const p = G.board[lc.to];
-      if (p) { G.board[lc.to] = null; G.board[lc.from] = p; }
+      if (p) {
+        fx("hopscotch", { from: lc.to, to: lc.from, piece: fxPiece(p) });
+        G.board[lc.to] = null;
+        G.board[lc.from] = p;
+      }
       log(`Hopscotch — the piece rebounds ${sq(lc.to)} → ${sq(lc.from)}.`, "rule");
       if (lc.survived) {
         // The victim only lived because of armor. Hopscotch strikes through it.
@@ -1336,6 +1419,7 @@ function castSpell(id, caster, payload = {}) {
     case "evasive": {
       const { from, to } = payload;
       const p = G.board[from];
+      fx("evasive", { from, to, piece: fxPiece(p) });
       G.board[from] = null;
       G.board[to] = p;
       log(`Evasive Maneuver — pawn retreats ${sq(from)} → ${sq(to)}.`, "rule");
@@ -1355,6 +1439,9 @@ function castSpell(id, caster, payload = {}) {
       G.board[to] = p;
       log(`Mirror Step — the queen crosses the centerline ${sq(from)} → ${sq(to)}.`, "rule");
       const near = adjacentTo(to, (q) => isAlly(q, caster) && q.rank === "pawn");
+      // `ripples` are the pawns the Distortion Field will freeze — shown on the
+      // pieces that pay for the jump, in the same beat as the jump itself.
+      fx("mirror", { from, to, piece: fxPiece(p), ripples: near });
       for (const j of near) effNext(G.board[j], "frozen", 1);
       if (near.length) log(`Distortion Field — ${near.length} adjacent friendly pawn(s) skip their next move.`, "rule");
       break;
@@ -1363,6 +1450,7 @@ function castSpell(id, caster, payload = {}) {
     /* ── Combat ───────────────────────────────────────────────────────── */
     case "veil": {
       const t = G.board[payload.target];
+      fx("veil", { at: payload.target });
       effNow(t, "noCapture", 2);
       t.veilBy = caster;
       log(`Static Veil — ${PLAYERS[t.owner].name}'s ${pieceLabel(t)} at ${sq(payload.target)} cannot capture for 2 turns.`, "rule");
@@ -1374,6 +1462,7 @@ function castSpell(id, caster, payload = {}) {
 
     case "mindcontrol": {
       G.mindControl = { piece: payload.target };
+      fx("mind", { at: payload.target, caster });
       log(`Mind Control — ${PLAYERS[caster].name} seizes the enemy ${pieceLabel(G.board[payload.target])} at ${sq(payload.target)} for one movement.`, "rule");
       effNow(P, "noSpells", 1);      // "this turn"
       effNext(P, "noSpells", 1);     // "...and the next"
@@ -1384,6 +1473,7 @@ function castSpell(id, caster, payload = {}) {
     case "eye": {
       const t = G.board[payload.target];
       t.eyeMark = 3;
+      fx("eye", { at: payload.target });
       log(`Eye For An Eye — the pawn at ${sq(payload.target)} is marked for 3 of the opponent's turns.`, "rule");
       effNext(t, "frozen", 1);
       effNext(P, "noSpells", 1);
@@ -1401,8 +1491,21 @@ function castSpell(id, caster, payload = {}) {
       }
       if (!target) { log("Chronos's Gaze finds no earlier turn — it fizzles.", "rule"); break; }
       const keptLog = G.log.slice();
+      // Which squares the rewind actually changes, by piece identity. A rewind
+      // you cannot read is a rewind you cannot trust, so the interface gets to
+      // point at what moved. Taken here because this is the only moment both
+      // boards exist.
+      const wasIds = G.board.map((q) => (q ? q.id : 0));
       restore(target.snap);
       G.log = keptLog;
+      // restore() emptied the transcript along with everything else it rewound,
+      // and rightly so — but this cast is happening NOW, not in the restored
+      // past. Both events have to be written on the far side of it.
+      fx("spell", { id, caster });
+      const changed = [];
+      for (let k = 0; k < CELLS; k++)
+        if ((G.board[k] ? G.board[k].id : 0) !== wasIds[k]) changed.push(k);
+      fx("chronos", { caster, changed });
       log(`Chronos's Gaze — the board, both Focus pools, and both hands return to the start of ${PLAYERS[caster].name}'s previous turn.`, "big");
       // The card itself stays spent, and the backlash applies on top of the
       // restored hand — otherwise the rewind would hand it straight back.
@@ -1424,7 +1527,8 @@ function castSpell(id, caster, payload = {}) {
 
     case "cascade": {
       P.extraTurns = 2;
-      removePiece(payload.sacrifice, "is sacrificed to Temporal Cascade");
+      fx("cascade", { caster });
+      removePiece(payload.sacrifice, "is sacrificed to Temporal Cascade", "sacrifice");
       const rest = P.hand.slice();
       discardCards(caster, rest, "Temporal Cascade empties your hand");
       effNow(P, "noDraw", 4);
@@ -1436,10 +1540,11 @@ function castSpell(id, caster, payload = {}) {
     case "martyr": {
       // The rearmost friendly pawn is sacrificed and the queen takes its square.
       const spot = payload.sacrifice;
-      removePiece(spot, "is sacrificed to The Martyr's Pledge");
+      removePiece(spot, "is sacrificed to The Martyr's Pledge", "sacrifice");
       P.lostQueens.pop();
       const q = mkPiece(caster, "queen");
       G.board[spot] = q;
+      fx("martyr", { at: spot, owner: caster });
       P.martyrWatch = q.id;
       log(`The Martyr's Pledge — a queen rises at ${sq(spot)}. She is on probation until a new queen is crowned.`, "big");
       if (caster === G.turn) { G.hasActed = true; G.phase = "end"; }
@@ -1568,6 +1673,7 @@ function evasiveDests(from, owner) {
  */
 function performMindControlMove(from, mv) {
   const p = G.board[from];
+  fx("move", { from, to: mv.to, kind: "mind", piece: fxPiece(p), chained: false });
   G.board[from] = null;
   G.board[mv.to] = p;
   log(`Mind Control — ${PLAYERS[p.owner].name}'s ${pieceLabel(p)} is walked ${sq(from)} → ${sq(mv.to)}.`, "rule");
@@ -1636,6 +1742,10 @@ function applyAction(seat, a) {
 
   const before = snapshot(G);
   const histBefore = G.history.slice();
+  // Effects the interface may not have played yet. The rollback below rewinds
+  // the whole game, which would take them with it — and a refused action should
+  // cost you an error message, not the animation of the move before it.
+  const fxBefore = (G.fx || []).slice();
   let res;
   try {
     res = dispatchAction(seat, a);
@@ -1646,6 +1756,7 @@ function applyAction(seat, a) {
   if (!res || !res.ok) {
     restore(before);
     G.history = histBefore;
+    G.fx = fxBefore;
     return res || fail("No result.");
   }
 
@@ -1689,7 +1800,7 @@ function dispatchAction(seat, a) {
         // one that died in the process is no longer a candidate.
         const pool = capturers.map((c) => (c === a.from ? mv.to : c)).filter((c) => G.board[c]);
         if (pool.length === 1) {
-          removePiece(pool[0], "is sacrificed for the skipped capture");
+          removePiece(pool[0], "is sacrificed for the skipped capture", "sacrifice");
           log("A mandatory capture was declined — that piece is forfeit.", "big");
         } else if (pool.length > 1) {
           G.owedSacrifice = { player: seat, candidates: pool };
@@ -1705,7 +1816,7 @@ function dispatchAction(seat, a) {
       if (!os) return fail("No sacrifice is owed.");
       if (os.player !== seat) return fail("That choice is not yours to make.");
       if (!os.candidates.includes(a.i)) return fail("That piece could not have jumped.");
-      removePiece(a.i, "is sacrificed for the skipped capture");
+      removePiece(a.i, "is sacrificed for the skipped capture", "sacrifice");
       log("A mandatory capture was declined — that piece is forfeit.", "big");
       G.owedSacrifice = null;
       checkGameOver();
@@ -1907,6 +2018,11 @@ function viewFor(g, seat, extra = {}) {
   v.history = g.history.map((h) => ({ turn: h.turn, turnNo: h.turnNo }));
 
   if (v.log.length > VIEW_LOG_TAIL) v.log = v.log.slice(-VIEW_LOG_TAIL);
+
+  // snapshot() drops the effect transcript; the wire is the one place it is the
+  // whole point. This is how a player who did not act still sees the capture.
+  // It says nothing the referee log has not already announced to both seats.
+  v.fx = structuredClone(g.fx || []);
 
   v.youAre = seat;
   return Object.assign(v, extra);

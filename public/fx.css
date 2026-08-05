@@ -1,0 +1,212 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   FX — the look of the effect layer.
+
+   Everything drawn here lives in #fxlayer, which sits above the board and never
+   takes a click. The board underneath is always already correct; these are
+   ghosts of what just happened, playing on top of the truth.
+
+   Colours come from the theme's own custom properties. The grammar they carry
+   was set by the interface long before this file existed and is kept exactly:
+
+     owner gold / violet   this player's own doing
+     --bad   red           death and violence
+     #78ffdc teal          stun            (matches .piece.veiled)
+     #7fb2ff cool blue     frozen, pending (matches .pendring)
+     --good  green         resource gained
+     white                 time, and queenhood (matches .piece.queen)
+
+   Per-effect geometry is set inline by fx.js, which is the only thing that
+   knows where the squares are. What lives here is anything reusable: the
+   layer, the shapes, and the loops.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+#fxlayer{
+  position:absolute;inset:0;
+  pointer-events:none;
+  overflow:hidden;
+  z-index:6;                 /* above pieces (2) and their badges (3-4) */
+  border-radius:6px;         /* match #board so effects cannot bleed past it */
+}
+/* Every effect is positioned in pixels from the board's top-left corner. */
+#fxlayer > *{position:absolute;pointer-events:none}
+
+/* ── ghosts ─────────────────────────────────────────────────────────────
+   A clone of a piece that outlives it. It reuses .piece and the owner class
+   verbatim, so a ghost is pixel-identical to the piece it stands in for —
+   there is exactly one definition of what a Gold queen looks like, and it is
+   not in this file.
+   ─────────────────────────────────────────────────────────────────────── */
+.fx-ghost{
+  display:flex;align-items:center;justify-content:center;
+  border-radius:50%;
+  font-weight:800;
+  will-change:transform,opacity;
+}
+.fx-ghost.sentinel{border-radius:14%}
+/* Ghosts never inherit the board's idle loops — a piece in flight is busy. */
+.fx-ghost.frozen::after{content:none}
+
+/* A trail frame: a dimmer copy left behind by a moving ghost. */
+.fx-trail{opacity:.3;filter:blur(1px)}
+
+/* ── shards ─────────────────────────────────────────────────────────────
+   A capture breaks the victim into wedges. Each keeps the piece's own
+   gradient, so what flies apart is recognisably the piece that died.
+   ─────────────────────────────────────────────────────────────────────── */
+.fx-shard{
+  border-radius:50% 50% 50% 0;
+  will-change:transform,opacity;
+}
+
+/* ── rings, motes, sparks ───────────────────────────────────────────────── */
+.fx-ring{
+  border-radius:50%;
+  border:2px solid currentColor;
+  will-change:transform,opacity;
+}
+.fx-ring.thick{border-width:3px}
+.fx-ring.dashed{border-style:dashed}
+.fx-ring.square{border-radius:16%}
+
+.fx-mote{border-radius:50%;background:currentColor;will-change:transform,opacity}
+.fx-spark{
+  border-radius:50%;
+  background:currentColor;
+  box-shadow:0 0 6px currentColor;
+  will-change:transform,opacity;
+}
+
+/* A soft radial glow — the base of a column of light, an impact flash. */
+.fx-glow{
+  border-radius:50%;
+  background:radial-gradient(circle,currentColor 0%,transparent 70%);
+  will-change:transform,opacity;
+}
+
+/* ── lines: beams and tethers ───────────────────────────────────────────
+   Drawn as a 1-square-thin div rotated to point from one square to another;
+   fx.js sets width, top/left and the rotation.
+   ─────────────────────────────────────────────────────────────────────── */
+.fx-beam{
+  transform-origin:0 50%;
+  background:currentColor;
+  box-shadow:0 0 8px currentColor;
+  will-change:transform,opacity;
+}
+/* Eye For An Eye's tether — jagged rather than clean, because it is a grudge. */
+.fx-tether{
+  transform-origin:0 50%;
+  background:repeating-linear-gradient(
+    90deg,currentColor 0 5px,transparent 5px 8px);
+  will-change:transform,opacity;
+}
+/* Mind Control's reach. Tapered, and it writhes while it is attached. */
+.fx-tendril{
+  transform-origin:0 50%;
+  background:linear-gradient(90deg,currentColor,var(--violet));
+  border-radius:2px;
+  will-change:transform,opacity;
+}
+
+/* ── glyphs ─────────────────────────────────────────────────────────────── */
+.fx-glyph{
+  display:flex;align-items:center;justify-content:center;
+  line-height:1;font-weight:800;
+  text-shadow:0 0 12px currentColor,0 0 26px currentColor;
+  will-change:transform,opacity;
+}
+
+/* ── board-wide washes and sweeps ───────────────────────────────────────── */
+.fx-wash{inset:0;will-change:opacity}
+.fx-sweep{
+  top:-20%;height:140%;
+  background:linear-gradient(90deg,
+    transparent,rgba(255,255,255,.06) 42%,#fff 50%,rgba(255,255,255,.06) 58%,transparent);
+  will-change:transform,opacity;
+}
+
+/* The name of a game-altering spell, held over a dimmed board. */
+.fx-banner{
+  inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:8px;
+  background:rgba(4,5,10,.25);
+  will-change:opacity;
+}
+.fx-banner .t{
+  font-size:clamp(15px,3.1vh,30px);font-weight:800;
+  letter-spacing:.28em;text-transform:uppercase;
+  text-shadow:0 0 20px currentColor,0 3px 22px rgba(0,0,0,.9);
+}
+.fx-banner .s{
+  font-size:clamp(9px,1.5vh,13px);letter-spacing:.12em;
+  color:var(--ink-dim);font-style:italic;
+}
+
+/* The card that flies out of the hand when a spell is cast — the tell that
+   says "this was a card", for an opponent who never got to see it. */
+.fx-card{
+  border-radius:3px;
+  border:1px solid currentColor;
+  background:linear-gradient(160deg,currentColor,transparent 140%);
+  box-shadow:0 0 14px currentColor;
+  opacity:.9;
+  will-change:transform,opacity;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PERSISTENT IDLE STATES
+
+   Not effects — ongoing rules. Each of these marks a condition that lasts
+   across turns and that the board otherwise states only in a badge dot, which
+   is easy to miss and impossible to read at a glance. renderBoard() puts these
+   classes on the real pieces; nothing here is drawn in #fxlayer.
+
+   All four are slow and low-contrast on purpose. A board where several of
+   these are live at once still has to be calm enough to think on.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Static Veil — stunned, cannot capture. Teal, matching .piece.veiled. */
+@keyframes fx-veilpulse{
+  0%,100%{box-shadow:0 3px 9px rgba(0,0,0,.6),0 0 0 3px rgba(120,255,220,.75) inset}
+  50%    {box-shadow:0 3px 9px rgba(0,0,0,.6),0 0 0 3px rgba(120,255,220,.75) inset,
+                     0 0 14px 2px rgba(120,255,220,.5)}
+}
+.piece.veiled{animation:fx-veilpulse 2.4s ease-in-out infinite}
+
+/* Eye For An Eye — anything that captures this pawn dies with it. The whole
+   point of the card is that the OPPONENT sees the mark and thinks twice, so
+   this one is the least subtle of the four. */
+@keyframes fx-markpulse{
+  0%,100%{outline-color:var(--bad);outline-offset:2.5px}
+  50%    {outline-color:#ff9aa8;outline-offset:4.5px}
+}
+.piece.marked{animation:fx-markpulse 2s ease-in-out infinite}
+
+/* Alchemist — has traded its mobility away for income, permanently. It must
+   not keep reading as an ordinary queen when it can never move again. */
+@keyframes fx-alchshimmer{
+  0%,100%{filter:none}
+  50%    {filter:drop-shadow(0 0 7px rgba(75,214,160,.75))}
+}
+.piece.alchemist{animation:fx-alchshimmer 4s ease-in-out infinite}
+
+/* Temporal Cascade — the board is cold for as long as the extra turns last. */
+#board.fx-cascade{
+  filter:saturate(.86) hue-rotate(-6deg);
+  box-shadow:0 22px 70px rgba(0,0,0,.75),
+             0 0 0 1px rgba(255,255,255,.03) inset,
+             0 0 0 2px rgba(127,178,255,.45) inset;
+  transition:filter .5s,box-shadow .5s;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   REDUCED MOTION
+
+   The OS setting is honoured by fx.js, which drops to its "reduced" mode and
+   plays short cross-fades instead of travel. The idle loops have to be stopped
+   here too — they are CSS, so fx.js cannot reach them.
+   ══════════════════════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion:reduce){
+  .piece.veiled,.piece.marked,.piece.alchemist,.piece.armored::before{animation:none}
+  #board.fx-cascade{transition:none}
+}
