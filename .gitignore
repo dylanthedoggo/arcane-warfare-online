@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log*
+.env
+.DS_Store
+Thumbs.db
+
+# The original single-file game, kept as a rollback safety net.
+# public/index.html + public/engine.js are the live pair.
+index.pre-online-backup.html
