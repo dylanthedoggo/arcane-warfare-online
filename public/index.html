@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Checkers Arcane Warfare</title>
+<!-- Loaded after the theme below so its idle loops can override the static
+     piece styling they animate. See fx.css. -->
 <style>
 /* ══════════════════════════════════════════════════════════════════
    THEME
@@ -448,6 +450,7 @@ button:disabled{cursor:not-allowed}
 .netinput:focus{border-color:var(--gold-deep)}
 .netinput::placeholder{color:var(--ink-faint);opacity:.5}
 </style>
+<link rel="stylesheet" href="fx.css">
 </head>
 <body>
 
@@ -457,13 +460,16 @@ button:disabled{cursor:not-allowed}
     <div id="turnbadge"><span class="dot"></span><span class="nm">—</span></div>
     <div id="phasechip">—</div>
     <div id="topspacer"></div>
+    <button class="tbtn" id="btnFx" title="Animation detail">FX</button>
     <button class="tbtn" id="btnRules">Rules</button>
     <button class="tbtn" id="btnUndo">Request Undo</button>
     <button class="tbtn" id="btnResign">Resign</button>
     <button class="tbtn" id="btnNew">New Game</button>
   </div>
 
-  <div id="boardwrap"><div id="boardstack"><div id="board"></div></div></div>
+  <!-- #fxlayer sits over the board and never takes a click. Everything the
+       effect player draws lives in it; see fx.js. -->
+  <div id="boardwrap"><div id="boardstack"><div id="board"></div><div id="fxlayer"></div></div></div>
 
   <div id="handcol">
     <div class="sect">
@@ -519,6 +525,7 @@ button:disabled{cursor:not-allowed}
 <div id="toast"></div>
 
 <script src="engine.js"></script>
+<script src="fx.js"></script>
 <script>
 "use strict";
 
@@ -690,6 +697,9 @@ function renderBoard() {
       if (p.armor) d.classList.add("armored");
       if (p.frozen > 0) d.classList.add("frozen");
       if (p.form === "sentinel") d.classList.add("sentinel");
+      // An Alchemist can never move or capture again. fx.css gives it a slow
+      // shimmer so it stops reading as an ordinary queen.
+      if (p.form === "alchemist") d.classList.add("alchemist");
       if (p.eyeMark > 0) d.classList.add("marked");
       if (p.noCapture > 0) d.classList.add("veiled");
       // A penalty that has been paid but has not landed yet is otherwise
@@ -706,6 +716,9 @@ function renderBoard() {
       dots(p.p_frozen || 0, "pend");
       dots(p.p_noCapture || 0, "pend");
       if (bs.children.length) d.appendChild(bs);
+      // A ghost is in flight to (or from) this square. Showing the real piece
+      // as well would double it — FX puts the mask back the moment it lands.
+      if (FX.hidden.has(i)) d.style.visibility = "hidden";
       node.appendChild(d);
       node.title = describePiece(p, i);
     } else {
@@ -717,8 +730,14 @@ function renderBoard() {
     if (G.lastMove && i === G.lastMove.to) node.classList.add("lastto");
   }
 
+  // Temporal Cascade's stolen turns are otherwise a line in the log and nothing
+  // else. While they last, the board itself runs cold.
+  $("board").classList.toggle("fx-cascade",
+    !G.over && G.players[G.turn].extraTurns > 0);
+
   if (UI.targeting) {
     for (const i of UI.targeting.valid) CELL_NODES[i].classList.add("spelltarget");
+    FX.pump();
     return;
   }
   if (UI.sel != null) {
@@ -727,6 +746,11 @@ function renderBoard() {
       for (const m of UI.moves)
         CELL_NODES[m.to].classList.add(m.kind === "capture" ? "captarget" : "movetarget");
   }
+
+  // Last, once the board is telling the truth: play whatever the referee just
+  // recorded on top of it. This is the only call site — every path that changes
+  // the game ends in a render, in all three modes.
+  FX.pump();
 }
 
 function describePiece(p, i) {
@@ -1055,6 +1079,9 @@ function act(action, seat = G.turn) {
 
 function onCellClick(i) {
   if (G.over || UI.modalOpen || !UI.revealed) return;
+  // The four game-altering spells hold the board while they resolve. Nothing
+  // else does — an ordinary capture is clickable through its own animation.
+  if (FX.lock > 0) return;
   if (AI.thinking || isAISeat(G.turn)) { toast("Wait for the machine to move.", ""); return; }
 
   if (UI.targeting) {
@@ -1374,21 +1401,37 @@ function promptOwedDiscard() {
    HOT-SEAT SHELL
    ══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * The curtain is one of the two things in the game that waits for an animation.
+ * It has to: it is a full-screen sheet, and dropping it the instant a turn ends
+ * would land on top of the capture that ended it. FX.then fires immediately
+ * when nothing is playing, so this costs a hot-seat game nothing when effects
+ * are off.
+ */
 function raiseCurtain() {
   if (G.over) return;
-  UI.revealed = false;
-  clearSelection();
-  UI.targeting = null;
-  $("curtainWho").textContent = PLAYERS[G.turn].name;
-  $("curtainWho").style.color = PLAYERS[G.turn].color;
-  const P = G.players[G.turn];
-  $("curtainSub").textContent =
-    `${P.fp} FP · ${P.hand.length} card${P.hand.length === 1 ? "" : "s"} · turn ${G.turnNo}`;
-  $("curtain").hidden = false;
-  render();
+  FX.then(() => {
+    if (G.over) return;               // a watchdog-length wait can outlive the game
+    UI.revealed = false;
+    clearSelection();
+    UI.targeting = null;
+    $("curtainWho").textContent = PLAYERS[G.turn].name;
+    $("curtainWho").style.color = PLAYERS[G.turn].color;
+    const P = G.players[G.turn];
+    $("curtainSub").textContent =
+      `${P.fp} FP · ${P.hand.length} card${P.hand.length === 1 ? "" : "s"} · turn ${G.turnNo}`;
+    $("curtain").hidden = false;
+    render();
+  });
 }
 
+/** The other one. Same reason: a win sheet must not cover the winning blow. */
 function announceWinner() {
+  if (!G.over) return;
+  FX.then(() => announceWinnerNow());
+}
+
+function announceWinnerNow() {
   if (!G.over) return;
   showModal({
     title: `${PLAYERS[G.over.winner].name} wins`,
@@ -1536,6 +1579,7 @@ function pickSide(level) {
 function boot(first, opts = {}) {
   aiCancel();                       // kill any beat still pending from a prior game
   netLeave();                       // and drop any online game still attached
+  FX.reset();                       // and anything still in the air from it
   G = newGame(first);
   UI = freshUI();
   AI.on = !!opts.ai;
@@ -1714,6 +1758,12 @@ async function netStart(req) {
     NET.room = res.room;
     NET.oppConnected = !!res.oppConnected;
     netRemember();
+    // A different game's transcript, with its own counter. Start listening from
+    // the state we are handed rather than replaying whatever it happens to
+    // carry — joining a room mid-game is not a reason to watch the last move.
+    FX.reset();
+    if (res.state && res.state.fx && res.state.fx.length)
+      FX.seen = res.state.fx[res.state.fx.length - 1].n;
     UI = freshUI();
     UI.revealed = true;
     if (res.state) G = res.state;
@@ -1886,6 +1936,16 @@ function renderRules() {
    WIRING
    ══════════════════════════════════════════════════════════════════════════ */
 
+/** The FX button carries its own state, since it cycles three ways. */
+function renderFxButton() {
+  const b = $("btnFx");
+  b.textContent = FX.mode === "full" ? "FX" : FX.mode === "reduced" ? "FX ·" : "FX ✕";
+  b.title = FX.mode === "full" ? "Animations: full — click for reduced"
+    : FX.mode === "reduced" ? "Animations: reduced — click to turn off"
+    : "Animations: off — click for full";
+  b.style.color = FX.mode === "off" ? "var(--ink-faint)" : "";
+}
+
 function wire() {
   $("curtainGo").addEventListener("click", () => {
     UI.revealed = true;
@@ -1893,6 +1953,13 @@ function wire() {
     render();
   });
   $("logToggle").addEventListener("click", () => { UI.logOpen = !UI.logOpen; renderLog(); });
+  $("btnFx").addEventListener("click", () => {
+    const order = ["full", "reduced", "off"];
+    FX.setMode(order[(order.indexOf(FX.mode) + 1) % order.length]);
+    renderFxButton();
+    toast(`Animations: ${FX.mode}.`, "");
+  });
+  renderFxButton();
   $("btnRules").addEventListener("click", () => { renderRules(); $("rules").hidden = false; });
   $("rulesClose").addEventListener("click", () => { $("rules").hidden = true; });
   $("btnUndo").addEventListener("click", requestUndo);
@@ -2662,7 +2729,9 @@ function aiStep(gen) {
 
   render();
   if (G.over) { AI.thinking = false; announceWinner(); return; }
-  setTimeout(() => aiStep(gen), wait);
+  // Never outrun the animation of the beat just taken — otherwise a machine
+  // chain-jump fires its second hop while the first is still in the air.
+  setTimeout(() => aiStep(gen), Math.max(wait, FX.busyMs()));
 }
 
 /**
@@ -3449,6 +3518,10 @@ function runTests() {
 buildBoard();
 wire();
 if (new URLSearchParams(location.search).has("test")) {
+  // The suite drives hundreds of positions through the referee in one
+  // synchronous pass. Every one of them writes to G.fx, and animating that
+  // would be both meaningless and slow.
+  FX.mode = "off";
   runTests();
 } else {
   G = newGame(0);
