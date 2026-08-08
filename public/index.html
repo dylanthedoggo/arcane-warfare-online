@@ -30,6 +30,14 @@
   --bad:#f0576b;
   --warn:#f0b429;
   --sel:#4bd6a0;
+  /* The two kinds of card. Transformation spells reshape one of your own
+     pieces for the rest of the game; everything else is a one-off effect.
+     Frost is already the effects layer's colour for a piece changing form,
+     and arcane is already its colour for "magic that belongs to neither
+     side" — so the hand borrows the grammar the board is using. Neither is a
+     player colour, so a card never reads as belonging to a seat. */
+  --spell-form:#7fb2ff;
+  --spell-arcane:#a86ef0;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -269,12 +277,24 @@ button:disabled{cursor:not-allowed}
   border:1px solid var(--line2);background:var(--panel);
   transition:.14s;position:relative;
 }
-.card:not(:disabled):hover{background:var(--panel2);border-color:var(--violet);transform:translateX(2px)}
+.card:not(:disabled):hover{background:var(--panel2);border-color:var(--kind,var(--violet));transform:translateX(2px)}
 .card:disabled{opacity:.4}
 .card .cname{font-size:12px;font-weight:700;display:flex;justify-content:space-between;gap:6px;align-items:baseline}
 .card .ccost{font-size:10.5px;color:var(--good);font-family:ui-monospace,monospace;flex:none}
 .card .cwhen{font-size:9.5px;color:var(--ink-faint);margin-top:2px}
-.card.selected{border-color:var(--violet);box-shadow:0 0 0 1px var(--violet), 0 0 18px rgba(168,110,240,.35)}
+.card.selected{border-color:var(--kind,var(--violet));box-shadow:0 0 0 1px var(--kind,var(--violet)), 0 0 18px rgba(168,110,240,.35)}
+/* Which KIND of card this is, said in one stripe down the spine and in the
+   title. Deliberately quiet: the hand is scanned for cost and timing first,
+   and a card that shouts its category buries both. */
+.card.form{--kind:var(--spell-form)}
+.card.arcane{--kind:var(--spell-arcane)}
+.card.form,.card.arcane{padding-left:12px}
+.card.form::before,.card.arcane::before{
+  content:"";position:absolute;left:0;top:5px;bottom:5px;width:2px;
+  border-radius:2px;background:var(--kind);opacity:.85;
+}
+.card.form .cname>span:first-child,
+.card.arcane .cname>span:first-child{color:var(--kind)}
 .empty{font-size:11px;color:var(--ink-faint);font-style:italic;padding:5px 0}
 
 /* actions */
@@ -386,6 +406,13 @@ button:disabled{cursor:not-allowed}
 .rulecard h4{font-size:12.5px;margin-bottom:3px;color:var(--gold)}
 .rulecard p{font-size:11px;color:var(--ink-dim);line-height:1.55;margin-bottom:2px}
 .rulecard .tag{font-size:9.5px;color:var(--ink-faint);font-family:ui-monospace,monospace}
+/* Same two colours as the hand, so a card looked up here is recognisable
+   when it is drawn. The heading carries it; gold stays the default for
+   everything that is not a spell. */
+.rulecard.form{--kind:var(--spell-form)}
+.rulecard.arcane{--kind:var(--spell-arcane)}
+.rulecard.form,.rulecard.arcane{border-left:2px solid var(--kind)}
+.rulecard.form h4,.rulecard.arcane h4{color:var(--kind)}
 .tabs{display:flex;gap:5px;margin-bottom:14px;flex-wrap:wrap}
 .tab{padding:6px 12px;border-radius:6px;border:1px solid var(--line);font-size:11.5px;color:var(--ink-dim)}
 .tab.on{border-color:var(--gold);color:var(--gold);background:rgba(232,184,75,.08)}
@@ -858,6 +885,14 @@ function renderPlayers() {
   }
 }
 
+/**
+ * Which of the two card colours `id` wears. A transformation spell reshapes
+ * one of your pieces permanently; everything else resolves and is gone. The
+ * hand and the rules reference both read this, so they can never disagree
+ * about what a card is.
+ */
+const spellKind = (id) => (SPELLS[id].group === "Transformation" ? "form" : "arcane");
+
 function renderHand() {
   const wrap = $("hand");
   wrap.innerHTML = "";
@@ -888,7 +923,7 @@ function renderHand() {
   for (const id of Object.keys(counts)) {
     const S = SPELLS[id];
     const blocker = spellBlocker(id, seat);
-    const b = el("button", "card");
+    const b = el("button", "card " + spellKind(id));
     // spellBlocker already refuses everything but an anyTurn card off-turn, so
     // the off-turn online player's Martyr's Pledge stays live and nothing else does.
     b.disabled = !!blocker || !!G.over || !!G.owedDiscard || !!G.owedSacrifice
@@ -903,35 +938,6 @@ function renderHand() {
     wrap.appendChild(b);
   }
 
-}
-
-/**
- * The opponent may hold an any-turn card (The Martyr's Pledge) and must be
- * able to play it out of turn — but listing it in the sidebar would leak a
- * hidden hand. Instead they claim a reaction, and only then see their options.
- */
-function openReaction() {
-  const foe = 1 - G.turn;
-  const F = G.players[foe];
-  const reactive = [...new Set(F.hand.filter((id) => SPELLS[id].anyTurn && !spellBlocker(id, foe)))];
-  if (!reactive.length) {
-    showModal({
-      title: `${PLAYERS[foe].name} — nothing to react with`,
-      sub: "You hold no card that can be cast outside your own turn right now.",
-      buttons: [{ label: "Back", onClick: () => render() }],
-    });
-    return;
-  }
-  showModal({
-    title: `${PLAYERS[foe].name} reacts`,
-    sub: "Cards you may cast on your opponent's turn.",
-    items: reactive.map((id) => ({
-      label: `${SPELLS[id].name} — ${SPELLS[id].cost} FP`,
-      desc: SPELLS[id].text + "\nPENALTY: " + SPELLS[id].penalty,
-      onClick: () => beginCast(id, foe),
-    })),
-    buttons: [{ label: "Never mind", onClick: () => render() }],
-  });
 }
 
 function renderActions() {
@@ -1030,12 +1036,6 @@ function renderActions() {
   const capturers = pendingSacrifice(G.turn);
   if (capturers.length && G.phase === "declare" && !G.hasActed)
     add("Capture available", `${capturers.length} piece(s) must jump`, "danger", false, null);
-
-  // Out-of-turn reactions are a hot-seat problem: one device, two hidden hands.
-  // Online each player already sees their own hand, so an any-turn card is
-  // simply live there and this button would be a way to peek at the opponent's.
-  if (!AI.on && !NET.on)
-    add("Opponent reacts…", `${PLAYERS[1 - G.turn].name} may cast an any-turn card`, "", true, openReaction);
 
   add("End Turn",
     G.dev ? "take the other side"
@@ -1942,8 +1942,8 @@ function renderRules() {
     tabs.appendChild(b);
   }
   const body = $("ruleBody"); body.innerHTML = "";
-  const card = (h, ps, tag) => {
-    const c = el("div", "rulecard");
+  const card = (h, ps, tag, kind) => {
+    const c = el("div", "rulecard" + (kind ? " " + kind : ""));
     c.appendChild(el("h4", null, h));
     for (const p of ps) c.appendChild(el("p", null, p));
     if (tag) c.appendChild(el("div", "tag", tag));
@@ -1986,14 +1986,23 @@ function renderRules() {
     card("Spending FP", ["Transformations are cast like any other spell, for the same 3 FP most cards cost — except the Alchemist at 6 and the Phaser, which is free once its 3 FP spell is paid.", "Spell costs range from 2 to 6 FP."]);
   }
   if (ruleTab === "Spells") {
-    for (const k of SPELL_IDS) {
+    card("Two kinds of card", [
+      "Transformation spells reshape one of your own pieces for the rest of the game. They are the blue ones.",
+      "Every other spell resolves once and is gone. Those are the violet ones.",
+    ]);
+    // Transformations first, so the two colours read as two blocks rather than
+    // as a stripe that changes every other card.
+    const byKind = SPELL_IDS.slice().sort((a, b) =>
+      (spellKind(a) === "form" ? 0 : 1) - (spellKind(b) === "form" ? 0 : 1));
+    for (const k of byKind) {
       const S = SPELLS[k];
       const scarcity = S.maxDraws
         ? `${Math.max(0, S.maxDraws - (G?.drawCounts?.[k] || 0))} of ${S.maxDraws} left to draw`
         : "common draw";
       card(`${S.name} — ${S.cost} FP`,
         [...(S.flavor ? [S.flavor] : []), S.text, "Penalty: " + S.penalty],
-        `${scarcity} · ${S.timing}`);
+        `${scarcity} · ${S.timing}`,
+        spellKind(k));
     }
   }
 }

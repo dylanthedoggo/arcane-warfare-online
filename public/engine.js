@@ -204,7 +204,7 @@ const SPELLS = {
     anyTurn: true,
   },
   phaserSpell: {
-    name: "Phaser", cost: 3, weight: 4, group: "Game Altering", when: "declare",
+    name: "Phaser", cost: 3, weight: 4, group: "Transformation", when: "declare",
     text: "Transform one of your pawns that has captured at least once into a Phaser.",
     penalty: "The pawn is disoriented and skips its next movement.",
     timing: "Declare Action phase. Set aside while a Phaser lives; returns to the pool when one dies.",
