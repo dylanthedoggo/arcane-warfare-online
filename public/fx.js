@@ -344,7 +344,14 @@ function fxPlay(el, frames, ms, opts) {
   // The rate dial has to reach the delay as well as the duration, or a staggered
   // set of waves would slow down while its stagger stayed put and bunch together.
   o.duration = Math.max(1, ms * FX.rate);
-  if (o.delay) o.delay = o.delay * FX.rate;
+  if (o.delay) {
+    o.delay = o.delay * FX.rate;
+    // Anything on a delay must hold its FIRST keyframe while it waits, or it
+    // sits at its stylesheet appearance until its turn comes — a stagger of
+    // waves all showing up at once, fully opaque, before any of them moves.
+    // "forwards" only covers the tail; the leading edge needs "backwards" too.
+    if (o.fill === "forwards") o.fill = "both";
+  }
   try {
     a = el.animate(frames, o);
   } catch (e) {
@@ -1462,8 +1469,13 @@ FX_PLAY.spell = function (e) {
     out.push(fxShake(12, 600));
     out.push(sleepFX(420).then(() => fxShake(8, 500)));
   } else {
-    // Even an ordinary spell announces itself from the caster's edge.
-    out.push(sleepFX(120).then(() => fxShockwave(fxMid(), own, 1050, { count: 2, from: 1.6 })));
+    // Even an ordinary spell announces itself from the caster's edge — and it
+    // has to be the EDGE. Centred on fxMid() it reads as an event happening on
+    // the middle square, so the spell's own effect a beat later looks like the
+    // ring jumping from the centre of the board to the piece it was always
+    // about. From off-board it is unmistakably a wash arriving from a player's
+    // side, which is what this beat is for: the cast, not the target.
+    out.push(sleepFX(120).then(() => fxShockwave(fxHome(e.caster), own, 1050, { count: 2, from: 1.6 })));
   }
   return Promise.all(out);
 };
