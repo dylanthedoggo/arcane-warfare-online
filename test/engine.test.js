@@ -134,6 +134,19 @@ function movablePieceOf(g, seat) {
   throw new Error(`seat ${seat} should have a legal opening move`);
 }
 
+/**
+ * A game whose opening seat can still afford a transformation. The referee
+ * auto-passes a turn once nothing but "End Turn" remains, so a test that wants
+ * to prove an action is refused for its own reason has to leave the seat
+ * something else it could have done.
+ */
+function solventGame() {
+  const g = freshGame();
+  g.players[0].fp = 8;
+  g.players[1].fp = 8;
+  return g;
+}
+
 const emptySquare = (g) => {
   const i = g.board.findIndex((p, k) => !p && isDark(k));
   assert(i >= 0, "the opening position should have an empty dark square");
@@ -543,6 +556,105 @@ it("does not hand back the live state object", () => {
   assert(view.board !== g.board, "editing a view must not edit the game");
   view.players[0].fp = 99;
   assert(g.players[0].fp !== 99, "the view is not a window onto the real state");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   10. THE DEV SANDBOX CANNOT BE REACHED FROM THE WIRE
+
+   G.dev relaxes almost every gate in this file at once — unlimited actions,
+   a hand holding every card, free transformations, endless Focus. That is
+   exactly the set of things the other nine groups exist to refuse, so the flag
+   is only as safe as the one thing standing between it and a socket:
+   newGame's third argument, which server.js never passes.
+
+   These tests hold that line from both sides. The sandbox must work when it is
+   asked for locally, and must be unreachable when it is not.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("the dev sandbox cannot be reached from the wire");
+
+it("a game built the way the server builds one is not a sandbox", () => {
+  // server.js:  G: newGame(0)
+  const g = newGame(0);
+  assert(!g.dev, "an ordinary game must never carry the sandbox flag");
+  assert("dev" in g, "the flag must exist and be false, not be missing");
+});
+
+it("the sandbox only opens when it is asked for by name", () => {
+  assert(newGame(0, SEED, {}).dev === false, "an empty options object is not a request");
+  assert(newGame(0, SEED, { dev: "yes" }).dev === false, "only true means true");
+  assert(newGame(0, SEED, { dev: true }).dev === true, "the local path must still work");
+});
+
+it("an action cannot smuggle the flag in alongside a move", () => {
+  const g = solventGame();
+  const { from, move } = movablePieceOf(g, 0);
+
+  applyAction(0, { t: "move", from, to: move.to, kind: move.kind, dev: true });
+  assert(!getG().dev, "a field on the action must not become a field on the game");
+
+  refused(applyAction(0, { t: "move", from: emptySquare(getG()), to: 0, kind: "step" }));
+  assert(!getG().dev, "and a refusal must not set it either");
+});
+
+it("without the sandbox a second action in one turn is still refused", () => {
+  // The relaxation is one hook in applyAction. If it ever fires on an ordinary
+  // game this is the test that notices. The seat is given Focus first so it
+  // still has a transformation available afterwards — otherwise the referee
+  // auto-passes a turn with nothing left in it and the second move would be
+  // refused for the wrong reason.
+  const g = solventGame();
+  const { from, move } = movablePieceOf(g, 0);
+  allowed(applyAction(0, { t: "move", from, to: move.to, kind: move.kind }));
+  equal(getG().turn, 0, "the turn did not auto-pass, so this really tests the gate");
+  equal(getG().hasActed, true, "an ordinary move consumes the turn");
+  equal(getG().phase, "end", "and closes the Declare phase behind it");
+
+  const second = movablePieceOf(getG(), 0);
+  refused(applyAction(0, { t: "move", from: second.from, to: second.move.to, kind: second.move.kind }),
+    "already acted");
+});
+
+it("without the sandbox a card still has to be in your hand", () => {
+  const g = freshGame();
+  g.players[0].hand = [];
+  g.players[0].fp = 99;
+  refused(applyAction(0, { t: "cast", id: "veil", payload: { target: 0 } }), "Not in your hand");
+});
+
+it("without the sandbox a card still has to be paid for", () => {
+  // A separate game: the refusal above rolls the state back, which REPLACES the
+  // engine's G, so anything set on the old object is gone.
+  const g = freshGame();
+  g.players[0].hand = ["cascade"];
+  g.players[0].fp = 0;
+  refused(applyAction(0, { t: "cast", id: "cascade", payload: {} }), "FP");
+});
+
+it("without the sandbox a transformation still costs FP and respects its caps", () => {
+  const g = freshGame();
+  const pawn = anyPieceOf(g, 0);
+  g.players[0].fp = 0;
+  refused(applyAction(0, { t: "transform", i: pawn, form: "sentinel" }), "FP");
+});
+
+it("the sandbox really does relax what it claims to", () => {
+  // The other side of the same line: if this stops passing, the flag has been
+  // rendered inert and the menu's Space knock now opens an ordinary game.
+  const g = newGame(0, SEED, { dev: true });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+
+  equal(getG().players[0].hand.length, SPELL_IDS.length, "the sandbox hand holds one of everything");
+  equal(getG().players[0].fp, engine.FP_CAP, "and the pool starts full");
+
+  const first = movablePieceOf(getG(), 0);
+  allowed(applyAction(0, { t: "move", from: first.from, to: first.move.to, kind: first.move.kind }));
+  const second = movablePieceOf(getG(), 0);
+  allowed(applyAction(0, { t: "move", from: second.from, to: second.move.to, kind: second.move.kind }));
+  equal(getG().turn, 0, "two moves in, the turn is still yours");
+  equal(getG().players[0].fp, engine.FP_CAP, "and the pool has topped itself back up");
 });
 
 /* ── report ───────────────────────────────────────────────────────────── */
