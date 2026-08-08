@@ -82,6 +82,13 @@ button:disabled{cursor:not-allowed}
   padding:4px 9px;border-radius:5px;background:var(--panel2);
   color:var(--ink-dim);border:1px solid var(--line);white-space:nowrap;
 }
+/* The sandbox says so, loudly and constantly. A workbench position that gets
+   mistaken for a real game is a bug report nobody can reproduce. */
+#devchip{
+  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  padding:4px 9px;border-radius:5px;background:#4a2a12;
+  color:#ffc978;border:1px solid #8a5520;white-space:nowrap;font-weight:700;
+}
 #topspacer{flex:1}
 .tbtn{
   font-size:12px;padding:6px 12px;border-radius:7px;
@@ -467,6 +474,7 @@ button:disabled{cursor:not-allowed}
     <div id="title">Checkers <b>Arcane Warfare</b></div>
     <div id="turnbadge"><span class="dot"></span><span class="nm">—</span></div>
     <div id="phasechip">—</div>
+    <div id="devchip" hidden title="Dev sandbox: unlimited actions, every spell in hand, free transformations, endless Focus. Not a real game.">Dev Sandbox</div>
     <div id="topspacer"></div>
     <button class="tbtn" id="btnFx" title="Animation detail">FX</button>
     <button class="tbtn" id="btnRules">Rules</button>
@@ -578,6 +586,7 @@ function freshUI() {
     revealed: true,      // has the active player lifted the curtain?
     waitingRoom: false,  // the host's share-the-code sheet is up
     modalOpen: false,
+    modalTag: null,      // which screen the open modal is, when it matters
     logOpen: UI ? UI.logOpen : true,   // survives a new game
   };
 }
@@ -655,6 +664,7 @@ function renderTopbar() {
   const badge = $("turnbadge");
   const dot = badge.querySelector(".dot");
   const nm = badge.querySelector(".nm");
+  $("devchip").hidden = !G.dev;
   if (G.over) {
     dot.style.color = "#4bd6a0";
     nm.textContent = `${PLAYERS[G.over.winner].name} wins`;
@@ -828,10 +838,12 @@ function renderPlayers() {
     if (effs.children.length) mid.appendChild(effs);
     row.appendChild(mid);
 
-    const fp = el("div", "fp" + (P.fp >= FP_CAP ? " full" : ""));
-    fp.textContent = P.fp;
-    fp.appendChild(el("small", null, `/${FP_CAP} FP`));
-    fp.title = P.fp >= FP_CAP
+    const fp = el("div", "fp" + (!G.dev && P.fp >= FP_CAP ? " full" : ""));
+    fp.textContent = G.dev ? "∞" : P.fp;
+    fp.appendChild(el("small", null, G.dev ? "FP" : `/${FP_CAP} FP`));
+    fp.title = G.dev
+      ? "Dev sandbox — the pool refills after every action, so nothing is ever unaffordable."
+      : P.fp >= FP_CAP
       ? `Full. Every Focus Point earned from here is wasted until some is spent.`
       : `Focus Points. The pool is capped at ${FP_CAP} — income above that is lost.`;
     row.appendChild(fp);
@@ -1000,8 +1012,9 @@ function renderActions() {
 
   const canDraw = G.phase === "declare" && !G.hasActed && G.castThisTurn === 0 && !G.drewThisTurn
     && P.noDraw <= 0 && G.deck.length > 0;
-  add("Draw a Spell Card", canDraw ? "one card · ends your turn" : drawWhy(P), "", canDraw,
-    () => act({ t: "draw" }), "draw");
+  add("Draw a Spell Card",
+    canDraw ? (G.dev ? "one card · costs you nothing here" : "one card · ends your turn") : drawWhy(P),
+    "", canDraw, () => act({ t: "draw" }), "draw");
 
   const selPiece = UI.sel != null ? G.board[UI.sel] : null;
   const canTransform = selPiece && selPiece.owner === G.turn && !selPiece.form && P.noTransform <= 0;
@@ -1018,7 +1031,10 @@ function renderActions() {
   if (!AI.on && !NET.on)
     add("Opponent reacts…", `${PLAYERS[1 - G.turn].name} may cast an any-turn card`, "", true, openReaction);
 
-  add("End Turn", G.phase === "declare" && !G.hasActed ? "you have not acted" : "pass to your opponent",
+  add("End Turn",
+    G.dev ? "take the other side"
+      : G.phase === "declare" && !G.hasActed ? "you have not acted"
+      : "pass to your opponent",
     "primary", true, () => act({ t: "endTurn" }), "endTurn");
 }
 
@@ -1047,8 +1063,14 @@ function renderLog() {
    MODALS
    ══════════════════════════════════════════════════════════════════════════ */
 
-function showModal({ title, sub, items = [], buttons = [] }) {
+/**
+ * `tag` names the screen for anything that needs to know WHICH modal is up.
+ * Only the opening menu uses it, and only so the Space knock below can be sure
+ * it is listening on the title screen and nowhere else.
+ */
+function showModal({ title, sub, items = [], buttons = [], tag = null }) {
   UI.modalOpen = true;
+  UI.modalTag = tag;
   $("mTitle").textContent = title;
   $("mSub").innerHTML = sub || "";
   const list = $("mList"); list.innerHTML = "";
@@ -1068,7 +1090,12 @@ function showModal({ title, sub, items = [], buttons = [] }) {
   }
   $("modal").hidden = false;
 }
-function closeModal() { $("modal").hidden = true; UI.modalOpen = false; }
+function closeModal() {
+  $("modal").hidden = true;
+  UI.modalOpen = false;
+  UI.modalTag = null;
+  devKnock.n = 0;                     // leaving the title screen forgets the knock
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
    ACTION DISPATCH
@@ -1550,6 +1577,7 @@ function resign() {
 
 function startNewGame() {
   showModal({
+    tag: "mainMenu",                  // the one screen the Space knock listens on
     title: "Checkers Arcane Warfare",
     sub: "12×12 · 24 pieces each · one shared 37-card spell deck.",
     items: [
@@ -1589,9 +1617,9 @@ function pickDifficulty() {
     title: "How hard should it play?",
     sub: "Higher levels search deeper and use the whole spell book.",
     items: [
-      { label: "Novice", desc: "Looks about 2 moves ahead, plays only the obvious spells, and blunders on purpose. A gentle way to learn the rules.", onClick: () => pickSide("novice") },
+      { label: "Novice", desc: "Looks about 3 moves ahead, plays only the obvious spells, and still blunders on purpose. A gentle way to learn the rules.", onClick: () => pickSide("novice") },
       { label: "Skilled", desc: "Looks about 4 moves ahead and prices every spell and transformation before casting one. Moves in well under a second.", onClick: () => pickSide("skilled") },
-      { label: "Ruthless", desc: "Thinks for up to two seconds a move, searching as deep as that allows, and never blunders. Expect to lose for a while.", onClick: () => pickSide("ruthless") },
+      { label: "Ruthless", desc: "Thinks for up to three seconds a move, searching as deep as that allows, weighs its whole hand just as hard, and never blunders. Expect to lose for a while.", onClick: () => pickSide("ruthless") },
     ],
     buttons: [{ label: "Back", onClick: startNewGame }],
   });
@@ -1613,7 +1641,7 @@ function boot(first, opts = {}) {
   aiCancel();                       // kill any beat still pending from a prior game
   netLeave();                       // and drop any online game still attached
   FX.reset();                       // and anything still in the air from it
-  G = newGame(first);
+  G = newGame(first, null, { dev: !!opts.dev });
   UI = freshUI();
   AI.on = !!opts.ai;
   AI.side = opts.aiSide != null ? opts.aiSide : 1;
@@ -1621,12 +1649,26 @@ function boot(first, opts = {}) {
   AI.thinking = false;
   AI.fast = false;
   G.turnNo = 0;
-  log("A new game begins. Pieces hold the dark squares; the four centre rows are the separation space.", "sys");
+  if (G.dev) {
+    log("Dev sandbox. Act as often as you like, hold every card, transform for free, and never run out of Focus.", "big");
+    log("End Turn hands you the other side. Nothing here is a real game — start a new one from the menu when you are done.", "sys");
+  } else {
+    log("A new game begins. Pieces hold the dark squares; the four centre rows are the separation space.", "sys");
+  }
   if (AI.on)
     log(`You face the machine — ${AI_LEVELS[AI.level].name}, playing ${PLAYERS[AI.side].name}.`, "sys");
   beginTurn(first);
   render();
   afterHandoff(false);
+}
+
+/**
+ * The sandbox. Deliberately not on the menu: it is a workbench, and finding it
+ * by accident mid-game would be baffling. Space three times on the title screen.
+ */
+function bootDev() {
+  boot(0, { dev: true });
+  toast("Dev sandbox — no costs, no limits, both sides yours.", "good");
 }
 
 /**
@@ -2012,6 +2054,39 @@ function onActionKey(ev) {
   if (btn && !btn.disabled) btn.click();
 }
 
+/* ── the knock ──────────────────────────────────────────────────────────────
+   Space three times on the title screen opens the dev sandbox. It needs its own
+   listener because onActionKey above deliberately stands down whenever a modal
+   is up — on the title screen there is no board to end a turn on, and Space
+   there belongs to whoever is scrolling a long sheet.
+
+   The window is what keeps it from being an accident: three presses inside a
+   second and a half each, on the main menu and nowhere else. Wandering off the
+   screen forgets the count (see closeModal).
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const DEV_KNOCK_MS = 1500;
+let devKnock = { n: 0, at: 0 };
+
+function onDevKnock(ev) {
+  if (ev.defaultPrevented || ev.repeat) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (ev.key !== " " && ev.key !== "Spacebar") return;
+  if (!UI || UI.modalTag !== "mainMenu" || $("modal").hidden) return;
+  // A menu button that has been tabbed to already treats Space as a click, and
+  // taking the key here as well would both fire the button and count the knock.
+  const t = ev.target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(t.tagName))) return;
+
+  ev.preventDefault();
+  const now = performance.now();
+  devKnock.n = now - devKnock.at > DEV_KNOCK_MS ? 1 : devKnock.n + 1;
+  devKnock.at = now;
+
+  if (devKnock.n === 2) toast("…", "");                 // enough of a nudge to be findable
+  if (devKnock.n >= 3) { devKnock.n = 0; closeModal(); bootDev(); }
+}
+
 /** The FX button carries its own state, since it cycles three ways. */
 function renderFxButton() {
   const b = $("btnFx");
@@ -2024,6 +2099,7 @@ function renderFxButton() {
 
 function wire() {
   window.addEventListener("keydown", onActionKey);
+  window.addEventListener("keydown", onDevKnock);
   $("curtainGo").addEventListener("click", () => {
     UI.revealed = true;
     $("curtain").hidden = true;
@@ -2071,11 +2147,51 @@ function wire() {
       The fast make/unmake below is used ONLY inside the search tree.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * Every knob a level owns. The first row governs the piece-move search; the
+ * second and third govern the POLICY layer — spells and transformations — which
+ * used to run off hardcoded constants and so gave Ruthless exactly Skilled's
+ * judgement about its own hand. In a game this spell-heavy that was most of the
+ * gap between the machine and a good human.
+ *
+ *   depth         ceiling on iterative deepening; `timeMs` is what usually stops it
+ *   timeMs        wall-clock for one root search — also the page freeze, since
+ *                 the search runs on the main thread
+ *   spells        "basic" prunes the candidate list hard and disables Chronos
+ *   noise         root-only score jitter; the whole of "blunders on purpose"
+ *   pace          animation pacing between driver beats. Cosmetic, not strength.
+ *   policyDepth   plies for the shallow search that prices one spell/transform
+ *   policyMs      wall-clock for ONE such pricing search
+ *   policyBudget  wall-clock for a whole policy decision, across all candidates
+ *   castEdge      how much a spell must beat standing pat by before it is cast
+ *   transformEdge the same margin for a transformation
+ *   chronosEdge   the same margin for Chronos's Gaze, which rewinds the game
+ *   width         multiplier on the candidate shortlists
+ *   qply          depth cap on the captures-only quiescence search
+ */
 const AI_LEVELS = {
-  novice:   { name: "Novice",   depth: 2, timeMs: 120,  spells: "basic", noise: 55, pace: 380 },
-  skilled:  { name: "Skilled",  depth: 4, timeMs: 800,  spells: "full",  noise: 12, pace: 300 },
-  ruthless: { name: "Ruthless", depth: 6, timeMs: 2200, spells: "full",  noise: 0,  pace: 220 },
+  novice:   { name: "Novice",   depth: 3,  timeMs: 250,  spells: "basic", noise: 38, pace: 380,
+              policyDepth: 2, policyMs: 90,  policyBudget: 400,  castEdge: 30, transformEdge: 35,
+              chronosEdge: 140, width: 1, qply: 6 },
+  skilled:  { name: "Skilled",  depth: 4,  timeMs: 800,  spells: "full",  noise: 12, pace: 300,
+              policyDepth: 3, policyMs: 90,  policyBudget: 550,  castEdge: 25, transformEdge: 30,
+              chronosEdge: 140, width: 1, qply: 6 },
+  ruthless: { name: "Ruthless", depth: 10, timeMs: 3000, spells: "full",  noise: 0,  pace: 220,
+              policyDepth: 4, policyMs: 140, policyBudget: 1000, castEdge: 12, transformEdge: 18,
+              chronosEdge: 100, width: 2, qply: 8 },
 };
+
+/**
+ * Skilled's policy figures are the old hardcoded constants exactly — 3 plies,
+ * 90 ms, 550 ms, +25 / +30 / +140 — so the self-play regression tests below,
+ * which are all played at Skilled, keep measuring the same machine they always
+ * did. Novice's policyDepth is pinned at 2 rather than derived: the old code
+ * said Math.min(3, depth), and raising its depth to 3 would otherwise have
+ * quietly upgraded its spell play as a side effect.
+ */
+
+/** Shortlist caps, widened for the levels that have the budget to score more. */
+const aiWide = (n) => Math.round(n * aiCfg().width);
 
 /**
  * `gen` is a generation counter. Every scheduled beat of the machine's turn
@@ -2261,13 +2377,52 @@ function evaluate(owner) { return sideScore(owner) - sideScore(1 - owner); }
 
 /* ── search ─────────────────────────────────────────────────────────────── */
 
-function orderMoves(moves) {
+/* ── move-ordering memory ───────────────────────────────────────────────────
+   Alpha-beta only prunes when a good move is tried early, so what follows is
+   pure ordering: it never changes what a position is WORTH, only how soon the
+   search can stop looking. Both tables are wiped at the start of each machine
+   turn and again at the top of searchBestMove, so a killer learned on a board
+   that no longer exists can never mislead the next one. Within a single search
+   they are shared freely — that sharing is the entire point.
+
+   A move here is a whole turn action, so its identity is the piece's origin,
+   its final square, and how many hops it took. Two different chains from the
+   same square to the same square with the same length are close enough to the
+   same idea for an ordering hint.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const moveKey = (m) => `${m.from}:${m.to}:${m.steps.length}`;
+let KILLERS = [];          // KILLERS[ply] = [keyA, keyB], most recent first
+let HISTORY = new Map();   // key -> how often, and how deep, it caused a cutoff
+
+function clearOrderingMemory() { KILLERS = []; HISTORY = new Map(); }
+
+/** Remember a move that just caused a beta cutoff. Captures are already first. */
+function rememberCutoff(m, ply, depth) {
+  const key = moveKey(m);
+  HISTORY.set(key, (HISTORY.get(key) || 0) + depth * depth);
+  if (m.capture) return;                    // the static ordering already finds these
+  const slot = KILLERS[ply] || (KILLERS[ply] = []);
+  if (slot[0] === key) return;
+  slot.unshift(key);
+  slot.length = Math.min(slot.length, 2);
+}
+
+function orderMoves(moves, ply = 0) {
+  const killers = KILLERS[ply];
   for (const m of moves) {
     let k = 0;
     if (m.capture) k += 1000 + m.steps.length * 500;
     const p = G.board[m.from];
     if (p && p.rank === "pawn" && rowOf(m.to) === promoRow(p.owner)) k += 800;
     if (p && p.rank === "pawn") k += (11 - Math.abs(rowOf(m.to) - promoRow(p.owner))) * 3;
+    if (killers || HISTORY.size) {
+      const key = moveKey(m);
+      // A killer outranks every quiet move but never jumps ahead of a capture.
+      if (killers) { const j = killers.indexOf(key); if (j >= 0) k += 700 - j * 100; }
+      // History is a tiebreaker, capped so it can never drown the tactics above.
+      k += Math.min(HISTORY.get(key) || 0, 400);
+    }
     m._k = k;
   }
   return moves.sort((a, b) => b._k - a._k);
@@ -2282,12 +2437,15 @@ function quiesce(owner, alpha, beta, ply) {
   if (AI_TIMEUP) return stand;
   if (stand >= beta) return beta;
   if (stand > alpha) alpha = stand;
-  if (ply > 6) return alpha;
+  if (ply > aiCfg().qply) return alpha;
   const caps = capturersFor(owner);
   if (!caps.length) return alpha;
   const moves = [];
   for (const i of caps) expandChain(i, i, [], moves, owner);
-  for (const m of orderMoves(moves)) {
+  // Quiescence sees captures only, which the static ordering already ranks
+  // first, so it takes no killer slot — passing -1 keeps its cutoffs out of the
+  // main tree's per-ply tables.
+  for (const m of orderMoves(moves, -1)) {
     const recs = applySeq(m.steps);
     const v = -quiesce(1 - owner, -beta, -alpha, ply + 1);
     undoSeq(recs);
@@ -2312,13 +2470,13 @@ function alphabeta(owner, depth, alpha, beta, ply = 0) {
   if (!moves.length) return -(MATE - 1000) + ply;
 
   let best = -Infinity;
-  for (const m of orderMoves(moves)) {
+  for (const m of orderMoves(moves, ply)) {
     const recs = applySeq(m.steps);
     const v = -alphabeta(1 - owner, depth - 1, -beta, -alpha, ply + 1);
     undoSeq(recs);
     if (v > best) best = v;
     if (best > alpha) alpha = best;
-    if (alpha >= beta) break;
+    if (alpha >= beta) { rememberCutoff(m, ply, depth); break; }
     if (AI_TIMEUP) break;
   }
   return best;
@@ -2329,6 +2487,7 @@ function searchBestMove(owner) {
   const cfg = aiCfg();
   AI_NODES = 0; AI_TIMEUP = false;
   AI_DEADLINE = performance.now() + aiBudget(cfg.timeMs);
+  clearOrderingMemory();
 
   let moves = turnMoves(owner);
   if (!moves.length) return null;
@@ -2338,7 +2497,16 @@ function searchBestMove(owner) {
   for (let d = 1; d <= cfg.depth; d++) {
     let localBest = null, localScore = -Infinity;
     let alpha = -Infinity;
-    for (const m of orderMoves(moves)) {
+    const ordered = orderMoves(moves, 0);
+    // The previous pass already told us which move it liked. Searching that one
+    // first sets a high alpha immediately, so every sibling gets refuted with a
+    // fraction of the work — without this the deepening restarts blind each
+    // time and re-discovers the same answer the slow way.
+    if (best.depth) {
+      const j = ordered.indexOf(best.move);
+      if (j > 0) { ordered.splice(j, 1); ordered.unshift(best.move); }
+    }
+    for (const m of ordered) {
       const recs = applySeq(m.steps);
       let v = -alphabeta(1 - owner, d - 1, -Infinity, -alpha, 1);
       undoSeq(recs);
@@ -2368,7 +2536,7 @@ const aiBudget = (ms) => (AI.fast ? Math.min(ms, 40) : ms);
 
 function aiSearchValue(owner, depth) {
   AI_TIMEUP = false;
-  AI_DEADLINE = performance.now() + aiBudget(90);
+  AI_DEADLINE = performance.now() + aiBudget(aiCfg().policyMs);
   return alphabeta(owner, Math.max(1, depth), -Infinity, Infinity, 0);
 }
 
@@ -2377,7 +2545,7 @@ function aiSearchValue(owner, depth) {
  * caps the whole decision so one beat of the live driver can never block the
  * page for seconds on a crowded board.
  */
-const aiPolicyBudget = () => (AI.fast ? 180 : 550);
+const aiPolicyBudget = () => (AI.fast ? 180 : aiCfg().policyBudget);
 
 /**
  * Apply `mutate` to a throwaway copy of the game, score the result, then put
@@ -2428,7 +2596,7 @@ function aiMindControlCandidates() {
       if (gain) out.push({ target: i, to: mv.to });
     }
   }
-  return out.slice(0, 6);
+  return out.slice(0, aiWide(6));
 }
 
 /** A pruned shortlist of plausible casts — never every legal target. */
@@ -2442,7 +2610,7 @@ function aiSpellCandidates(phaseName) {
   if (phaseName === "end") {
     if (have("hopscotch") && G.lastCapture) out.push({ id: "hopscotch", payload: {} });
     if (!basicOnly && have("mirror"))
-      for (const q of mirrorTargets(AI.side).slice(0, 3)) out.push({ id: "mirror", payload: { from: q } });
+      for (const q of mirrorTargets(AI.side).slice(0, aiWide(3))) out.push({ id: "mirror", payload: { from: q } });
     return out;
   }
 
@@ -2451,12 +2619,12 @@ function aiSpellCandidates(phaseName) {
     const threats = aiEnemyThreats(AI.side);
     const juicy = threats.concat(
       veilTargets(AI.side).filter((i) => G.board[i].rank === "queen" || G.board[i].form));
-    for (const t of [...new Set(juicy)].slice(0, 6)) out.push({ id: "veil", payload: { target: t } });
+    for (const t of [...new Set(juicy)].slice(0, aiWide(6))) out.push({ id: "veil", payload: { target: t } });
   }
   // Retreat a pawn that is about to be taken.
   if (have("evasive")) {
     const safe = new Set(evasiveTargets(AI.side));
-    for (const i of attacked.filter((i) => safe.has(i)).slice(0, 4)) {
+    for (const i of attacked.filter((i) => safe.has(i)).slice(0, aiWide(4))) {
       const r = rowOf(i), c = colOf(i), b = -fwd(AI.side);
       for (const dc of [-1, 1]) {
         const to = rc(r + b, c + dc);
@@ -2467,15 +2635,15 @@ function aiSpellCandidates(phaseName) {
   if (basicOnly) return out;
 
   if (have("mirror"))
-    for (const q of mirrorTargets(AI.side).slice(0, 3)) out.push({ id: "mirror", payload: { from: q } });
+    for (const q of mirrorTargets(AI.side).slice(0, aiWide(3))) out.push({ id: "mirror", payload: { from: q } });
   if (have("eye"))
-    for (const i of eyeTargets(AI.side).filter((i) => attacked.includes(i)).slice(0, 4))
+    for (const i of eyeTargets(AI.side).filter((i) => attacked.includes(i)).slice(0, aiWide(4)))
       out.push({ id: "eye", payload: { target: i } });
   if (have("mindcontrol"))
     for (const c of aiMindControlCandidates())
       out.push({ id: "mindcontrol", payload: { target: c.target }, follow: c });
   if (have("phaserSpell"))
-    for (const i of phaserTargets(AI.side).slice(0, 3)) out.push({ id: "phaserSpell", payload: { target: i } });
+    for (const i of phaserTargets(AI.side).slice(0, aiWide(3))) out.push({ id: "phaserSpell", payload: { target: i } });
   if (have("martyr") && P.lostQueens.length) {
     const spot = aiRearmostPawn(AI.side);
     if (spot >= 0) out.push({ id: "martyr", payload: { sacrifice: spot } });
@@ -2556,7 +2724,7 @@ function aiTransformCandidates() {
       for (const choices of aiTransformChoices(i, form)) out.push({ i, form, choices });
     }
   }
-  return out.slice(0, 12);
+  return out.slice(0, aiWide(12));
 }
 
 /** Possible sacrifice selections for a transformation — usually exactly one. */
@@ -2589,12 +2757,13 @@ function aiTransformChoices(i, form) {
 const aiRender = () => { if (!AI.fast) render(); };
 
 function aiConsiderChronos() {
-  if (aiCfg().spells === "basic") return false;
+  const cfg = aiCfg();
+  if (cfg.spells === "basic") return false;
   if (spellBlocker("chronos", AI.side)) return false;
-  const d = Math.min(3, aiCfg().depth);
+  const d = cfg.policyDepth;
   const base = aiSearchValue(AI.side, d);
   const v = aiSimValue(() => castSpell("chronos", AI.side, {}), AI.side, d);
-  if (v > base + 140) { castSpell("chronos", AI.side, {}); return true; }
+  if (v > base + cfg.chronosEdge) { castSpell("chronos", AI.side, {}); return true; }
   return false;
 }
 
@@ -2608,7 +2777,7 @@ function aiShouldDraw() {
   if (P.noDraw > 0 || !G.deck.length) return false;
   if (G.drewThisTurn || G.hasActed || G.castThisTurn > 0) return false;
   if (capturersFor(AI.side).length) return false;        // never pass up a capture
-  const d = Math.min(3, aiCfg().depth);
+  const d = aiCfg().policyDepth;
   const base = aiSearchValue(AI.side, d);
   const v = aiSimValue(() => drawSpell(AI.side), 1 - AI.side, d);
   return v > base + 10;
@@ -2623,11 +2792,12 @@ function aiCastOnce(phaseName) {
   const movesNext = phaseName === "end" ? 1 - AI.side : AI.side;
   const cands = aiSpellCandidates(phaseName).filter((c) => !spellBlocker(c.id, AI.side));
   if (!cands.length) return false;
-  const d = Math.min(3, aiCfg().depth);
+  const cfg = aiCfg();
+  const d = cfg.policyDepth;
   const base = phaseName === "end"
     ? -aiSearchValue(1 - AI.side, d - 1)
     : aiSearchValue(AI.side, d);
-  let best = null, bestV = base + 25;                    // demand a real improvement
+  let best = null, bestV = base + cfg.castEdge;          // demand a real improvement
   const stop = performance.now() + aiPolicyBudget();
   for (const c of cands) {
     const v = aiSimValue(() => aiExecuteSpell(c), movesNext, d);
@@ -2643,9 +2813,10 @@ function aiConsiderTransform() {
   if (G.over) return false;
   const cands = aiTransformCandidates();
   if (!cands.length) return false;
-  const d = Math.min(3, aiCfg().depth);
+  const cfg = aiCfg();
+  const d = cfg.policyDepth;
   const base = aiSearchValue(AI.side, d);
-  let best = null, bestV = base + 30;
+  let best = null, bestV = base + cfg.transformEdge;
   const stop = performance.now() + aiPolicyBudget();
   for (const c of cands) {
     const v = aiSimValue(() => applyTransform(c.i, c.form, c.choices), AI.side, d);
@@ -2686,6 +2857,7 @@ function aiFinishMove() {
 function aiRunTurn() {
   if (!AI.on || G.over || G.turn !== AI.side) return;
   AI.thinking = true;
+  clearOrderingMemory();
   try {
     if (G.owedDiscard && G.owedDiscard.player === AI.side) aiResolveDiscard();
     aiConsiderChronos();
@@ -2719,6 +2891,7 @@ const AI_STAGES = ["discard", "chronos", "draw", "castDeclare", "transform", "mo
 function aiTakeTurn() {
   if (!AI.on || G.over || G.turn !== AI.side || AI.thinking) return;
   AI.thinking = true;
+  clearOrderingMemory();
   AI.stage = 0;
   AI.moveSteps = null;
   clearSelection();
@@ -2819,6 +2992,9 @@ function aiStep(gen) {
 function afterHandoff(sameSeat) {
   if (G.over) { render(); announceWinner(); return; }
   if (AI.fast) return;                                   // headless self-play drives itself
+  // The sandbox has one person driving both chairs in turn. There is no hand to
+  // hide from them, so a pass-the-device curtain would just be a click.
+  if (G.dev) { UI.revealed = true; render(); return; }
   if (NET.on) { UI.revealed = true; render(); return; }  // each device shows one hand already
   if (isAISeat(G.turn)) { UI.revealed = true; render(); setTimeout(aiTakeTurn, 40); return; }
   if (AI.on) { UI.revealed = true; render(); return; }   // one human: nothing to hide
@@ -3576,6 +3752,47 @@ function runTests() {
   ok("the board-wide Phaser cap of 2 held", countForm("phaser") <= 2);
   ok("no piece carries two transformations",
     G.board.every((p) => !p || !p.form || FORMS[p.form]));
+
+  /* ── the difficulty ladder ─────────────────────────────────────────────
+     Nothing used to check that the three levels were actually ordered. A
+     retune that quietly made Novice the strongest would have shipped.
+     ─────────────────────────────────────────────────────────────────── */
+  group("The machine — difficulty ladder");
+  const ladder = ["novice", "skilled", "ruthless"].map((k) => AI_LEVELS[k]);
+  const rises = (f) => ladder.every((L, i) => i === 0 || f(L) > f(ladder[i - 1]));
+  const neverFalls = (f) => ladder.every((L, i) => i === 0 || f(L) >= f(ladder[i - 1]));
+  ok("each level searches deeper than the last", rises((L) => L.depth),
+    ladder.map((L) => L.depth).join(" < "));
+  ok("...and is given longer to do it", rises((L) => L.timeMs),
+    ladder.map((L) => L.timeMs).join(" < "));
+  ok("...and blunders less", ladder.every((L, i) => i === 0 || L.noise < ladder[i - 1].noise),
+    ladder.map((L) => L.noise).join(" > "));
+  ok("...and judges its own hand at least as hard", neverFalls((L) => L.policyDepth),
+    ladder.map((L) => L.policyDepth).join(" <= "));
+  ok("...and demands no more of a spell before casting it",
+    ladder.every((L, i) => i === 0 || L.castEdge <= ladder[i - 1].castEdge),
+    ladder.map((L) => L.castEdge).join(" >= "));
+  ok("only Ruthless is noiseless", AI_LEVELS.ruthless.noise === 0);
+
+  // The ordering work — principal variation first, killer moves, history — must
+  // be a pure speed-up. If it ever starts steering the choice, the same
+  // position searched twice stops giving the same answer, and this notices.
+  blank();
+  put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(4, 5), 1); put(rc(4, 9), 1);
+  put(rc(2, 3), 0); put(rc(9, 0), 0); put(rc(5, 8), 0, "queen"); put(rc(1, 2), 1, "pawn", { armor: true });
+  AI.side = 0; AI.level = "ruthless"; AI.fast = true;
+  const fpLadder = fingerprint();
+  const runA = searchBestMove(0), runB = searchBestMove(0);
+  ok("a noiseless level picks the same move twice from one position",
+    runA && runB && runA.move.from === runB.move.from && runA.move.to === runB.move.to,
+    runA && runB ? `${sq(runA.move.from)}→${sq(runA.move.to)} vs ${sq(runB.move.from)}→${sq(runB.move.to)}` : "no move");
+  ok("...and a search at Ruthless's depth still leaves the board untouched",
+    fingerprint() === fpLadder);
+
+  const ladderGame = aiPlayGame("ruthless", "novice", 30, 424242);
+  ok("Ruthless and Novice play a full headless game without throwing", ladderGame.turns > 0);
+  AI.level = "skilled";
+
   AI.on = false; AI.fast = false;
 
   /* ── summary ───────────────────────────────────────────────────────── */

@@ -269,7 +269,13 @@ function mulberry32(a) {
   };
 }
 
-function newGame(firstPlayer = 0, seed = null) {
+/**
+ * `opts.dev` opens the sandbox — see the DEV SANDBOX section below. It is a
+ * third positional argument for one reason: the server builds its games with
+ * `newGame(0)` and nothing on the socket path ever reaches this parameter, so
+ * an online game cannot be talked into sandbox mode however a client lies.
+ */
+function newGame(firstPlayer = 0, seed = null, opts = {}) {
   const s = seed == null ? (Math.floor(Math.random() * 1e9)) : seed;
   const rng = mulberry32(s);
 
@@ -301,6 +307,7 @@ function newGame(firstPlayer = 0, seed = null) {
     mindControl: null,      // { piece } while a Mind Control move is pending
     owedDiscard: null,      // { player, n, why } — forced discard pending
     owedSacrifice: null,    // { player, candidates } — declined-capture forfeit pending
+    dev: opts.dev === true, // the sandbox. Never true on a game the server owns.
   };
 
   // Violet on rows 0-3, Gold on rows 8-11 — dark squares only, 24 each.
@@ -339,6 +346,69 @@ function restore(snap) {
   G.history = history;
   G.fxSeq = fxSeq;
   G.fx = [];
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   THE DEV SANDBOX
+
+   `G.dev` turns the referee into a workbench: act as many times as you like in
+   one turn, hold the whole spell book at once, transform without paying, and
+   never run out of Focus. It is reached only from the opening menu on this
+   device, and only through newGame's `opts.dev` — the server never passes it.
+
+   Three rules keep it from becoming a second, divergent ruleset:
+
+   1. IT LIVES HERE, not in the interface. The interface greys out cards and
+      draws move dots with the same spellBlocker / transformBlocker the referee
+      checks against. Relaxing a gate in one place and not the other would show
+      you a card that then refuses to cast.
+
+   2. IT RELAXES, IT DOES NOT REWRITE. Everything below removes a cost, a
+      counter or a precondition. Nothing changes how a capture resolves or what
+      a form does, so a position built in the sandbox behaves like a real one.
+      Penalties still bite — a Juggernaut still freezes the piece it armors.
+      Those are what the form DOES, not a toll on the way in, and a sandbox you
+      cannot reproduce a real effect in is not much of a sandbox.
+
+   3. WHAT IT KEEPS, IT KEEPS FOR A REASON. Pawn-forms stay on pawns, a piece
+      holds one form, and a sacrifice must still be payable. Those are not
+      costs, they are assumptions the rest of this file is built on; a queen
+      wearing a pawn's form is a crash waiting for the right move.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Refill both pools and lift every lockout. It writes `fp` directly rather than
+ * going through awardFP, which would announce the overflow as wasted income on
+ * every single action.
+ */
+function devTopUp() {
+  for (const P of G.players) {
+    P.fp = FP_CAP;
+    P.noSpells = 0; P.noDraw = 0; P.noTransform = 0; P.costCap = 0;
+    P.p_noSpells = 0; P.p_noDraw = 0; P.p_noTransform = 0; P.p_costCap = 0;
+    P.martyrBanned = false;
+  }
+}
+
+/** Both hands hold one of everything, always. The deck is left alone. */
+function devStockHands() {
+  for (const P of G.players) P.hand = SPELL_IDS.slice();
+}
+
+/**
+ * Reopen the turn after an action. An obligation is not an option, so a pending
+ * chain-jump, Herald step, seized piece or owed forfeit still has to be settled
+ * before the Declare phase comes back — otherwise you could walk away from a
+ * half-finished capture and leave the board in a state no rule describes.
+ */
+function devUnlock() {
+  devTopUp();
+  devStockHands();
+  G.hasActed = false;
+  G.castThisTurn = 0;
+  G.drewThisTurn = false;
+  if (G.chain == null && G.heraldBonus == null && !G.mindControl
+      && !G.owedSacrifice && !G.owedDiscard) G.phase = "declare";
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -559,6 +629,11 @@ function transformBlocker(i, form, opts = {}) {
   if (p.form) return `Already a ${FORMS[p.form].name} — a piece may only ever hold one transformation.`;
   if (F.on === "pawn" && p.rank !== "pawn") return "Pawns only.";
   if (F.on === "queen" && p.rank !== "queen") return "Queens only.";
+  // Sandbox: the cost, the caps, the timing and the earned preconditions all
+  // go. What survives is whether the sacrifice can actually be paid — offering
+  // a transformation the dispatcher would then refuse is worse than refusing it
+  // here, and applyTransform would be handed an undefined victim either way.
+  if (G.dev) return devSacrificeBlocker(i, form);
   if (!opts.skipTurnChecks) {
     if (P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
     if (P.fp < F.cost) return `Costs ${F.cost} FP — you have ${P.fp}.`;
@@ -606,6 +681,29 @@ function transformBlocker(i, form, opts = {}) {
   return null;
 }
 
+/**
+ * Sandbox only. The one requirement a transformation cannot be talked out of:
+ * something has to be given up. The pools are widened — any friendly pawn will
+ * do, not merely an adjacent one — so this refuses only when the board has
+ * genuinely run out of pieces to spend.
+ */
+function devSacrificeBlocker(i, form) {
+  // Asked of the very same pools the dispatcher re-derives, so the menu and the
+  // referee cannot disagree about what is payable.
+  switch (form) {
+    case "juggernaut":
+      return juggernautArmorPool(i).length ? null : "No pawn left to sacrifice as armor.";
+    case "alchemist":
+      return friendlyPawns(at(i).owner).length ? null : "Needs a friendly pawn to sacrifice.";
+    case "enchanter":
+      return enchanterSacrificeOptions(i).length
+        ? null
+        : "Needs another friendly queen, or three friendly pawns, to sacrifice.";
+    default:
+      return null;
+  }
+}
+
 /** Forms the piece at `i` could take right now, each with its blocker (if any). */
 function transformOptions(i) {
   const p = at(i);
@@ -621,19 +719,28 @@ function transformOptions(i) {
 function spellBlocker(id, caster = G.turn) {
   const S = SPELLS[id];
   const P = G.players[caster];
-  if (!P.hand.includes(id)) return "Not in your hand.";
-  if (P.noSpells > 0) return `No spells for ${P.noSpells} more turn(s).`;
-  if (P.fp < S.cost) return `Costs ${S.cost} FP — you have ${P.fp}.`;
-  if (P.costCap > 0 && S.cost > P.costCapMax)
-    return `Resource Contamination — nothing above ${P.costCapMax} FP for ${P.costCap} more turn(s).`;
+  // Sandbox: the price, the lockouts and the phase window all go. The phase in
+  // particular has to — devUnlock reopens the Declare phase after every action,
+  // so an End Phase card like Hopscotch would otherwise never be castable at
+  // all. What stays is the per-spell target check further down: a spell with
+  // nothing to act on is not a rule being enforced, it is a crash being avoided.
+  if (!G.dev) {
+    if (!P.hand.includes(id)) return "Not in your hand.";
+    if (P.noSpells > 0) return `No spells for ${P.noSpells} more turn(s).`;
+    if (P.fp < S.cost) return `Costs ${S.cost} FP — you have ${P.fp}.`;
+    if (P.costCap > 0 && S.cost > P.costCapMax)
+      return `Resource Contamination — nothing above ${P.costCapMax} FP for ${P.costCap} more turn(s).`;
+  }
 
   const myTurn = caster === G.turn;
   if (!myTurn && !S.anyTurn) return "Only on your own turn.";
-  if (myTurn) {
+  if (myTurn && !G.dev) {
     if (G.chain != null) return "Finish your chain-jump first.";
     if (S.when === "declare" && G.phase !== "declare") return "Declare Action phase only.";
     if (S.when === "end" && G.phase !== "end") return "End Phase only.";
   }
+  // Even the sandbox will not let you walk away from a half-finished capture.
+  if (myTurn && G.dev && G.chain != null) return "Finish your chain-jump first.";
 
   // Per-spell preconditions — checked here so the interface can grey out
   // cards that would fizzle rather than letting a player waste FP.
@@ -673,7 +780,9 @@ function spellBlocker(id, caster = G.turn) {
         return "Needs a pawn to sacrifice.";
       break;
     case "phaserSpell":
-      if (countForm("phaser") >= 2) return "Two Phasers already exist on the board.";
+      // The board-wide cap is the same kind of rule the sandbox drops for the
+      // transformation caps, so it goes the same way.
+      if (!G.dev && countForm("phaser") >= 2) return "Two Phasers already exist on the board.";
       if (!phaserTargets(caster).length) return "No pawn of yours has ever captured.";
       break;
   }
@@ -739,7 +848,10 @@ function phaserTargets(owner) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
-    if (isAlly(p, owner) && p.rank === "pawn" && !p.form && p.captures >= 1) out.push(i);
+    // "Has captured at least once" is an earned precondition, the twin of the
+    // one transformBlocker waives in the sandbox — so it is waived here too,
+    // otherwise the Phaser card sits dead in a hand that holds everything.
+    if (isAlly(p, owner) && p.rank === "pawn" && !p.form && (G.dev || p.captures >= 1)) out.push(i);
   }
   return out;
 }
@@ -1166,6 +1278,11 @@ function beginTurn(player) {
   G.owedSacrifice = null;
   G.turnNo++;
 
+  // The sandbox tops up before the blockade test below, which is the point:
+  // with a full hand and full Focus there is always something you could do, so
+  // a workbench game can never end by running out of options.
+  if (G.dev) { devTopUp(); devStockHands(); }
+
   if (checkGameOver()) return;
 
   // The passive drip: 1 FP every SECOND turn you take, counted per player so
@@ -1357,6 +1474,12 @@ function consumeCard(id, caster) {
   const P = G.players[caster];
   const k = P.hand.indexOf(id);
   if (k >= 0) P.hand.splice(k, 1);
+
+  // Sandbox: the hand is restocked from the full spell list after every action,
+  // so recycling the card would push a second copy into the deck each cast and
+  // leave the deck count climbing for no reason. Once-per-game cards stay
+  // castable for the same reason — the sandbox is not keeping score.
+  if (G.dev) return;
 
   if (SPELLS[id].oncePerGame) {
     G.removed.push(id);
@@ -1622,6 +1745,10 @@ function friendlyPawns(owner) {
 function juggernautArmorPool(i) {
   const p = at(i);
   if (!p) return [];
+  // Sandbox: adjacency is a condition, and conditions are what the sandbox
+  // drops. Any untransformed pawn of yours will do.
+  if (G.dev)
+    return friendlyPawns(p.owner).filter((j) => j !== i && !G.board[j].form);
   return adjacentTo(i, (q) => isAlly(q, p.owner) && q.rank === "pawn" && !q.form);
 }
 
@@ -1633,6 +1760,23 @@ function enchanterSacrificeOptions(i) {
   const p = at(i);
   if (!p) return [];
   const owner = p.owner;
+  if (G.dev) {
+    // Sandbox: the whole board, not just the neighbours. Every triple of
+    // twenty-four pawns is two thousand menu entries, so the triples are taken
+    // in sliding order from the pawns furthest from promotion — the ones you
+    // would pick anyway — and capped at something a person can read.
+    const out = [];
+    for (let j = 0; j < CELLS; j++) {
+      const q = G.board[j];
+      if (isAlly(q, owner) && q.rank === "queen" && q.id !== p.id) out.push([j]);
+    }
+    const pawns = friendlyPawns(owner)
+      .filter((j) => j !== i)
+      .sort((a, b) => Math.abs(rowOf(b) - promoRow(owner)) - Math.abs(rowOf(a) - promoRow(owner)));
+    for (let a = 0; a + 2 < pawns.length && out.length < 12; a++)
+      out.push([pawns[a], pawns[a + 1], pawns[a + 2]]);
+    return out;
+  }
   const queens = adjacentTo(i, (q) => isAlly(q, owner) && q.rank === "queen" && q.id !== p.id);
   const pawns = adjacentTo(i, (q) => isAlly(q, owner) && q.rank === "pawn");
   const out = queens.map((q) => [q]);
@@ -1764,6 +1908,10 @@ function applyAction(seat, a) {
   // pass the turn for them. Actions that already handed play over (draw,
   // endTurn) report `sameSeat` and are left alone — their turn is gone.
   if (!("sameSeat" in res)) {
+    // One hook is the whole of "act as many times as you like": reopen the turn
+    // here rather than unpicking the gate in every case below, so the sandbox
+    // cannot drift out of step with a rule added later.
+    if (G.dev) devUnlock();
     const auto = autoPassIfStuck();
     if (auto) return { ok: true, sameSeat: auto.sameSeat, autoPassed: true };
   }
@@ -1789,8 +1937,11 @@ function dispatchAction(seat, a) {
       // Captures are mandatory. Moving elsewhere is allowed but forfeits one of
       // the pieces that could have jumped — recorded before the move, since the
       // move itself changes who can jump.
+      // Sandbox: no forfeit. Losing a piece for walking past a jump is a price,
+      // and on a workbench where you move as often as you like it would just
+      // quietly eat the position you were building.
       const capturers = pendingSacrifice(seat);
-      const skipping = capturers.length > 0 && mv.kind !== "capture"
+      const skipping = !G.dev && capturers.length > 0 && mv.kind !== "capture"
         && G.chain == null && G.heraldBonus == null;
 
       performMove(a.from, mv);
@@ -1866,7 +2017,9 @@ function dispatchAction(seat, a) {
       const choices = {};
       if (a.form === "juggernaut") {
         if (!juggernautArmorPool(a.i).includes(want.sacrifice))
-          return fail("The armor must be an adjacent untransformed friendly pawn.");
+          return fail(G.dev
+            ? "The armor must be an untransformed friendly pawn."
+            : "The armor must be an adjacent untransformed friendly pawn.");
         choices.sacrifice = want.sacrifice;
       } else if (a.form === "alchemist") {
         if (!friendlyPawns(seat).includes(want.sacrifice))
@@ -1969,6 +2122,10 @@ function dispatchAction(seat, a) {
       if (P.noDraw > 0) return fail(`Drawing is barred for ${P.noDraw} more turn(s).`);
       if (!G.deck.length) return fail("The spell deck is empty.");
       drawSpell(seat);
+      // Sandbox: the card was the cost of the turn, and the sandbox does not
+      // charge. Returning plain OK leaves the turn open — and leaves the result
+      // without `sameSeat`, which is what routes it through devUnlock above.
+      if (G.dev) return OK;
       return { ok: true, sameSeat: endTurn().sameSeat };   // drawing spends the whole turn
     }
 
