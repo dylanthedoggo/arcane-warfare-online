@@ -111,7 +111,7 @@ function fingerprint(g) {
     over: g.over,
     fp: [g.players[0].fp, g.players[1].fp],
     hands: [g.players[0].hand.slice(), g.players[1].hand.slice()],
-    deckSize: g.deck.length,
+    pool: JSON.stringify(g.drawCounts) + "|" + g.removed.slice().sort().join(",") + "|" + g.setAside.slice().sort().join(","),
   });
 }
 
@@ -138,12 +138,16 @@ function movablePieceOf(g, seat) {
  * A game whose opening seat can still afford a transformation. The referee
  * auto-passes a turn once nothing but "End Turn" remains, so a test that wants
  * to prove an action is refused for its own reason has to leave the seat
- * something else it could have done.
+ * something else it could have done. Transformations are cast like any other
+ * spell now, so this also has to leave a card in hand — the full spell list,
+ * so some transformation is affordable no matter which piece the test moves.
  */
 function solventGame() {
   const g = freshGame();
   g.players[0].fp = 8;
   g.players[1].fp = 8;
+  g.players[0].hand = SPELL_IDS.slice();
+  g.players[1].hand = SPELL_IDS.slice();
   return g;
 }
 
@@ -352,38 +356,43 @@ it("refuses a discard when none is owed", () => {
 
 describe("transformations are checked");
 
-it("refuses a form that does not exist", () => {
+it("refuses the old direct-transform action entirely — every form now requires its spell", () => {
   const g = freshGame();
+  assert(Object.keys(FORMS).every((f) => FORMS[f].viaSpell), "every form should now be spell-only");
   const mine = anyPieceOf(g, 0);
-  refused(applyAction(0, { t: "transform", i: mine, form: "godking" }), "No such transformation");
+  refused(applyAction(0, { t: "transform", i: mine, form: "sentinel" }));
 });
 
-it("refuses a form that is only reachable through its spell", () => {
-  const g = freshGame();
-  const mine = anyPieceOf(g, 0);
-  const viaSpell = Object.keys(FORMS).find((f) => FORMS[f].viaSpell);
-  assert(viaSpell, "at least one form should be spell-only");
-  refused(applyAction(0, { t: "transform", i: mine, form: viaSpell }), "only reached through its spell");
-});
-
-it("refuses transforming a piece that is not yours", () => {
-  const g = freshGame();
+it("refuses a transformation cast for a piece that is not yours", () => {
+  const g = solventGame();
+  g.players[0].hand = ["juggernautSpell"];
+  load(g);
   const theirs = anyPieceOf(g, 1);
-  const form = Object.keys(FORMS).find((f) => !FORMS[f].viaSpell);
-  refused(applyAction(0, { t: "transform", i: theirs, form }), "not your piece");
+  refused(applyAction(0, { t: "cast", id: "juggernautSpell", payload: { target: theirs, sacrifice: emptySquare(g) } }));
 });
 
-it("refuses transforming an empty square", () => {
-  const g = freshGame();
-  const form = Object.keys(FORMS).find((f) => !FORMS[f].viaSpell);
-  refused(applyAction(0, { t: "transform", i: emptySquare(g), form }), "no piece on that square");
+it("refuses a transformation cast for an empty square", () => {
+  const g = solventGame();
+  g.players[0].hand = ["sentinelSpell"];
+  load(g);
+  refused(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: emptySquare(g) } }));
 });
 
 it("refuses a transformation whose sacrifice was not paid", () => {
-  const g = freshGame();
+  const g = solventGame();
+  g.players[0].hand = ["juggernautSpell"];
+  load(g);
   const mine = anyPieceOf(g, 0);
   // Name a sacrifice square that holds nothing of yours to give.
-  refused(applyAction(0, { t: "transform", i: mine, form: "juggernaut", choices: { sacrifice: emptySquare(g) } }));
+  refused(applyAction(0, { t: "cast", id: "juggernautSpell", payload: { target: mine, sacrifice: emptySquare(g) } }));
+});
+
+it("refuses a transformation spell that is not in your hand", () => {
+  const g = solventGame();
+  g.players[0].hand = [];
+  load(g);
+  const mine = anyPieceOf(g, 0);
+  refused(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: mine } }), "Not in your hand");
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -466,8 +475,8 @@ it("survives a barrage of illegal actions with the position intact", () => {
     { t: "move", from: mine, to: 9999, kind: "step" },
     { t: "cast", id: SPELL_IDS[0] },
     { t: "cast", id: "instantWin" },
-    { t: "transform", i: theirs, form: "juggernaut" },
-    { t: "transform", i: mine, form: "godking" },
+    { t: "cast", id: "juggernautSpell", payload: { target: theirs, sacrifice: mine } },
+    { t: "transform", i: mine, form: "sentinel" },
     { t: "sacrifice", i: mine },
     { t: "discard", id: SPELL_IDS[0] },
     { t: "heraldSkip" },
@@ -525,11 +534,11 @@ it("masks the hand of whichever seat is looking", () => {
   equal(view.players[1].hand[0], "mirror", "seat 1 sees its own");
 });
 
-it("hides the order of the draw pile", () => {
+it("does not hide the draw pool's scarcity bookkeeping — there is no secret order left to redact", () => {
   const g = freshGame();
+  g.drawCounts.chronos = 1;
   const view = viewFor(g, 0, {});
-  equal(view.deck.length, g.deck.length, "the deck's size is public");
-  assert(view.deck.every((c) => c === "?"), "the deck's order is not");
+  equal(view.drawCounts.chronos, 1, "remaining-draw counts are public, the same way a spent once-per-game card already was");
 });
 
 it("strips the history snapshots but keeps their shape", () => {
@@ -634,8 +643,9 @@ it("without the sandbox a card still has to be paid for", () => {
 it("without the sandbox a transformation still costs FP and respects its caps", () => {
   const g = freshGame();
   const pawn = anyPieceOf(g, 0);
+  g.players[0].hand = ["sentinelSpell"];
   g.players[0].fp = 0;
-  refused(applyAction(0, { t: "transform", i: pawn, form: "sentinel" }), "FP");
+  refused(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: pawn } }), "FP");
 });
 
 it("the sandbox really does relax what it claims to", () => {

@@ -72,7 +72,7 @@ const PLAYERS = [
  *
  * Two things hold it down now, and neither touches a printed cost.
  *
- * A ceiling, so the pool can never become a war chest: 8 holds the Alchemist
+ * A ceiling, so the pool can never become a war chest: 10 holds the Alchemist
  * (6) plus change, or Chronos plus a transformation, and nothing like a game's
  * savings. Earning while full wastes the income, and the log says so.
  *
@@ -83,7 +83,7 @@ const PLAYERS = [
  * decision, and it moves the economy onto captures and promotions, where the
  * game is actually being played.
  */
-const FP_CAP = 8;
+const FP_CAP = 10;
 
 /* ─────────────────────────────────────────────────────────────────────────
    TRANSFORMATIONS
@@ -95,6 +95,7 @@ const FORMS = {
     name: "Juggernaut", glyph: "◆", on: "any", cost: 3, cap: null, consumesTurn: true,
     ability: "Must be captured twice. The first capture strips its armor (the pawn sacrificed beneath it).",
     penalty: "Sacrifice an adjacent friendly pawn as armor · cannot move next turn · consumes your whole turn.",
+    viaSpell: true,
   },
   phaser: {
     name: "Phaser", glyph: "↯", on: "pawn", cost: 0, cap: 2, capScope: "board",
@@ -106,78 +107,88 @@ const FORMS = {
     name: "Sentinel", glyph: "▓", on: "pawn", cost: 3, cap: 2, capScope: "player", consumesTurn: true,
     ability: "Solid terrain. Cannot move, capture, or be jumped over. An enemy that captures into a square adjacent to it must end its chain.",
     penalty: "Every friendly piece in the same column behind it is frozen next turn · consumes your whole turn.",
+    viaSpell: true,
   },
   herald: {
     name: "Herald", glyph: "⚑", on: "pawn", cost: 3, cap: 1, capScope: "player",
     ability: "A friendly pawn landing adjacent to the Herald may advance one extra square. The bonus step cannot capture.",
     penalty: "The Herald is frozen next turn.",
     need: "Must be on the opponent's half of the board.",
+    viaSpell: true,
   },
   enchanter: {
     name: "Enchanter", glyph: "⚛", on: "queen", cost: 3, cap: 1, capScope: "player",
     ability: "May swap places with any piece on the board, friendly or enemy.",
     penalty: "Frozen 2 turns on transform · frozen 1 turn after a friendly swap · discard a card after an enemy swap.",
     need: "Queen with at least one lifetime capture. Sacrifices an adjacent friendly queen, or 3 adjacent friendly pawns.",
+    viaSpell: true,
   },
   alchemist: {
     name: "Alchemist", glyph: "⚗", on: "queen", cost: 6, cap: null,
     ability: "Can never move or capture again. Generates 1 FP at the start of each of your turns.",
     penalty: "Resource Contamination — no draw next turn, and no spell above 1 FP for 2 turns.",
     need: "Queen must be standing on your own back row. Sacrifices a friendly pawn.",
+    viaSpell: true,
   },
 };
 
 /* ─────────────────────────────────────────────────────────────────────────
-   SPELLS — one shared 37-card deck
+   SPELLS — an infinite, weighted draw pool. Every draw picks randomly across
+   every currently-eligible id, weighted by `weight`. A card with `maxDraws`
+   set can only ever be drawn that many times in the whole game — once every
+   copy is drawn it drops out of the pool for good, the same scarcity a
+   1- or 2-copy card used to have in the old finite deck. `oncePerGame`
+   additionally removes a card the moment it is CAST, not merely drawn.
+
    `when`: "declare" | "end" | "any"  (which phase it may be cast in)
    `anyTurn`: castable on the opponent's turn as well
    ───────────────────────────────────────────────────────────────────────── */
 const SPELLS = {
   hopscotch: {
-    name: "Hopscotch", cost: 3, count: 4, when: "end", group: "Movement",
+    name: "Hopscotch", cost: 3, weight: 4, when: "end", group: "Movement",
     text: "Return the piece that just captured to the square it jumped from. If the victim survived on armor, it is destroyed anyway.",
     penalty: "No spells next turn.",
     timing: "After a capture, before your opponent acts.",
   },
   evasive: {
-    name: "Evasive Maneuver", cost: 3, count: 8, when: "declare", group: "Movement",
+    name: "Evasive Maneuver", cost: 3, weight: 8, when: "declare", group: "Movement",
     text: "One of your pawns steps one square diagonally backward into an empty square. Cannot capture.",
     penalty: "That pawn cannot move next turn.",
     timing: "Declare Action phase only.",
   },
   mirror: {
-    name: "Mirror Step", cost: 2, count: 4, when: "any", group: "Movement",
+    name: "Mirror Step", cost: 2, weight: 4, when: "any", group: "Movement",
     text: "A queen teleports to the mirrored square across the centreline — row r column c becomes row 11−r column 11−c. Wasted if the destination is occupied.",
     penalty: "Distortion Field — every friendly pawn adjacent to the queen after the jump skips its next move.",
     timing: "Before or after moving.",
   },
   veil: {
-    name: "Static Veil", cost: 2, count: 5, group: "Combat", when: "declare",
+    name: "Static Veil", cost: 2, weight: 5, group: "Combat", when: "declare",
     text: "One enemy piece cannot capture for its next two turns. It may still move.",
     penalty: "Friendly fire — when the stun ends, your nearest free pawn to that piece falls sick and cannot move for a turn.",
     timing: "Declare Action phase only.",
   },
   mindcontrol: {
-    name: "Mind Control", cost: 3, count: 4, group: "Combat", when: "declare",
+    name: "Mind Control", cost: 3, weight: 4, group: "Combat", when: "declare",
     text: "Take one movement with an enemy piece that has a legal move.",
     penalty: "Exhaustion — no more spells this turn or next, and discard a card.",
     timing: "Your turn only.",
   },
   eye: {
-    name: "Eye For An Eye", cost: 3, count: 3, group: "Combat", when: "declare",
+    name: "Eye For An Eye", cost: 3, weight: 3, group: "Combat", when: "declare",
     text: "Mark an untransformed friendly pawn. For your opponent's next 3 turns, anything that captures it dies with it.",
     penalty: "The marked pawn is Static next turn · no other spells next turn.",
     timing: "Declare Action phase only.",
   },
   chronos: {
-    name: "Chronos's Gaze", cost: 4, count: 2, group: "Game Altering", when: "declare",
+    name: "Chronos's Gaze", cost: 4, weight: 2, maxDraws: 2, group: "Game Altering", when: "declare",
     flavor: "The past is flexible. Unmake your last mistake.",
-    text: "Rewind the board, both Focus Point pools, and both hands to the start of your previous turn.",
+    text: "Rewind the board, both Focus Point pools, and both hands to the start of one of your last 2 turns.",
     penalty: "Chronal Backlash — discard your hand down to a single card.",
     timing: "Start of your turn, right after your opponent finishes theirs.",
   },
   cascade: {
-    name: "Temporal Cascade", cost: 5, count: 1, group: "Game Altering", when: "declare",
+    name: "Temporal Cascade", cost: 5, weight: 1, maxDraws: 1, group: "Game Altering", when: "declare",
     flavor: "The world holds its breath. Only you may move.",
     text: "Take 2 additional consecutive turns — 3 in a row in total.",
     penalty: "Discard your entire hand, sacrifice a pawn, and neither draw nor transform for 4 turns.",
@@ -185,7 +196,7 @@ const SPELLS = {
     oncePerGame: true,
   },
   martyr: {
-    name: "The Martyr's Pledge", cost: 3, count: 2, group: "Game Altering", when: "any",
+    name: "The Martyr's Pledge", cost: 3, weight: 2, maxDraws: 2, group: "Game Altering", when: "any",
     flavor: "Long live the queen.",
     text: "Revive one of your captured queens. Playable at any time, even on your opponent's turn.",
     penalty: "Your rearmost pawn is sacrificed and the queen takes its square. Consumes your turn.",
@@ -193,10 +204,40 @@ const SPELLS = {
     anyTurn: true,
   },
   phaserSpell: {
-    name: "Phaser", cost: 3, count: 4, group: "Game Altering", when: "declare",
+    name: "Phaser", cost: 3, weight: 4, group: "Game Altering", when: "declare",
     text: "Transform one of your pawns that has captured at least once into a Phaser.",
     penalty: "The pawn is disoriented and skips its next movement.",
-    timing: "Declare Action phase. Set aside while a Phaser lives; returns to the deck when one dies.",
+    timing: "Declare Action phase. Set aside while a Phaser lives; returns to the pool when one dies.",
+  },
+  juggernautSpell: {
+    name: "Juggernaut", cost: 3, weight: 4, group: "Transformation", when: "any",
+    text: "Transform one of your pieces into a Juggernaut, sacrificing an adjacent friendly pawn as armor. Must be captured twice — the first capture strips the armor.",
+    penalty: "Cannot move next turn · consumes your whole turn.",
+    timing: "Either phase, on your own turn.",
+  },
+  sentinelSpell: {
+    name: "Sentinel", cost: 3, weight: 4, group: "Transformation", when: "any",
+    text: "Transform one of your pawns into a Sentinel — solid terrain that cannot move, capture, or be jumped over. Requires a turn in which you have neither moved nor cast another spell.",
+    penalty: "Every friendly piece in the same column behind it is frozen next turn · consumes your whole turn.",
+    timing: "Either phase, on your own turn, before any other action.",
+  },
+  heraldSpell: {
+    name: "Herald", cost: 3, weight: 4, group: "Transformation", when: "any",
+    text: "Transform a pawn standing on the opponent's half of the board into a Herald. A friendly pawn landing adjacent to it may advance one extra square (no capture).",
+    penalty: "The Herald is frozen next turn.",
+    timing: "Either phase, on your own turn.",
+  },
+  enchanterSpell: {
+    name: "Enchanter", cost: 3, weight: 2, maxDraws: 2, group: "Transformation", when: "any",
+    text: "Transform a queen that has captured at least once into an Enchanter, sacrificing an adjacent friendly queen or 3 adjacent friendly pawns. May swap places with any piece, friendly or enemy.",
+    penalty: "Frozen 2 turns on transform · frozen 1 turn after a friendly swap · discard a card after an enemy swap.",
+    timing: "Either phase, on your own turn.",
+  },
+  alchemistSpell: {
+    name: "Alchemist", cost: 6, weight: 1, maxDraws: 1, group: "Transformation", when: "any",
+    text: "Transform a queen standing on your own back row into an Alchemist, sacrificing a friendly pawn. Can never move or capture again, but generates 1 FP at the start of each of your turns.",
+    penalty: "Resource Contamination — no draw next turn, and no spell above 1 FP for 2 turns.",
+    timing: "Either phase, on your own turn.",
   },
 };
 const SPELL_IDS = Object.keys(SPELLS);
@@ -245,18 +286,17 @@ function newPlayerState() {
   };
 }
 
-function buildDeck() {
-  const deck = [];
-  for (const id of SPELL_IDS) for (let n = 0; n < SPELLS[id].count; n++) deck.push(id);
-  return deck;
-}
-
-function shuffle(arr, rng) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
+/** Every spell id currently eligible to be drawn — excludes cards removed
+ *  (oncePerGame, used), set aside (Phaser, while one lives), or exhausted
+ *  (maxDraws hit). */
+function eligibleSpellIds() {
+  return SPELL_IDS.filter((id) => {
+    if (G.removed.includes(id)) return false;
+    if (G.setAside.includes(id)) return false;
+    const cap = SPELLS[id].maxDraws;
+    if (cap != null && (G.drawCounts[id] || 0) >= cap) return false;
+    return true;
+  });
 }
 
 /* Seeded PRNG so a seed can be pinned in tests. */
@@ -277,7 +317,6 @@ function mulberry32(a) {
  */
 function newGame(firstPlayer = 0, seed = null, opts = {}) {
   const s = seed == null ? (Math.floor(Math.random() * 1e9)) : seed;
-  const rng = mulberry32(s);
 
   const board = new Array(CELLS).fill(null);
   const g = {
@@ -295,10 +334,10 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     heraldBonus: null,      // index of a piece owed a Herald bonus step
     lastCapture: null,      // { from, to, victimIdx, victimSurvived } — Hopscotch's target
     lastMove: null,         // { from, to } for board highlighting
-    deck: shuffle(buildDeck(), rng),
+    drawCounts: {},         // id -> lifetime draw count, for maxDraws scarcity
+    drawSeq: 0,              // monotonic; seeds each weighted draw's PRNG
     setAside: [],           // Phaser cards parked while a Phaser lives
     removed: [],            // Temporal Cascade after use
-    castsSinceShuffle: 0,
     log: [],
     fx: [],                 // presentation transcript — see the fx() section
     fxSeq: 1,               // monotonic; never rewinds, even through a restore
@@ -704,14 +743,27 @@ function devSacrificeBlocker(i, form) {
   }
 }
 
-/** Forms the piece at `i` could take right now, each with its blocker (if any). */
-function transformOptions(i) {
-  const p = at(i);
-  if (!p) return [];
-  return Object.keys(FORMS)
-    .filter((f) => !FORMS[f].viaSpell)     // Phaser is reached through its spell
-    .map((f) => ({ form: f, blocker: transformBlocker(i, f) }));
+/**
+ * Friendly pieces that could take `form` right now, were its spell cast on
+ * them — every transformation is reached through a spell (`FORMS[form].viaSpell`),
+ * so this is the target-finder those spells' blockers and casts share. FP
+ * cost and `noTransform` are the spell's own concern, checked by the caller;
+ * `skipTurnChecks` here just keeps transformBlocker from re-checking a cost
+ * that belongs to the spell, not the form.
+ */
+function transformSpellTargets(form, owner) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) {
+    if (!isAlly(G.board[i], owner)) continue;
+    if (!transformBlocker(i, form, { skipTurnChecks: true })) out.push(i);
+  }
+  return out;
 }
+const juggernautTargets = (owner) => transformSpellTargets("juggernaut", owner);
+const sentinelTargets = (owner) => transformSpellTargets("sentinel", owner);
+const heraldTargets = (owner) => transformSpellTargets("herald", owner);
+const enchanterTargets = (owner) => transformSpellTargets("enchanter", owner);
+const alchemistTargets = (owner) => transformSpellTargets("alchemist", owner);
 
 /* ── spells ─────────────────────────────────────────────────────────────── */
 
@@ -766,7 +818,7 @@ function spellBlocker(id, caster = G.turn) {
     case "chronos":
       if (G.hasActed || G.castThisTurn > 0 || G.drewThisTurn)
         return "Only at the very start of your turn.";
-      if (!G.history.length) return "There is no earlier turn to return to.";
+      if (!chronosTargets(caster).length) return "There is no earlier turn to return to.";
       break;
     case "cascade":
       if (G.hasActed) return "Declare it before you act.";
@@ -784,6 +836,26 @@ function spellBlocker(id, caster = G.turn) {
       // transformation caps, so it goes the same way.
       if (!G.dev && countForm("phaser") >= 2) return "Two Phasers already exist on the board.";
       if (!phaserTargets(caster).length) return "No pawn of yours has ever captured.";
+      break;
+    case "juggernautSpell":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!juggernautTargets(caster).length) return "No piece can be armored as a Juggernaut.";
+      break;
+    case "sentinelSpell":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!sentinelTargets(caster).length) return "No pawn can become a Sentinel.";
+      break;
+    case "heraldSpell":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!heraldTargets(caster).length) return "No pawn can become a Herald.";
+      break;
+    case "enchanterSpell":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!enchanterTargets(caster).length) return "No queen can become an Enchanter.";
+      break;
+    case "alchemistSpell":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!alchemistTargets(caster).length) return "No queen can become an Alchemist.";
       break;
   }
   return null;
@@ -822,7 +894,8 @@ function mirrorTargets(owner) {
 const mirrorOf = i => rc(N - 1 - rowOf(i), N - 1 - colOf(i));
 function veilTargets(owner) {
   const out = [];
-  for (let i = 0; i < CELLS; i++) if (isEnemy(G.board[i], owner) && G.board[i].noCapture <= 0) out.push(i);
+  for (let i = 0; i < CELLS; i++)
+    if (isEnemy(G.board[i], owner) && G.board[i].noCapture <= 0 && !heraldShielded(i, owner)) out.push(i);
   return out;
 }
 /* Mind Control grants "one movement", not a capture — so the target needs a
@@ -831,7 +904,7 @@ function mindControlTargets(owner) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
-    if (!isEnemy(p, owner)) continue;
+    if (!isEnemy(p, owner) || heraldShielded(i, owner)) continue;
     if (simpleMoves(i).some((m) => m.kind === "step")) out.push(i);
   }
   return out;
@@ -858,6 +931,20 @@ function phaserTargets(owner) {
 function enchanterSwapTargets(i) {
   const out = [];
   for (let j = 0; j < CELLS; j++) if (j !== i && G.board[j]) out.push(j);
+  return out;
+}
+/**
+ * The turnNo of each of `caster`'s own past turns Chronos's Gaze could return
+ * to — most recent first, capped at 2. A turn's history entry is written at
+ * its own start, so the CURRENT turn's entry (turnNo === G.turnNo) is not a
+ * target; only turns already finished are.
+ */
+function chronosTargets(caster) {
+  const out = [];
+  for (let k = G.history.length - 1; k >= 0 && out.length < 2; k--) {
+    const h = G.history[k];
+    if (h.turn === caster && h.turnNo < G.turnNo) out.push(h.turnNo);
+  }
   return out;
 }
 
@@ -920,7 +1007,7 @@ function awardFP(owner, n, why) {
 /**
  * Remove the piece at `i` from the board and run every consequence:
  * fallen-queen bookkeeping for Martyr's Pledge, the Phaser card returning to
- * the deck, and the probation on a revived queen.
+ * the draw pool, and the probation on a revived queen.
  *
  * Every piece that ever leaves the board leaves through here, which makes this
  * the one place the death effect has to be recorded. `kind` is what tells the
@@ -946,8 +1033,7 @@ function removePiece(i, why = "captured", kind = "capture") {
     const k = G.setAside.indexOf("phaserSpell");
     if (k >= 0) {
       G.setAside.splice(k, 1);
-      G.deck.push("phaserSpell");
-      shuffleDeck("a Phaser died — its card returns to the deck");
+      log("The Phaser card returns to the pool — its Phaser died.", "sys");
     }
   }
   log(`${PLAYERS[p.owner].name}'s ${pieceLabel(p)} at ${sq(i)} ${why}.`, "p" + p.owner);
@@ -1014,6 +1100,18 @@ function sentinelHalts(i, owner) {
 function heraldAdjacent(i) {
   const p = G.board[i];
   if (!p || p.rank !== "pawn" || p.form === "herald") return false;
+  return adjacentTo(i, (q) => isAlly(q, p.owner) && q.form === "herald").length > 0;
+}
+
+/**
+ * Is the piece at `i` a friendly pawn or queen of its own Herald's escort,
+ * shielded from a spell `caster` — who must be its opponent — is trying to
+ * cast on it? A player's own spells still work on their own pieces near
+ * their own Herald; this only blocks the enemy from reaching in.
+ */
+function heraldShielded(i, caster) {
+  const p = G.board[i];
+  if (!p || p.owner === caster) return false;
   return adjacentTo(i, (q) => isAlly(q, p.owner) && q.form === "herald").length > 0;
 }
 
@@ -1167,12 +1265,6 @@ function legalHeraldSteps(i) {
    TURN CYCLE
    ══════════════════════════════════════════════════════════════════════════ */
 
-function shuffleDeck(why) {
-  G.deck = shuffle(G.deck, mulberry32((G.seed + G.turnNo * 7919 + G.deck.length) | 0));
-  G.castsSinceShuffle = 0;
-  log(`The spell deck is shuffled — ${why}.`, "sys");
-}
-
 /** End-of-turn housekeeping for the player who just finished. */
 function tickDownFor(player) {
   const P = G.players[player];
@@ -1309,17 +1401,6 @@ function beginTurn(player) {
   if (G.history.length > 40) G.history.shift();
 }
 
-function anyTransformPossible(owner) {
-  for (let i = 0; i < CELLS; i++) {
-    if (!isAlly(G.board[i], owner)) continue;
-    for (const f of Object.keys(FORMS)) {
-      if (FORMS[f].viaSpell) continue;
-      if (!transformBlocker(i, f)) return true;
-    }
-  }
-  return false;
-}
-
 /**
  * Is there anything at all `player` could still do this turn other than end it?
  *
@@ -1338,10 +1419,9 @@ function hasTurnOption(player) {
   if (G.phase === "declare" && hasAnyMove(player)) return true;
   // Drawing, which spends the whole turn and so must be its first action.
   if (G.phase === "declare" && !G.hasActed && G.castThisTurn === 0 && !G.drewThisTurn
-      && P.noDraw <= 0 && G.deck.length > 0) return true;
-  // A transformation — legal in either phase, and priced/capped by its blocker.
-  if (anyTransformPossible(player)) return true;
-  // A spell whose every precondition, the current phase included, is already met.
+      && P.noDraw <= 0 && eligibleSpellIds().length > 0) return true;
+  // A spell whose every precondition, the current phase included, is already
+  // met — transformations are spells too now, so this alone covers them.
   if (P.hand.some((id) => !spellBlocker(id, player))) return true;
   return false;
 }
@@ -1407,10 +1487,11 @@ function applyTransform(i, form, choices = {}) {
   const owner = p.owner;
   const P = G.players[owner];
 
-  P.fp -= F.cost;
+  // The FP cost is paid once, generically, by castSpell — every form is now
+  // reached only through its spell, and F.cost mirrors that spell's cost.
   p.form = form;
   fx("transform", { at: i, form, owner, rank: p.rank });
-  log(`${PLAYERS[owner].name} transforms the ${p.rank} at ${sq(i)} into a ${F.name}. (−${F.cost} FP)`, "p" + owner);
+  log(`${PLAYERS[owner].name} transforms the ${p.rank} at ${sq(i)} into a ${F.name}.`, "p" + owner);
 
   switch (form) {
     case "juggernaut": {
@@ -1475,30 +1556,27 @@ function consumeCard(id, caster) {
   const k = P.hand.indexOf(id);
   if (k >= 0) P.hand.splice(k, 1);
 
-  // Sandbox: the hand is restocked from the full spell list after every action,
-  // so recycling the card would push a second copy into the deck each cast and
-  // leave the deck count climbing for no reason. Once-per-game cards stay
-  // castable for the same reason — the sandbox is not keeping score.
+  // Sandbox: the hand is restocked from the full spell list after every
+  // action, so once-per-game cards stay castable too — the sandbox is not
+  // keeping score.
   if (G.dev) return;
 
   if (SPELLS[id].oncePerGame) {
     G.removed.push(id);
     log(`${SPELLS[id].name} is removed from the game.`, "sys");
   } else if (id === "phaserSpell") {
-    // Parked out of the deck for as long as the Phaser it created survives.
+    // Parked out of the pool for as long as the Phaser it created survives.
     G.setAside.push(id);
-  } else {
-    G.deck.push(id);                     // used cards go to the bottom
   }
-  G.castsSinceShuffle++;
-  if (G.castsSinceShuffle >= 5) shuffleDeck("5 spells have been used");
+  // Everything else simply returns to being drawable — there is no physical
+  // deck to return a copy to.
 }
 
 function discardCards(caster, ids, why) {
   const P = G.players[caster];
   for (const id of ids) {
     const k = P.hand.indexOf(id);
-    if (k >= 0) { P.hand.splice(k, 1); G.deck.push(id); }
+    if (k >= 0) P.hand.splice(k, 1);
   }
   if (ids.length) log(`${PLAYERS[caster].name} discards ${ids.length} card(s) — ${why}.`, "rule");
 }
@@ -1606,11 +1684,15 @@ function castSpell(id, caster, payload = {}) {
 
     /* ── Game altering ────────────────────────────────────────────────── */
     case "chronos": {
-      // Find the snapshot taken at the start of the caster's PREVIOUS turn.
+      // `payload.turnNo` names one of the caster's own last 2 turns (see
+      // chronosTargets); default to the most recent if the caller left it out.
+      const opts = chronosTargets(caster);
+      const wantTurnNo = payload.turnNo != null ? payload.turnNo : opts[0];
+      const stepsBack = opts.indexOf(wantTurnNo) + 1;      // 1 or 2, for the log
       let target = null;
       for (let k = G.history.length - 1; k >= 0; k--) {
         const h = G.history[k];
-        if (h.turn === caster && h.turnNo < G.turnNo) { target = h; G.history.length = k; break; }
+        if (h.turn === caster && h.turnNo === wantTurnNo) { target = h; G.history.length = k; break; }
       }
       if (!target) { log("Chronos's Gaze finds no earlier turn — it fizzles.", "rule"); break; }
       const keptLog = G.log.slice();
@@ -1629,15 +1711,14 @@ function castSpell(id, caster, payload = {}) {
       for (let k = 0; k < CELLS; k++)
         if ((G.board[k] ? G.board[k].id : 0) !== wasIds[k]) changed.push(k);
       fx("chronos", { caster, changed });
-      log(`Chronos's Gaze — the board, both Focus pools, and both hands return to the start of ${PLAYERS[caster].name}'s previous turn.`, "big");
+      log(`Chronos's Gaze — the board, both Focus pools, and both hands return to the start of ${PLAYERS[caster].name}'s turn ${stepsBack > 1 ? "2 turns ago" : "1 turn ago"}.`, "big");
       // The card itself stays spent, and the backlash applies on top of the
       // restored hand — otherwise the rewind would hand it straight back.
       const hand = G.players[caster].hand;
       const ci = hand.indexOf("chronos");
-      if (ci >= 0) { hand.splice(ci, 1); G.deck.push("chronos"); }
+      if (ci >= 0) hand.splice(ci, 1);
       if (hand.length > 1) {
         const drop = hand.splice(1);
-        for (const d of drop) G.deck.push(d);
         log(`Chronal Backlash — ${drop.length} card(s) discarded, one kept.`, "rule");
       }
       G.turn = caster;
@@ -1678,6 +1759,23 @@ function castSpell(id, caster, payload = {}) {
       applyTransform(payload.target, "phaser", {});
       break;
     }
+
+    /* ── Transformation ───────────────────────────────────────────────── */
+    case "juggernautSpell":
+      applyTransform(payload.target, "juggernaut", { sacrifice: payload.sacrifice });
+      break;
+    case "sentinelSpell":
+      applyTransform(payload.target, "sentinel", {});
+      break;
+    case "heraldSpell":
+      applyTransform(payload.target, "herald", {});
+      break;
+    case "enchanterSpell":
+      applyTransform(payload.target, "enchanter", { sacrifices: payload.sacrifices });
+      break;
+    case "alchemistSpell":
+      applyTransform(payload.target, "alchemist", { sacrifice: payload.sacrifice });
+      break;
   }
 
   checkGameOver();
@@ -1693,8 +1791,19 @@ function castSpell(id, caster, payload = {}) {
  */
 function drawSpell(player) {
   const P = G.players[player];
-  if (!G.deck.length) return false;      // the caller decides how to say so
-  const id = G.deck.shift();
+  const pool = eligibleSpellIds();
+  if (!pool.length) return false;        // the caller decides how to say so
+  // Seeded per draw off the game seed and a monotonic counter, so hot-seat,
+  // online and replay all land on the same card from the same state.
+  const rng = mulberry32((G.seed + G.turnNo * 7919 + G.drawSeq++) | 0);
+  const totalWeight = pool.reduce((sum, id) => sum + SPELLS[id].weight, 0);
+  let roll = rng() * totalWeight;
+  let id = pool[pool.length - 1];
+  for (const candidate of pool) {
+    roll -= SPELLS[candidate].weight;
+    if (roll <= 0) { id = candidate; break; }
+  }
+  G.drawCounts[id] = (G.drawCounts[id] || 0) + 1;
   P.hand.push(id);
   G.drewThisTurn = true;
   log(`${PLAYERS[player].name} draws a spell — this ends the turn.`, "p" + player);
@@ -1996,50 +2105,6 @@ function dispatchAction(seat, a) {
       return OK;
     }
 
-    /* ── transformation ─────────────────────────────────────────────────── */
-    case "transform": {
-      const g = turnGate(seat);
-      if (g) return fail(g);
-      if (G.chain != null) return fail("Finish your chain-jump first.");
-      if (G.heraldBonus != null) return fail("Resolve the Herald's bonus step first.");
-      if (!isIdx(a.i)) return fail("No such square.");
-      const p = at(a.i);
-      if (!p) return fail("There is no piece on that square.");
-      if (p.owner !== seat) return fail("That is not your piece.");
-      const F = FORMS[a.form];
-      if (!F) return fail("No such transformation.");
-      if (F.viaSpell) return fail("That form is only reached through its spell.");
-      const blocker = transformBlocker(a.i, a.form);
-      if (blocker) return fail(blocker);
-
-      // The old modals guaranteed a valid sacrifice; the wire does not.
-      const want = a.choices || {};
-      const choices = {};
-      if (a.form === "juggernaut") {
-        if (!juggernautArmorPool(a.i).includes(want.sacrifice))
-          return fail(G.dev
-            ? "The armor must be an untransformed friendly pawn."
-            : "The armor must be an adjacent untransformed friendly pawn.");
-        choices.sacrifice = want.sacrifice;
-      } else if (a.form === "alchemist") {
-        if (!friendlyPawns(seat).includes(want.sacrifice))
-          return fail("The Alchemist must be paid with one of your pawns.");
-        choices.sacrifice = want.sacrifice;
-      } else if (a.form === "enchanter") {
-        const given = Array.isArray(want.sacrifices) ? want.sacrifices.slice().sort((x, y) => x - y) : null;
-        if (!given) return fail("The Enchanter demands a sacrifice.");
-        const match = enchanterSacrificeOptions(a.i)
-          .some((opt) => opt.length === given.length
-            && opt.slice().sort((x, y) => x - y).every((v, k) => v === given[k]));
-        if (!match) return fail("That is not a legal Enchanter sacrifice.");
-        choices.sacrifices = given;
-      }
-
-      applyTransform(a.i, a.form, choices);
-      checkGameOver();
-      return OK;
-    }
-
     /* ── spells ─────────────────────────────────────────────────────────── */
     case "cast": {
       if (G.over) return fail("The game is over.");
@@ -2090,8 +2155,49 @@ function dispatchAction(seat, a) {
           if (!phaserTargets(seat).includes(want.target)) return fail("That pawn has never captured.");
           payload.target = want.target;
           break;
-        // hopscotch and chronos take no targets; spellBlocker already proved
-        // there is a capture to reverse / a turn to return to.
+        case "chronos": {
+          const opts = chronosTargets(seat);
+          if (!opts.includes(want.turnNo)) return fail("That is not one of your last 2 turns.");
+          payload.turnNo = want.turnNo;
+          break;
+        }
+        // hopscotch takes no target; spellBlocker already proved there is a
+        // capture to reverse.
+
+        case "juggernautSpell": {
+          if (!juggernautTargets(seat).includes(want.target)) return fail("That piece cannot become a Juggernaut.");
+          if (!juggernautArmorPool(want.target).includes(want.sacrifice))
+            return fail(G.dev
+              ? "The armor must be an untransformed friendly pawn."
+              : "The armor must be an adjacent untransformed friendly pawn.");
+          payload.target = want.target; payload.sacrifice = want.sacrifice;
+          break;
+        }
+        case "sentinelSpell":
+          if (!sentinelTargets(seat).includes(want.target)) return fail("That pawn cannot become a Sentinel.");
+          payload.target = want.target;
+          break;
+        case "heraldSpell":
+          if (!heraldTargets(seat).includes(want.target)) return fail("That pawn cannot become a Herald.");
+          payload.target = want.target;
+          break;
+        case "enchanterSpell": {
+          if (!enchanterTargets(seat).includes(want.target)) return fail("That queen cannot become an Enchanter.");
+          const given = Array.isArray(want.sacrifices) ? want.sacrifices.slice().sort((x, y) => x - y) : null;
+          if (!given) return fail("The Enchanter demands a sacrifice.");
+          const match = enchanterSacrificeOptions(want.target)
+            .some((opt) => opt.length === given.length
+              && opt.slice().sort((x, y) => x - y).every((v, k) => v === given[k]));
+          if (!match) return fail("That is not a legal Enchanter sacrifice.");
+          payload.target = want.target; payload.sacrifices = given;
+          break;
+        }
+        case "alchemistSpell":
+          if (!alchemistTargets(seat).includes(want.target)) return fail("That queen cannot become an Alchemist.");
+          if (!friendlyPawns(seat).includes(want.sacrifice))
+            return fail("The Alchemist must be paid with one of your pawns.");
+          payload.target = want.target; payload.sacrifice = want.sacrifice;
+          break;
       }
 
       castSpell(a.id, seat, payload);
@@ -2120,7 +2226,7 @@ function dispatchAction(seat, a) {
       if (G.chain != null || G.heraldBonus != null) return fail("Finish your movement first.");
       const P = G.players[seat];
       if (P.noDraw > 0) return fail(`Drawing is barred for ${P.noDraw} more turn(s).`);
-      if (!G.deck.length) return fail("The spell deck is empty.");
+      if (!eligibleSpellIds().length) return fail("No spell can be drawn right now.");
       drawSpell(seat);
       // Sandbox: the card was the cost of the turn, and the sandbox does not
       // charge. Returning plain OK leaves the turn open — and leaves the result
@@ -2165,9 +2271,10 @@ function viewFor(g, seat, extra = {}) {
   const v = snapshot(g);                   // deep clone, already strips `history`
   const foe = 1 - seat;
   // Hand SIZE is public — the machine has always been allowed to read it.
-  // Hand CONTENTS are not, and neither is the order of the draw pile.
+  // Hand CONTENTS are not. There is no physical deck order left to hide —
+  // the draw pool's weights and each scarce card's remaining count are
+  // public, the same way a consumed once-per-game card's status already was.
   v.players[foe].hand = v.players[foe].hand.map(() => HIDDEN_CARD);
-  v.deck = v.deck.map(() => HIDDEN_CARD);
 
   // The snapshots are the secret; the shape of the past is not. Keeping the
   // stubs means spellBlocker's "is there an earlier turn?" test for Chronos's
@@ -2211,10 +2318,11 @@ if (typeof module !== "undefined" && module.exports) {
     applyAction, viewFor, undoTarget, applyUndoTo,
     // queries, for the test suite
     legalMovesFor, simpleMoves, captureMoves, capturersFor, pendingSacrifice,
-    hasAnyMove, hasTurnOption, immobileWipeout, heraldAdjacent, legalHeraldSteps,
-    countPieces, countForm, spellBlocker, transformBlocker,
+    hasAnyMove, hasTurnOption, immobileWipeout, heraldAdjacent, heraldShielded, legalHeraldSteps,
+    countPieces, countForm, spellBlocker, transformBlocker, eligibleSpellIds,
     evasiveTargets, evasiveDests, mirrorTargets, veilTargets, mindControlTargets,
-    eyeTargets, phaserTargets, friendlyPawns, martyrSacrificePool,
+    eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
     juggernautArmorPool, enchanterSacrificeOptions,
+    juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
   };
 }

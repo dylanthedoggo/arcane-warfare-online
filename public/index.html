@@ -492,7 +492,7 @@ button:disabled{cursor:not-allowed}
       <h3><span id="handowner">Your Hand</span> · <span id="handcount">0</span></h3>
       <div id="hand"></div>
     </div>
-    <div id="handfoot">Shared deck: <b id="deckcount">0</b> cards left. Drawing one costs your whole turn — the card is the payment.</div>
+    <div id="handfoot">Spell pool: <b id="deckcount">weighted</b>. Drawing one costs your whole turn — the card is the payment.</div>
   </div>
 
   <div id="side">
@@ -838,14 +838,21 @@ function renderPlayers() {
     if (effs.children.length) mid.appendChild(effs);
     row.appendChild(mid);
 
-    const fp = el("div", "fp" + (!G.dev && P.fp >= FP_CAP ? " full" : ""));
-    fp.textContent = G.dev ? "∞" : P.fp;
-    fp.appendChild(el("small", null, G.dev ? "FP" : `/${FP_CAP} FP`));
-    fp.title = G.dev
-      ? "Dev sandbox — the pool refills after every action, so nothing is ever unaffordable."
-      : P.fp >= FP_CAP
-      ? `Full. Every Focus Point earned from here is wasted until some is spent.`
-      : `Focus Points. The pool is capped at ${FP_CAP} — income above that is lost.`;
+    const mine = s === viewSeat();
+    const fp = el("div", "fp" + (mine && !G.dev && P.fp >= FP_CAP ? " full" : ""));
+    if (mine) {
+      fp.textContent = G.dev ? "∞" : P.fp;
+      fp.appendChild(el("small", null, G.dev ? "FP" : `/${FP_CAP} FP`));
+      fp.title = G.dev
+        ? "Dev sandbox — the pool refills after every action, so nothing is ever unaffordable."
+        : P.fp >= FP_CAP
+        ? `Full. Every Focus Point earned from here is wasted until some is spent.`
+        : `Focus Points. The pool is capped at ${FP_CAP} — income above that is lost.`;
+    } else {
+      fp.textContent = "—";
+      fp.appendChild(el("small", null, "FP"));
+      fp.title = "Your opponent's Focus Points are hidden.";
+    }
     row.appendChild(fp);
     wrap.appendChild(row);
   }
@@ -860,7 +867,11 @@ function renderHand() {
   owner.textContent = (AI.on || NET.on) ? "Your Hand" : `${PLAYERS[seat].name}'s Hand`;
   owner.style.color = PLAYERS[seat].color;
   $("handcount").textContent = `${P.hand.length} card${P.hand.length === 1 ? "" : "s"}`;
-  $("deckcount").textContent = G.deck.length;
+  const scarceLeft = SPELL_IDS.reduce((sum, id) => {
+    const cap = SPELLS[id].maxDraws;
+    return cap != null ? sum + Math.max(0, cap - (G.drawCounts[id] || 0)) : sum;
+  }, 0);
+  $("deckcount").textContent = `weighted, ${scarceLeft} scarce draw${scarceLeft === 1 ? "" : "s"} left`;
 
   if (!UI.revealed) {
     wrap.appendChild(el("div", "empty", "Hidden until you lift the curtain."));
@@ -1011,15 +1022,10 @@ function renderActions() {
   }
 
   const canDraw = G.phase === "declare" && !G.hasActed && G.castThisTurn === 0 && !G.drewThisTurn
-    && P.noDraw <= 0 && G.deck.length > 0;
+    && P.noDraw <= 0 && eligibleSpellIds().length > 0;
   add("Draw a Spell Card",
     canDraw ? (G.dev ? "one card · costs you nothing here" : "one card · ends your turn") : drawWhy(P),
     "", canDraw, () => act({ t: "draw" }), "draw");
-
-  const selPiece = UI.sel != null ? G.board[UI.sel] : null;
-  const canTransform = selPiece && selPiece.owner === G.turn && !selPiece.form && P.noTransform <= 0;
-  add("Transform selected piece", selPiece ? (canTransform ? `${sq(UI.sel)}` : "not eligible") : "select a piece first",
-    "", !!canTransform, () => openTransformMenu(UI.sel));
 
   const capturers = pendingSacrifice(G.turn);
   if (capturers.length && G.phase === "declare" && !G.hasActed)
@@ -1040,7 +1046,7 @@ function renderActions() {
 
 function drawWhy(P) {
   if (P.noDraw > 0) return `barred for ${P.noDraw} turn(s)`;
-  if (!G.deck.length) return "deck is empty";
+  if (!eligibleSpellIds().length) return "no spell can be drawn";
   if (G.drewThisTurn) return "already drew";
   if (G.hasActed || G.castThisTurn) return "must be your first action";
   if (G.phase !== "declare") return "Declare phase only";
@@ -1269,72 +1275,6 @@ function endTurnLocal() {
   afterHandoff(r.sameSeat);
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   TRANSFORMATION FLOW
-   ══════════════════════════════════════════════════════════════════════════ */
-
-function openTransformMenu(i) {
-  const p = G.board[i];
-  if (!p) return;
-  const opts = transformOptions(i);
-  showModal({
-    title: `Transform the ${pieceLabel(p)} at ${sq(i)}`,
-    sub: "A piece may hold <b>one</b> transformation, permanently. Costs are paid immediately; penalties apply at once.",
-    items: opts.map((o) => {
-      const F = FORMS[o.form];
-      return {
-        label: `${F.glyph}  ${F.name} — ${F.cost} FP`,
-        desc: (o.blocker ? "⛔ " + o.blocker + "\n" : "") + F.ability + "\nPENALTY: " + F.penalty,
-        disabled: !!o.blocker,
-        onClick: () => beginTransform(i, o.form),
-      };
-    }),
-    buttons: [{ label: "Cancel", onClick: () => render() }],
-  });
-}
-
-/**
- * Collect whatever the form demands, then send one transform action. The pools
- * offered here come from the same engine helpers the validator checks against,
- * so the menu can never present a choice the referee would refuse.
- */
-function beginTransform(i, form) {
-  const owner = G.board[i].owner;
-  const send = (choices) => {
-    if (!act({ t: "transform", i, form, choices }, owner)) return;
-    if (!NET.on && G.phase === "declare" && !G.hasActed && G.board[i] && legalMovesFor(i).length)
-      toast("Transformed. You may still move this turn.", "good");
-  };
-
-  if (form === "juggernaut") {
-    pickOne(juggernautArmorPool(i), "Choose the pawn to sacrifice as armor",
-      "It is placed beneath the Juggernaut and absorbs the first capture.",
-      (j) => send({ sacrifice: j }));
-    return;
-  }
-  if (form === "alchemist") {
-    pickOne(friendlyPawns(owner), "Choose the pawn to sacrifice", "The Alchemist demands one pawn.",
-      (j) => send({ sacrifice: j }));
-    return;
-  }
-  if (form === "enchanter") {
-    const options = enchanterSacrificeOptions(i);
-    showModal({
-      title: "The Enchanter demands a sacrifice",
-      sub: "An adjacent friendly <b>queen</b>, or <b>three</b> adjacent friendly pawns.",
-      items: options.map((idxs) => ({
-        label: idxs.length === 1
-          ? `Sacrifice the adjacent queen at ${sq(idxs[0])}`
-          : `Sacrifice 3 adjacent pawns: ${idxs.map(sq).join(", ")}`,
-        onClick: () => send({ sacrifices: idxs }),
-      })),
-      buttons: [{ label: "Cancel", onClick: () => render() }],
-    });
-    return;
-  }
-  send({});
-}
-
 function pickOne(indices, title, sub, fn) {
   if (!indices.length) { toast("No valid choice.", "bad"); render(); return; }
   if (indices.length === 1) { fn(indices[0]); return; }
@@ -1408,9 +1348,23 @@ function beginCast(id, caster) {
       target("Choose one of your untransformed pawns to mark", eyeTargets(caster), (t) => finish({ target: t }));
       return;
 
-    case "chronos":
-      confirmFirst(S.text, () => finish({}));
+    case "chronos": {
+      const opts = chronosTargets(caster);
+      confirmFirst(S.text, () => {
+        if (opts.length === 1) { finish({ turnNo: opts[0] }); return; }
+        showModal({
+          title: "Chronos's Gaze",
+          sub: "Choose how far back to rewind.",
+          items: opts.map((turnNo, k) => ({
+            label: k === 0 ? "Rewind 1 turn" : "Rewind 2 turns",
+            desc: "The board, both Focus pools, and both hands return to that turn's start.",
+            onClick: () => finish({ turnNo }),
+          })),
+          buttons: [{ label: "Cancel", onClick: () => render() }],
+        });
+      });
       return;
+    }
 
     case "cascade":
       confirmFirst(S.text, () =>
@@ -1433,6 +1387,48 @@ function beginCast(id, caster) {
     case "phaserSpell":
       target("Choose a pawn that has captured at least once", phaserTargets(caster),
         (t) => finish({ target: t }));
+      return;
+
+    case "juggernautSpell":
+      target("Choose a piece to transform into a Juggernaut", juggernautTargets(caster), (i) => {
+        pickOne(juggernautArmorPool(i), "Choose the pawn to sacrifice as armor",
+          "It is placed beneath the Juggernaut and absorbs the first capture.",
+          (j) => finish({ target: i, sacrifice: j }));
+      });
+      return;
+
+    case "sentinelSpell":
+      target("Choose a pawn to transform into a Sentinel", sentinelTargets(caster),
+        (t) => finish({ target: t }));
+      return;
+
+    case "heraldSpell":
+      target("Choose a pawn on the opponent's half to transform into a Herald", heraldTargets(caster),
+        (t) => finish({ target: t }));
+      return;
+
+    case "enchanterSpell":
+      target("Choose a queen to transform into an Enchanter", enchanterTargets(caster), (i) => {
+        const options = enchanterSacrificeOptions(i);
+        showModal({
+          title: "The Enchanter demands a sacrifice",
+          sub: "An adjacent friendly <b>queen</b>, or <b>three</b> adjacent friendly pawns.",
+          items: options.map((idxs) => ({
+            label: idxs.length === 1
+              ? `Sacrifice the adjacent queen at ${sq(idxs[0])}`
+              : `Sacrifice 3 adjacent pawns: ${idxs.map(sq).join(", ")}`,
+            onClick: () => finish({ target: i, sacrifices: idxs }),
+          })),
+          buttons: [{ label: "Cancel", onClick: () => render() }],
+        });
+      });
+      return;
+
+    case "alchemistSpell":
+      target("Choose a queen on your back row to transform into an Alchemist", alchemistTargets(caster), (i) => {
+        pickOne(friendlyPawns(caster), "Choose the pawn to sacrifice", "The Alchemist demands one pawn.",
+          (j) => finish({ target: i, sacrifice: j }));
+      });
       return;
   }
 }
@@ -1579,7 +1575,7 @@ function startNewGame() {
   showModal({
     tag: "mainMenu",                  // the one screen the Space knock listens on
     title: "Checkers Arcane Warfare",
-    sub: "12×12 · 24 pieces each · one shared 37-card spell deck.",
+    sub: "12×12 · 24 pieces each · a weighted spell pool, including every transformation.",
     items: [
       {
         label: "Play online", cls: "gold",
@@ -1690,8 +1686,8 @@ const viewSeat = () => (NET.on ? NET.seat : AI.on ? 1 - AI.side : G.turn);
    G still arrives here as a real game state, so every query the interface
    already uses (legalMovesFor for the move dots, spellBlocker for greying out
    cards) keeps working. What it is missing is exactly what you are not entitled
-   to know: the opponent's hand, the order of the deck, and the snapshots behind
-   Chronos's Gaze. See viewFor() in engine.js.
+   to know: the opponent's hand and the snapshots behind Chronos's Gaze. See
+   viewFor() in engine.js.
    ══════════════════════════════════════════════════════════════════════════ */
 
 const SESSION_KEY = "caw.session";
@@ -1935,7 +1931,7 @@ function netBootstrap() {
    RULES REFERENCE
    ══════════════════════════════════════════════════════════════════════════ */
 
-const RULE_TABS = ["Basics", "Focus Points", "Transformations", "Spells"];
+const RULE_TABS = ["Basics", "Focus Points", "Spells"];
 let ruleTab = "Basics";
 
 function renderRules() {
@@ -1987,22 +1983,17 @@ function renderRules() {
       `Your pool stops at ${FP_CAP} FP. Anything earned while full is wasted, and the log says so.`,
       "Focus is spend-it-or-lose-it, not savings. A pool you never touch is income you threw away — and the Alchemist, which prints Focus you cannot bank, is a worse bargain than it looks.",
     ]);
-    card("Spending FP", ["Transformations cost 3 FP, except the Alchemist at 6 and the Phaser, which is free once its 3 FP spell is paid.", "Spell costs range from 2 to 5 FP."]);
-  }
-  if (ruleTab === "Transformations") {
-    for (const k of Object.keys(FORMS)) {
-      const F = FORMS[k];
-      card(`${F.glyph}  ${F.name} — ${F.cost} FP`,
-        [F.ability, "Penalty: " + F.penalty, ...(F.need ? ["Requires: " + F.need] : [])],
-        `${F.on === "any" ? "Any piece" : F.on === "pawn" ? "Pawns only" : "Queens only"} · ${F.cap ? `limit ${F.cap} per ${F.capScope === "board" ? "board" : "player"}` : "no limit"}`);
-    }
+    card("Spending FP", ["Transformations are cast like any other spell, for the same 3 FP most cards cost — except the Alchemist at 6 and the Phaser, which is free once its 3 FP spell is paid.", "Spell costs range from 2 to 6 FP."]);
   }
   if (ruleTab === "Spells") {
     for (const k of SPELL_IDS) {
       const S = SPELLS[k];
+      const scarcity = S.maxDraws
+        ? `${Math.max(0, S.maxDraws - (G?.drawCounts?.[k] || 0))} of ${S.maxDraws} left to draw`
+        : "common draw";
       card(`${S.name} — ${S.cost} FP`,
         [...(S.flavor ? [S.flavor] : []), S.text, "Penalty: " + S.penalty],
-        `${S.count} in the shared deck · ${S.timing}`);
+        `${scarcity} · ${S.timing}`);
     }
   }
 }
@@ -2632,6 +2623,30 @@ function aiSpellCandidates(phaseName) {
       }
     }
   }
+  // Transformations — cast like any other spell now. Considered regardless of
+  // `basicOnly`, matching how the old direct transform action was never gated
+  // by the AI's spell-tactics setting.
+  if (have("juggernautSpell"))
+    for (const i of juggernautTargets(AI.side).slice(0, aiWide(3))) {
+      const pawns = juggernautArmorPool(i);
+      if (pawns.length) out.push({ id: "juggernautSpell", payload: { target: i, sacrifice: pawns[0] } });
+    }
+  if (have("sentinelSpell"))
+    for (const i of sentinelTargets(AI.side).slice(0, aiWide(3)))
+      out.push({ id: "sentinelSpell", payload: { target: i } });
+  if (have("heraldSpell"))
+    for (const i of heraldTargets(AI.side).slice(0, aiWide(3)))
+      out.push({ id: "heraldSpell", payload: { target: i } });
+  if (have("enchanterSpell"))
+    for (const i of enchanterTargets(AI.side).slice(0, aiWide(3))) {
+      const opts = enchanterSacrificeOptions(i);
+      if (opts.length) out.push({ id: "enchanterSpell", payload: { target: i, sacrifices: opts[0] } });
+    }
+  if (have("alchemistSpell"))
+    for (const i of alchemistTargets(AI.side).slice(0, aiWide(3))) {
+      const spot = aiCheapestPawn(AI.side);
+      if (spot >= 0) out.push({ id: "alchemistSpell", payload: { target: i, sacrifice: spot } });
+    }
   if (basicOnly) return out;
 
   if (have("mirror"))
@@ -2710,45 +2725,6 @@ function aiResolveDiscard() {
   G.owedDiscard = null;
 }
 
-/** Every transformation the machine could legally make, with its sacrifices chosen. */
-function aiTransformCandidates() {
-  const P = G.players[AI.side];
-  if (P.noTransform > 0) return [];
-  const out = [];
-  for (let i = 0; i < CELLS; i++) {
-    const p = G.board[i];
-    if (!isAlly(p, AI.side) || p.form) continue;
-    for (const form of Object.keys(FORMS)) {
-      if (FORMS[form].viaSpell) continue;
-      if (transformBlocker(i, form)) continue;
-      for (const choices of aiTransformChoices(i, form)) out.push({ i, form, choices });
-    }
-  }
-  return out.slice(0, aiWide(12));
-}
-
-/** Possible sacrifice selections for a transformation — usually exactly one. */
-function aiTransformChoices(i, form) {
-  const owner = G.board[i].owner, p = G.board[i];
-  if (form === "juggernaut") {
-    const pawns = adjacentTo(i, (q) => isAlly(q, owner) && q.rank === "pawn" && !q.form);
-    return pawns.length ? [{ sacrifice: pawns[0] }] : [];
-  }
-  if (form === "alchemist") {
-    const spot = aiCheapestPawn(owner);
-    return spot >= 0 ? [{ sacrifice: spot }] : [];
-  }
-  if (form === "enchanter") {
-    const opts = [];
-    const queens = adjacentTo(i, (q) => isAlly(q, owner) && q.rank === "queen" && q.id !== p.id);
-    const pawns = adjacentTo(i, (q) => isAlly(q, owner) && q.rank === "pawn");
-    if (queens.length) opts.push({ sacrifices: [queens[0]] });
-    if (pawns.length >= 3) opts.push({ sacrifices: pawns.slice(0, 3) });
-    return opts;
-  }
-  return [{}];
-}
-
 /* ── the turn driver ────────────────────────────────────────────────────── */
 
 /* Pauses exist only so a human can watch the machine move. Headless self-play
@@ -2760,10 +2736,13 @@ function aiConsiderChronos() {
   const cfg = aiCfg();
   if (cfg.spells === "basic") return false;
   if (spellBlocker("chronos", AI.side)) return false;
+  // Furthest back available (up to 2 turns) — undoing more is never worse.
+  const opts = chronosTargets(AI.side);
+  const turnNo = opts[opts.length - 1];
   const d = cfg.policyDepth;
   const base = aiSearchValue(AI.side, d);
-  const v = aiSimValue(() => castSpell("chronos", AI.side, {}), AI.side, d);
-  if (v > base + cfg.chronosEdge) { castSpell("chronos", AI.side, {}); return true; }
+  const v = aiSimValue(() => castSpell("chronos", AI.side, { turnNo }), AI.side, d);
+  if (v > base + cfg.chronosEdge) { castSpell("chronos", AI.side, { turnNo }); return true; }
   return false;
 }
 
@@ -2774,7 +2753,7 @@ function aiConsiderChronos() {
  */
 function aiShouldDraw() {
   const P = G.players[AI.side];
-  if (P.noDraw > 0 || !G.deck.length) return false;
+  if (P.noDraw > 0 || !eligibleSpellIds().length) return false;
   if (G.drewThisTurn || G.hasActed || G.castThisTurn > 0) return false;
   if (capturersFor(AI.side).length) return false;        // never pass up a capture
   const d = aiCfg().policyDepth;
@@ -2806,25 +2785,6 @@ function aiCastOnce(phaseName) {
   }
   if (!best) return false;
   aiExecuteSpell(best);
-  return true;
-}
-
-function aiConsiderTransform() {
-  if (G.over) return false;
-  const cands = aiTransformCandidates();
-  if (!cands.length) return false;
-  const cfg = aiCfg();
-  const d = cfg.policyDepth;
-  const base = aiSearchValue(AI.side, d);
-  let best = null, bestV = base + cfg.transformEdge;
-  const stop = performance.now() + aiPolicyBudget();
-  for (const c of cands) {
-    const v = aiSimValue(() => applyTransform(c.i, c.form, c.choices), AI.side, d);
-    if (v > bestV) { bestV = v; best = c; }
-    if (performance.now() > stop) break;
-  }
-  if (!best) return false;
-  applyTransform(best.i, best.form, best.choices);
   return true;
 }
 
@@ -2863,7 +2823,6 @@ function aiRunTurn() {
     aiConsiderChronos();
     if (aiShouldDraw()) { drawSpell(AI.side); AI.thinking = false; endTurnLocal(); return; }
     for (let i = 0; i < 3 && aiCastOnce("declare"); i++);
-    if (!G.over) aiConsiderTransform();
     if (!G.over && !G.hasActed) {
       const res = searchBestMove(AI.side);
       if (res) for (const s of res.move.steps) { if (G.over) break; performMove(s.from, s.mv); }
@@ -2886,7 +2845,7 @@ function aiRunTurn() {
    cannot leave a turn half-finished with the board frozen.
    ─────────────────────────────────────────────────────────────────────────── */
 
-const AI_STAGES = ["discard", "chronos", "draw", "castDeclare", "transform", "move", "castEnd", "finish"];
+const AI_STAGES = ["discard", "chronos", "draw", "castDeclare", "move", "castEnd", "finish"];
 
 function aiTakeTurn() {
   if (!AI.on || G.over || G.turn !== AI.side || AI.thinking) return;
@@ -2932,10 +2891,6 @@ function aiStep(gen) {
       case "castDeclare":
         if (!aiCastOnce("declare")) { AI.stage++; wait = 0; }
         break;
-
-      case "transform":
-        if (!G.over) aiConsiderTransform();
-        AI.stage++; wait = 0; break;
 
       case "move": {
         if (!AI.moveSteps) {
@@ -3307,7 +3262,7 @@ function runTests() {
 
   /* ── the Herald's banner, end to end ───────────────────────────────── */
   group("The Herald's banner");
-  const broke = () => { G.players[0].fp = 0; G.players[0].hand = []; G.deck = []; };
+  const broke = () => { G.players[0].fp = 0; G.players[0].hand = []; };
 
   blank();
   put(rc(5, 4), 0, "pawn", { form: "herald" });
@@ -3344,7 +3299,7 @@ function runTests() {
   put(rc(5, 6), 1);
   put(rc(11, 0), 0);
   G.turn = 1; G.phase = "declare";
-  G.players[1].fp = 0; G.players[1].hand = []; G.deck = [];
+  G.players[1].fp = 0; G.players[1].hand = [];
   applyAction(1, { t: "move", from: rc(5, 6), to: rc(6, 5), kind: "step" });
   ok("the banner works the same way for Violet", G.heraldBonus === rc(6, 5), G.heraldBonus);
   ok("...and points down the board, the way Violet advances",
@@ -3455,31 +3410,37 @@ function runTests() {
   ok("Distortion Field freezes pawns adjacent AFTER the jump",
     G.board[rc(3, 6)].p_frozen === 1 || G.board[rc(3, 6)].frozen === 1);
 
-  /* ── deck ──────────────────────────────────────────────────────────── */
-  group("Spell deck");
+  /* ── the draw pool ─────────────────────────────────────────────────── */
+  group("Spell pool");
   G = newGame(0, 42); UI = freshUI();
-  ok("the shared deck holds 37 cards", G.deck.length === 37, G.deck.length);
-  const tally = {};
-  for (const id of G.deck) tally[id] = (tally[id] || 0) + 1;
-  for (const id of SPELL_IDS)
-    ok(`${SPELLS[id].name}: ${SPELLS[id].count} copies`, tally[id] === SPELLS[id].count, tally[id]);
-  const COSTS = { hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3 };
+  ok("every spell id starts eligible to draw", eligibleSpellIds().length === SPELL_IDS.length,
+    eligibleSpellIds().length);
+  const COSTS = {
+    hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
+    juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
+  };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));
   const FCOSTS = { juggernaut: 3, phaser: 0, sentinel: 3, herald: 3, enchanter: 3, alchemist: 6 };
   ok("every transformation cost matches the rulebook",
     Object.keys(FORMS).every((f) => FORMS[f].cost === FCOSTS[f]));
+  ok("every transformation is reached only through its spell",
+    Object.keys(FORMS).every((f) => FORMS[f].viaSpell === true));
 
   blank();
   G.players[0].fp = 40;
   G.players[0].hand = ["evasive", "evasive", "evasive", "evasive", "evasive"];
   put(rc(5, 4), 0); put(rc(5, 6), 0); put(rc(5, 8), 0); put(rc(5, 10), 0); put(rc(5, 2), 0);
   G.turn = 0; G.phase = "declare";
-  const before = G.deck.length;
   for (const from of [rc(5, 4), rc(5, 6), rc(5, 8), rc(5, 10), rc(5, 2)])
     castSpell("evasive", 0, { from, to: rc(6, colOf(from) + 1) });
-  ok("used cards return to the deck", G.deck.length === before + 5, G.deck.length - before);
-  ok("the deck reshuffles after 5 casts", G.castsSinceShuffle === 0, G.castsSinceShuffle);
+  ok("a common card stays eligible to draw after being cast", eligibleSpellIds().includes("evasive"));
+
+  blank();
+  G = newGame(0, 42); UI = freshUI();
+  G.drawCounts.cascade = SPELLS.cascade.maxDraws;
+  ok("a maxDraws card drops out of the pool once exhausted", !eligibleSpellIds().includes("cascade"));
+  ok("...but every other card is unaffected", eligibleSpellIds().length === SPELL_IDS.length - 1);
 
   blank();
   G.players[0].fp = 9; G.players[0].hand = ["cascade"];
@@ -3509,6 +3470,24 @@ function runTests() {
   ok("the Chronos card stays spent", !G.players[0].hand.includes("chronos"));
   ok("Chronal Backlash leaves exactly one card", G.players[0].hand.length === 1, G.players[0].hand.length);
   ok("play resumes with the caster", G.turn === 0 && G.phase === "declare");
+
+  blank(0);
+  put(rc(6, 5), 0); put(rc(2, 5), 1);
+  G.players[0].hand = ["chronos"];
+  G.players[0].fp = 9;
+  G.turnNo = 0;
+  beginTurn(0);                                     // Gold turn 1, snapshot taken
+  performMove(rc(6, 5), simpleMoves(rc(6, 5))[0]);   // Gold's 1st move
+  const firstTo = G.lastMove.to;
+  endTurnLocal(); endTurnLocal();                    // Violet, then back to Gold turn 2
+  performMove(firstTo, simpleMoves(firstTo)[0]);     // Gold's 2nd move
+  const secondTo = G.lastMove.to;
+  endTurnLocal(); endTurnLocal();                    // Violet, then back to Gold turn 3
+  const opts = chronosTargets(0);
+  ok("two of the caster's own turns are offered when two are behind", opts.length === 2, opts.length);
+  castSpell("chronos", 0, { turnNo: opts[1] });
+  ok("rewinding 2 turns undoes both moves, not just the last one",
+    !!G.board[rc(6, 5)] && !G.board[firstTo] && !G.board[secondTo]);
 
   /* ── Martyr's Pledge ───────────────────────────────────────────────── */
   group("The Martyr's Pledge");
@@ -3571,7 +3550,7 @@ function runTests() {
   put(rc(6, 5), 0);
   put(rc(1, 0), 1);
   G.turn = 0; G.phase = "declare";
-  G.players[0].fp = 0; G.players[0].hand = []; G.deck = [];
+  G.players[0].fp = 0; G.players[0].hand = []; G.removed = SPELL_IDS.slice();
   const passed = applyAction(0, { t: "move", from: rc(6, 5), to: rc(5, 4), kind: "step" });
   ok("a move that leaves nothing else to do passes the turn itself",
     G.turn === 1, `turn ${G.turn}, phase ${G.phase}`);
@@ -3583,7 +3562,9 @@ function runTests() {
   put(rc(6, 5), 0);
   put(rc(1, 0), 1);
   G.turn = 0; G.phase = "declare";
-  G.players[0].fp = 9; G.players[0].hand = []; G.deck = [];
+  // rc(5,4) sits on the enemy half, so once the pawn steps there Herald is a
+  // legal (spell-based) transformation — the affordable option this test needs.
+  G.players[0].fp = 9; G.players[0].hand = ["heraldSpell"];
   applyAction(0, { t: "move", from: rc(6, 5), to: rc(5, 4), kind: "step" });
   ok("a turn with a transformation still affordable is left alone",
     G.turn === 0 && G.phase === "end", `turn ${G.turn}, phase ${G.phase}`);
@@ -3592,9 +3573,9 @@ function runTests() {
   put(rc(6, 5), 0);
   put(rc(1, 0), 1);
   G.turn = 0; G.phase = "declare";
-  G.players[0].fp = 0; G.players[0].hand = []; G.deck = ["evasive"];
+  G.players[0].fp = 0; G.players[0].hand = [];
   applyAction(0, { t: "move", from: rc(6, 5), to: rc(5, 4), kind: "step" });
-  ok("...and a spare card in the deck is not an option once you have moved",
+  ok("...and a drawable pool is not an option once you have moved",
     G.turn === 1, `turn ${G.turn}`);
 
   /* ── the Focus Point ceiling ───────────────────────────────────────── */
@@ -3611,7 +3592,7 @@ function runTests() {
 
   blank();
   put(rc(6, 5), 0); put(rc(1, 0), 1);
-  G.players[0].fp = 0; G.players[0].hand = []; G.deck = ["evasive"];
+  G.players[0].fp = 0; G.players[0].hand = [];
   drawSpell(0);
   ok("drawing a card pays no Focus", G.players[0].fp === 0, G.players[0].fp);
   ok("...the card itself is the payment", G.players[0].hand.length === 1);

@@ -9,7 +9,7 @@
    either applied to this process's copy of the state or refused. Nothing a
    client sends is trusted: not the seat it claims, not the victim of a jump,
    not the target of a spell. The board goes back out through viewFor(), which
-   strips the opponent's hand, the deck order, and the undo snapshots.
+   strips the opponent's hand and the undo snapshots.
 
    Concurrency note. The engine keeps one module-level `G`, so a room's state is
    swapped in with setG() immediately before each applyAction() and read back
