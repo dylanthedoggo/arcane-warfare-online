@@ -2951,7 +2951,19 @@ function afterHandoff(sameSeat) {
   // hide from them, so a pass-the-device curtain would just be a click.
   if (G.dev) { UI.revealed = true; render(); return; }
   if (NET.on) { UI.revealed = true; render(); return; }  // each device shows one hand already
-  if (isAISeat(G.turn)) { UI.revealed = true; render(); setTimeout(aiTakeTurn, 40); return; }
+  // The machine is the third thing that waits for an animation, for the same
+  // reason as the curtain and the win sheet: your capture is still in the air
+  // when your turn ends, and a machine that starts thinking on a fixed 40ms
+  // timer renders its own move on top of it. That reads as your capture
+  // arriving a turn late. It only bites the seat that hands over TO the
+  // machine — as Violet you get your own thinking time and never see it.
+  // FX.then fires immediately when nothing is playing, so this costs an
+  // effects-off game nothing.
+  if (isAISeat(G.turn)) {
+    UI.revealed = true; render();
+    FX.then(() => setTimeout(aiTakeTurn, 40));
+    return;
+  }
   if (AI.on) { UI.revealed = true; render(); return; }   // one human: nothing to hide
   if (sameSeat) { render(); return; }
   raiseCurtain();
