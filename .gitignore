@@ -7,3 +7,7 @@ Thumbs.db
 # The original single-file game, kept as a rollback safety net.
 # public/index.html + public/engine.js are the live pair.
 index.pre-online-backup.html
+
+# Local Claude Code tooling config (dev-server launch info for the preview
+# pane) — machine-specific, not part of the app.
+.claude/
