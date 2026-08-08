@@ -773,6 +773,13 @@ function renderBoard() {
     if (isDark(i)) node.classList.add("playable");
     if (G.lastMove && i === G.lastMove.from) node.classList.add("lastfrom");
     if (G.lastMove && i === G.lastMove.to) node.classList.add("lastto");
+    // Chokepoint's seal and the two ends of a Rift are board features, not
+    // pieces — they have to be drawn by the square rather than by its occupant.
+    if (isBarrier(i)) { node.classList.add("barrier"); node.title = "Sealed by Chokepoint — nothing may land here or cross it."; }
+    if (G.rift && (i === G.rift.a || i === G.rift.b)) {
+      node.classList.add("riftend");
+      node.title = `Rift — anything landing here is carried to ${sq(i === G.rift.a ? G.rift.b : G.rift.a)}.`;
+    }
   }
 
   // The Herald's banner reaches exactly one diagonal step — a friendly pawn
@@ -1430,6 +1437,39 @@ function beginCast(id, caster) {
           (j) => finish({ target: i, sacrifice: j }));
       });
       return;
+
+    /* ── the board itself ───────────────────────────────────────────── */
+    case "tactician":
+      confirmFirst(`${S.text}<br><br>You have <b>${availableCaptures(caster)}</b> capture(s) available.`,
+        () => finish({}));
+      return;
+
+    case "rift":
+      target("Choose the first end of the rift", openSquares(), (a) => {
+        target("Choose the far end", openSquares().filter((j) => j !== a),
+          (b) => finish({ a, b }));
+      });
+      return;
+
+    case "wraparound":
+      confirmFirst(S.text, () => finish({}));
+      return;
+
+    case "anchor":
+      confirmFirst(`${S.text}<br><br>Pins the game at <b>turn ${G.turnNo}</b>.`, () => finish({}));
+      return;
+
+    case "echo":
+      target("Choose a piece to send back 3 turns", echoTargets(caster), (t) => finish({ target: t }));
+      return;
+
+    case "chokepoint": {
+      // The engine picks the square; naming it up front is the difference
+      // between a considered 4 FP and a coin flip.
+      const at = chokepointTarget(caster);
+      confirmFirst(`${S.text}<br><br>The engine has found <b>${sq(at)}</b>.`, () => finish({}));
+      return;
+    }
   }
 }
 
@@ -1994,14 +2034,22 @@ function renderRules() {
     // as a stripe that changes every other card.
     const byKind = SPELL_IDS.slice().sort((a, b) =>
       (spellKind(a) === "form" ? 0 : 1) - (spellKind(b) === "form" ? 0 : 1));
+    // The real odds, not the printed ones: what a card is worth being dealt
+    // depends on how many others are still eligible, and that shrinks as
+    // scarce cards run out.
+    const pool = (typeof G !== "undefined" && G) ? eligibleSpellIds() : SPELL_IDS;
+    const total = pool.reduce((s, id) => s + SPELLS[id].weight, 0);
     for (const k of byKind) {
       const S = SPELLS[k];
+      const odds = pool.includes(k) && total
+        ? `1 in ${Math.round(total / S.weight)} draws`
+        : "not in the pool";
       const scarcity = S.maxDraws
-        ? `${Math.max(0, S.maxDraws - (G?.drawCounts?.[k] || 0))} of ${S.maxDraws} left to draw`
-        : "common draw";
+        ? ` · ${Math.max(0, S.maxDraws - (G?.drawCounts?.[k] || 0))} of ${S.maxDraws} left`
+        : "";
       card(`${S.name} — ${S.cost} FP`,
         [...(S.flavor ? [S.flavor] : []), S.text, "Penalty: " + S.penalty],
-        `${scarcity} · ${S.timing}`,
+        `${S.rarity} · ${odds}${scarcity} · ${S.timing}`,
         spellKind(k));
     }
   }
@@ -2370,6 +2418,23 @@ function sideScore(side) {
   s -= Math.min(P.noDraw, 3) * 7;
   s -= Math.min(P.noTransform, 3) * 6;
   if (P.costCap > 0) s -= 10;
+
+  // The board-altering spells leave their effect in fields of their own rather
+  // than on any piece. Without a term here the evaluator cannot see the
+  // difference the cast made, aiSimValue returns roughly the baseline, and the
+  // machine quietly decides every one of them is worthless — so each gets
+  // priced, however roughly.
+  //
+  // The mobility loop above already reflects a Chokepoint's seal and a live
+  // Wraparound, since both change what simpleMoves returns; these are the
+  // things it CANNOT see.
+  if (G.mustCapture && G.mustCapture.player === side) s -= 12;   // an obligation, not an option
+  if (G.rift) {
+    // A rift is worth most to whoever has a piece near a mouth, and it is
+    // open to both sides — so price proximity, not ownership.
+    for (const end of [G.rift.a, G.rift.b])
+      for (const j of adjacentTo(end, (q) => isAlly(q, side))) s += 6;
+  }
   return s;
 }
 
@@ -2624,13 +2689,8 @@ function aiSpellCandidates(phaseName) {
   // Retreat a pawn that is about to be taken.
   if (have("evasive")) {
     const safe = new Set(evasiveTargets(AI.side));
-    for (const i of attacked.filter((i) => safe.has(i)).slice(0, aiWide(4))) {
-      const r = rowOf(i), c = colOf(i), b = -fwd(AI.side);
-      for (const dc of [-1, 1]) {
-        const to = rc(r + b, c + dc);
-        if (onBoard(r + b, c + dc) && !G.board[to]) out.push({ id: "evasive", payload: { from: i, to } });
-      }
-    }
+    for (const i of attacked.filter((i) => safe.has(i)).slice(0, aiWide(4)))
+      for (const to of evasiveDests(i, AI.side)) out.push({ id: "evasive", payload: { from: i, to } });
   }
   // Transformations — cast like any other spell now. Considered regardless of
   // `basicOnly`, matching how the old direct transform action was never gated
@@ -2675,6 +2735,33 @@ function aiSpellCandidates(phaseName) {
   if (have("cascade")) {
     const spot = aiCheapestPawn(AI.side);
     if (spot >= 0) out.push({ id: "cascade", payload: { sacrifice: spot } });
+  }
+
+  /* ── the board-altering four ──────────────────────────────────────────
+     Each is offered with the payload the referee will demand, and priced by
+     the same simulate-and-search pass as everything else. Tactician is the
+     one worth pruning hard: it pays for captures the machine was going to
+     take anyway, so it is only a candidate when there is real money in it. */
+  if (have("tactician") && !G.hasActed && availableCaptures(AI.side) >= 2)
+    out.push({ id: "tactician", payload: {} });
+  if (have("chokepoint") && chokepointTarget(AI.side) >= 0)
+    out.push({ id: "chokepoint", payload: {} });
+  if (have("echo"))
+    for (const i of echoTargets(AI.side).slice(0, aiWide(3)))
+      out.push({ id: "echo", payload: { target: i } });
+  if (have("wraparound") && !G.wrap)
+    out.push({ id: "wraparound", payload: {} });
+  if (have("anchor") && !G.anchor)
+    out.push({ id: "anchor", payload: {} });
+  if (have("rift")) {
+    // Only rifts worth walking into: one mouth beside a piece of ours, the
+    // other deep in enemy ground. Every pair would be thousands of candidates.
+    const open = openSquares();
+    const near = open.filter((j) => adjacentTo(j, (q) => isAlly(q, AI.side)).length);
+    const far = open.filter((j) => Math.abs(rowOf(j) - promoRow(AI.side)) <= 2);
+    for (const a of near.slice(0, aiWide(2)))
+      for (const b of far.slice(0, aiWide(2)))
+        if (a !== b) out.push({ id: "rift", payload: { a, b } });
   }
   return out;
 }
@@ -2797,6 +2884,27 @@ function aiCastOnce(phaseName) {
   return true;
 }
 
+/**
+ * Discharge a Tactician debt before the machine hands over.
+ *
+ * The referee blocks `endTurn` while the debt stands, but the machine does not
+ * end its turn through the referee — aiStep calls endTurnLocal() directly. So
+ * the one place the rule would bind is the one place the machine never goes,
+ * and without this it could take the Focus and walk away from the captures it
+ * was paid for. Captures are already all but mandatory here, so this fires
+ * rarely; it exists so the machine cannot get away with what a player cannot.
+ */
+function aiPayTacticianDebt() {
+  let guard = 0;
+  while (tacticianDebt(AI.side) && !G.over && guard++ < 12) {
+    const from = capturersFor(AI.side)[0];
+    const caps = captureMoves(from);
+    if (!caps.length) break;
+    performMove(from, caps[0]);
+    aiFinishMove();
+  }
+}
+
 /** Tidy up after the last jump of a move: finish any chain, take a Herald step. */
 function aiFinishMove() {
   let guard = 0;
@@ -2838,6 +2946,7 @@ function aiRunTurn() {
       aiFinishMove();
     }
     for (let i = 0; i < 3 && !G.over && aiCastOnce("end"); i++);
+    aiPayTacticianDebt();
   } catch (err) {
     log(`The machine hit an internal error and passes: ${err.message}`, "big");
     console.error(err);
@@ -2927,6 +3036,7 @@ function aiStep(gen) {
         break;
 
       case "finish":
+        aiPayTacticianDebt();
         AI.thinking = false;
         render();
         if (!G.over) endTurnLocal(); else announceWinner();
@@ -3439,9 +3549,14 @@ function runTests() {
   const COSTS = {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
+    tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
   };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));
+  ok("every spell declares a rarity the draw understands",
+    SPELL_IDS.every((id) => RARITY[SPELLS[id].rarity] > 0));
+  ok("...and its weight is derived from that rarity, never hand-written",
+    SPELL_IDS.every((id) => SPELLS[id].weight === RARITY[SPELLS[id].rarity]));
   const FCOSTS = { juggernaut: 3, phaser: 0, sentinel: 3, herald: 3, enchanter: 3, alchemist: 6 };
   ok("every transformation cost matches the rulebook",
     Object.keys(FORMS).every((f) => FORMS[f].cost === FCOSTS[f]));
@@ -3471,6 +3586,128 @@ function runTests() {
   ok("Temporal Cascade leaves the game after use", G.removed.includes("cascade"));
   ok("...grants 2 extra turns", G.players[0].extraTurns === 2);
   ok("...and bars drawing for 4 turns", G.players[0].noDraw === 4, G.players[0].noDraw);
+
+  /* ── the board-altering four ───────────────────────────────────────── */
+  group("Tactician");
+  blank();
+  put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(6, 3), 1); put(rc(0, 1), 1);
+  G.turn = 0; G.phase = "declare"; G.players[0].fp = 0; G.players[0].hand = ["tactician"];
+  ok("it counts every jump, not every jumper", availableCaptures(0) === 2, availableCaptures(0));
+  castSpell("tactician", 0, {});
+  ok("...and pays one Focus for each", G.players[0].fp === 2 - 1, G.players[0].fp);  // 2 gained, 1 spent
+  ok("...leaving a debt of one capture", tacticianDebt(0));
+  ok("...which blocks ending the turn",
+    applyAction(0, { t: "endTurn" }).ok === false);
+  applyAction(0, { t: "move", from: rc(7, 4), to: rc(5, 6), kind: "capture" });
+  ok("...and is discharged by taking one", !tacticianDebt(0));
+
+  blank();
+  put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(0, 1), 1);
+  G.turn = 0; G.phase = "declare"; G.players[0].fp = 9; G.players[0].hand = ["tactician"];
+  castSpell("tactician", 0, {});
+  removePiece(rc(6, 5), "is removed by the test", "sacrifice");
+  ok("a debt with nothing left to capture clears itself", !tacticianDebt(0));
+
+  group("Rift");
+  blank();
+  put(rc(7, 4), 0); put(rc(0, 1), 1);
+  G.turn = 0; G.phase = "declare"; G.players[0].fp = 9; G.players[0].hand = ["rift"];
+  castSpell("rift", 0, { a: rc(6, 5), b: rc(2, 3) });
+  ok("the rift remembers both ends", G.rift.a === rc(6, 5) && G.rift.b === rc(2, 3));
+  performMove(rc(7, 4), { to: rc(6, 5), kind: "step" });
+  ok("it is inert on the turn it was opened", !!G.board[rc(6, 5)] && !G.board[rc(2, 3)]);
+
+  blank();
+  put(rc(7, 4), 0); put(rc(0, 1), 1);
+  G.rift = { a: rc(6, 5), b: rc(2, 3), madeOn: 0 };
+  G.turn = 0; G.phase = "declare"; G.turnNo = 4;
+  performMove(rc(7, 4), { to: rc(6, 5), kind: "step" });
+  ok("afterwards it carries whatever lands on it",
+    !G.board[rc(6, 5)] && !!G.board[rc(2, 3)] && G.board[rc(2, 3)].owner === 0);
+  ok("...and the square it left is empty", !G.board[rc(7, 4)]);
+
+  blank();
+  put(rc(7, 4), 0); put(rc(2, 3), 1); put(rc(0, 1), 1);
+  G.rift = { a: rc(6, 5), b: rc(2, 3), madeOn: 0 };
+  G.turn = 0; G.turnNo = 4;
+  performMove(rc(7, 4), { to: rc(6, 5), kind: "step" });
+  ok("a blocked far end swallows nobody", !!G.board[rc(6, 5)]);
+
+  group("Wraparound");
+  blank();
+  put(rc(7, 0), 0); put(rc(0, 1), 1);
+  G.turn = 0; G.phase = "declare"; G.players[0].fp = 9; G.players[0].hand = ["wraparound"];
+  ok("with edges intact a pawn on column 0 has one step", simpleMoves(rc(7, 0)).length === 1);
+  castSpell("wraparound", 0, {});
+  const wrapped = simpleMoves(rc(7, 0));
+  ok("joined edges give it a second, across the seam", wrapped.length === 2, wrapped.length);
+  ok("...and every destination is still a dark square",
+    wrapped.every((m) => isDark(m.to)));
+  ok("...the wrapping one lands on column 11",
+    wrapped.some((m) => colOf(m.to) === N - 1));
+  // 2 rounds = 4 turns, ticked in beginTurn.
+  let wrapGuard = 0;
+  while (G.wrap > 0 && wrapGuard++ < 10) beginTurn(1 - G.turn);
+  ok("it expires after 2 rounds", G.wrap === 0 && simpleMoves(rc(7, 0)).length === 1, wrapGuard);
+
+  blank();
+  put(rc(7, 0), 0); put(rc(6, 11), 1); put(rc(0, 1), 1);
+  G.wrap = 4; G.turn = 0;
+  const wcaps = captureMoves(rc(7, 0));
+  ok("a capture across the seam takes the right victim",
+    wcaps.length === 1 && wcaps[0].victim === rc(6, 11), JSON.stringify(wcaps));
+  ok("...and lands two columns on, wrapped", wcaps[0].to === rc(5, 10), wcaps[0] && sq(wcaps[0].to));
+
+  group("Anchor In Time");
+  blank(0);
+  put(rc(6, 5), 0); put(rc(2, 5), 1);
+  G.players[0].hand = ["anchor"]; G.players[0].fp = 9; G.turnNo = 0;
+  beginTurn(0);
+  performMove(rc(6, 5), simpleMoves(rc(6, 5))[0]);
+  endTurnLocal(); endTurnLocal();
+  ok("Chronos can reach back before the anchor is dropped", chronosTargets(0).length > 0);
+  castSpell("anchor", 0, {});
+  ok("...and cannot once it is", chronosTargets(0).length === 0);
+  ok("...which binds the caster too", !!spellBlocker("chronos", 0));
+
+  group("Echo");
+  blank(0);
+  put(rc(6, 5), 0); put(rc(2, 5), 1);
+  G.players[0].hand = ["echo"]; G.players[0].fp = 9; G.turnNo = 0;
+  beginTurn(0);
+  const echoHome = rc(6, 5);
+  performMove(echoHome, simpleMoves(echoHome)[0]);
+  let at = G.lastMove.to;
+  for (let k = 0; k < 3; k++) {
+    endTurnLocal(); endTurnLocal();
+    if (simpleMoves(at).length) { performMove(at, simpleMoves(at)[0]); at = G.lastMove.to; }
+  }
+  const echoBack = echoTarget(at, 0);
+  ok("Echo finds where the piece stood 3 of its owner's turns ago", echoBack >= 0, echoBack);
+  castSpell("echo", 0, { target: at });
+  ok("...and sends it there", !!G.board[echoBack] && !G.board[at]);
+  ok("...removing itself from the game", G.removed.includes("echo"));
+
+  group("Chokepoint");
+  blank();
+  put(rc(5, 4), 1); put(rc(9, 2), 0); put(rc(0, 1), 1);
+  G.turn = 0; G.phase = "declare"; G.players[0].fp = 9; G.players[0].hand = ["chokepoint"];
+  const pick1 = chokepointTarget(0), pick2 = chokepointTarget(0);
+  ok("the engine picks the same square twice from one board", pick1 === pick2 && pick1 >= 0, pick1);
+  castSpell("chokepoint", 0, {});
+  ok("...and seals it", G.barriers.includes(pick1));
+  ok("...so nothing may land there", isBarrier(pick1) && !simpleMoves(rc(5, 4)).some((m) => m.to === pick1));
+  ok("...and it is not a piece", !G.board[pick1]);
+  ok("...so it cannot be mistaken for a side's last man",
+    !immobileWipeout(0) && !immobileWipeout(1));
+  ok("...and the caster pays with 2 turns of silence", G.players[0].noSpells === 2, G.players[0].noSpells);
+
+  blank();
+  put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(0, 1), 1);
+  G.barriers = [rc(5, 6)];
+  G.turn = 0;
+  ok("a sealed landing square kills the jump over it",
+    captureMoves(rc(7, 4)).length === 0);
 
   /* ── Chronos's Gaze ────────────────────────────────────────────────── */
   group("Chronos's Gaze");
