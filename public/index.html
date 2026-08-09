@@ -778,7 +778,7 @@ function renderBoard() {
       // viewFor deletes the field outright from every enemy piece, and against
       // the machine the field is only ever set on pieces the player owns or
       // the machine does — which is why this asks whose seat is looking.
-      if (p.hollow && p.owner === viewSeat()) d.classList.add("hollow");
+      if (p.hollow && (G.dev || p.owner === viewSeat())) d.classList.add("hollow");
       // A superposition is public — both players can see the two bodies. Which
       // one is the pawn is not, so the second class is owner-only and rests on
       // a field viewFor has already deleted from the other seat's copy.
@@ -786,7 +786,7 @@ function renderBoard() {
       if (p.twin) d.classList.add("twinned");
       if (p.quantum) {
         d.classList.add("quantum");
-        if (p.owner === viewSeat()) d.classList.add(p.quantumReal ? "qreal" : "qghost");
+        if (G.dev || p.owner === viewSeat()) d.classList.add(p.quantumReal ? "qreal" : "qghost");
       }
       // A penalty that has been paid but has not landed yet is otherwise
       // invisible, which reads as "the penalty never happened". Show it.
@@ -1119,6 +1119,10 @@ function drawWhy(P) {
  * one that remembers.
  */
 function visibleLog() {
+  // The sandbox has one person in both chairs, so there is nobody to keep a
+  // line from — and a workbench that hides half of what it just did is not
+  // much of a workbench.
+  if (G.dev) return G.log;
   const me = viewSeat();
   return G.log.filter((e) => e.only == null || e.only === me);
 }
@@ -4606,6 +4610,51 @@ function runTests() {
       !cQueued.includes("hollow"), cQueued.join(","));
     ok("...while the high-water mark still clears the whole batch, so a withheld effect cannot resurface",
       FX.seen === 2, FX.seen);
+
+    /* And the sandbox, which redacts nothing — one person is driving both
+       chairs, so a line or a marker withheld from "the other player" would
+       simply never be seen by anyone. This is the regression that shipped
+       first: the concealment cards were gated out of the one mode built for
+       trying cards out. */
+    // beginTurn is what stocks the sandbox — devStockHands runs from there,
+    // not from newGame. And renderBoard rather than render(): the suite stubs
+    // render() out at the top so the engine can be driven headlessly.
+    G = newGame(0, 42, { dev: true, mode: "local" });
+    UI = freshUI();
+    NET.on = false; AI.on = false;
+    G.turnNo = 0;
+    beginTurn(0);
+    ok("the workbench holds every card there is",
+      G.players[0].hand.length === SPELL_IDS.length, G.players[0].hand.length);
+    for (const cId of ["stutter", "pressure", "hollow", "quantum", "twin"])
+      ok(`...including ${SPELLS[cId].name}`, G.players[0].hand.includes(cId));
+
+    log("a sandbox line for one seat only", "rule", 0);
+    G.turn = 1;
+    ok("...and hides no log line from the other chair",
+      visibleLog().some((l) => l.text === "a sandbox line for one seat only"));
+
+    G.turn = 0;
+    const cH = hollowTargets(0)[0];
+    castSpell("hollow", 0, { target: cH });
+    const cMarks = () => document.querySelectorAll("#board .piece.hollow").length;
+    renderBoard();
+    const cOwnerSees = cMarks();
+    G.turn = 1; renderBoard();
+    ok("...nor a decoy marker, from either chair",
+      cOwnerSees === 1 && cMarks() === 1, `${cOwnerSees} then ${cMarks()}`);
+
+    // The same cast in a real hot-seat game must still be hidden. If this ever
+    // starts matching the sandbox, the exemption has leaked into real play.
+    G = newGame(0, 42, { mode: "local" });
+    UI = freshUI();
+    G.players[0].fp = 9; G.players[0].hand = ["hollow"]; G.phase = "declare"; G.turn = 0;
+    castSpell("hollow", 0, { target: hollowTargets(0)[0] });
+    renderBoard();
+    const cLiveOwner = cMarks();
+    G.turn = 1; renderBoard();
+    ok("outside the sandbox the decoy is still the owner's alone",
+      cLiveOwner === 1 && cMarks() === 0, `${cLiveOwner} then ${cMarks()}`);
 
     FX.enabled = cEnabled; FX.mode = cMode; FX.run = cRun;
     FX.reset();

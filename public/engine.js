@@ -444,14 +444,23 @@ function newPlayerState() {
    A CLOCK. `onlineOnly` cards need a timer, and only the server has one.
 
    Both gates live in modeSpellIds(), which is the single list every other
-   part of the draw is filtered from — including the dev sandbox's hand, so
-   the workbench cannot stock a card the pool would refuse to deal.
+   part of the draw is filtered from.
+
+   THE SANDBOX IS EXEMPT, and it took shipping the gate to see why. Hot-seat is
+   denied these cards because concealment across a shared screen is not worth
+   anything — but that is an argument about BALANCE, and the workbench is not
+   balanced. Its whole purpose is to put every card within reach and watch what
+   it does, so gating it on a fairness rule made the three newest cards the
+   only ones that could not be tried out at all. The sandbox holds everything,
+   and the interface stops redacting there too: one person is driving both
+   chairs, so there is nobody to keep a secret from.
    ───────────────────────────────────────────────────────────────────────── */
 
 const MODES = ["local", "ai", "online"];
 
 /** Every spell id this game's MODE permits at all. */
 function modeSpellIds(g = G) {
+  if (g && g.dev) return SPELL_IDS.slice();      // the workbench holds them all
   return SPELL_IDS.filter((id) => {
     const S = SPELLS[id];
     if (S.hidden && g.mode === "local") return false;
@@ -625,13 +634,11 @@ function devTopUp() {
 }
 
 /**
- * Both hands hold one of everything the MODE allows, always. The deck is left
- * alone.
+ * Both hands hold one of everything, always. The deck is left alone.
  *
- * Filtered through modeSpellIds rather than the raw list because the sandbox
- * is one screen with both hands on it, and a concealment card there would be
- * concealing nothing from nobody. Sharing the filter with eligibleSpellIds is
- * what stops the workbench from stocking a card the pool would never deal.
+ * Still routed through modeSpellIds rather than SPELL_IDS directly, so there
+ * stays exactly one answer to "which cards exist in this game" — and
+ * modeSpellIds is the thing that knows the sandbox is exempt.
  */
 function devStockHands() {
   for (const P of G.players) P.hand = modeSpellIds();

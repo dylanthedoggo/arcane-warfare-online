@@ -213,8 +213,11 @@ FX.pump = function () {
   // holds the real G and would otherwise animate the machine's secret on the
   // screen of the player it is being kept from. See visibleLog(), which does
   // the same job for the third channel.
+  // The sandbox shows everything: one person is driving both seats, so an
+  // effect withheld from "the other player" would simply never be seen.
+  const all = G.dev === true;
   const me = typeof viewSeat === "function" ? viewSeat() : null;
-  const fresh = G.fx.filter((e) => e.n > FX.seen && (e.only == null || e.only === me));
+  const fresh = G.fx.filter((e) => e.n > FX.seen && (all || e.only == null || e.only === me));
   // The mark advances to the top of the batch whether or not anything in it
   // will be drawn — including past events this seat is not allowed to see, so
   // a withheld effect cannot come back later once the mark catches up.

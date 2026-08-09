@@ -1396,16 +1396,42 @@ it("the drawable pool never offers what the mode forbids", () => {
     beginTurn(0);
     assert(!engine.eligibleSpellIds().includes("veil"),
       "eligibleSpellIds is the one list the draw reads — the gate has to hold there, not just in modeSpellIds");
-    // And the sandbox draws from the same list, so it cannot stock one either.
+  } finally {
+    delete SPELLS.veil.hidden;
+  }
+});
+
+it("...but the sandbox is exempt, because a workbench you cannot test a card in is useless", () => {
+  // This is the opposite of what shipped first, and deliberately so. Gating the
+  // sandbox on the concealment rule left Hollow, Quantum Pawn and Pressure as
+  // the only three cards in the game that could not be tried out anywhere.
+  SPELLS.veil.hidden = true;
+  SPELLS.mirror.onlineOnly = true;
+  try {
     const s = newGame(0, SEED, { dev: true });
     load(s);
     s.turnNo = 0;
     beginTurn(0);
-    assert(!getG().players[0].hand.includes("veil"),
-      "the workbench must not hold a card the pool would refuse to deal");
+    equal(getG().players[0].hand.length, SPELL_IDS.length,
+      "the workbench holds every card there is, whatever the mode would say");
+    assert(getG().players[0].hand.includes("veil"), "including a concealment card");
+    assert(getG().players[0].hand.includes("mirror"), "and one that needs the server");
   } finally {
     delete SPELLS.veil.hidden;
+    delete SPELLS.mirror.onlineOnly;
   }
+});
+
+it("every card this phase added can actually be reached from the sandbox", () => {
+  // The regression itself, named. Reported from a real session: three cards
+  // were missing from the one mode built for trying cards out.
+  const s = newGame(0, SEED, { dev: true });
+  load(s);
+  s.turnNo = 0;
+  beginTurn(0);
+  const hand = getG().players[0].hand;
+  for (const id of ["stutter", "pressure", "hollow", "quantum", "twin"])
+    assert(hand.includes(id), `the sandbox must be able to reach ${id}`);
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1497,8 +1523,8 @@ it("the sandbox really does relax what it claims to", () => {
   g.turnNo = 0;
   beginTurn(0);
 
-  equal(getG().players[0].hand.length, engine.modeSpellIds(getG()).length,
-    "the sandbox hand holds one of everything the mode allows");
+  equal(getG().players[0].hand.length, SPELL_IDS.length,
+    "the sandbox hand holds one of everything there is");
   equal(getG().players[0].fp, engine.FP_CAP, "and the pool starts full");
 
   const first = movablePieceOf(getG(), 0);
