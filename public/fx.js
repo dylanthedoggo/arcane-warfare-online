@@ -893,7 +893,10 @@ const FX_HOLD = {
   stutter:     (e) => (e.phase === "rewind" ? 1100 : 620),
   pressure:     () => 800,
   hollow:       () => 620,
-  hollowReveal: () => 700,
+  // The shatter has more to say than the collapse it replaced — the shards
+  // have to finish travelling before the pawn is handed back to the board.
+  hollowReveal: () => 820,
+  hollowReturn: () => 680,
   quantum:         () => 900,
   quantumCollapse: () => 1000,
   twin:            () => 900,
@@ -2122,28 +2125,78 @@ FX_PLAY.pressure = function (e) {
 };
 
 /**
- * A pawn is hollowed out. Only its owner ever sees this — viewFor drops the
- * event for the other seat — so it can afford to be plain: a quiet inward
- * collapse and the piece settling a shade fainter than it was.
+ * A shell closes over a pawn. Only its owner ever sees this — viewFor drops the
+ * event for the other seat — so it can afford to be plain. It is deliberately
+ * the inverse of the old decoy's inward collapse: a ring comes in from outside
+ * the square and SETTLES on the piece rather than swallowing it, and the piece
+ * stays at full strength underneath. Nothing here should read as a fade.
  */
 FX_PLAY.hollow = function (e) {
   const c = fxCtr(e.at);
   return Promise.all([
-    fxCollapse(c, FX_OWNER(e.owner), 560, { count: 2, reach: .7 }),
-    sleepFX(300).then(() => fxRing(c, FX_OWNER(e.owner), 1.5, .35, 420, { cls: "dashed" })),
-    fxAfterglow(e.at, FX_OWNER(e.owner), 700, { peak: .35 }),
+    // Down onto the piece and no further — 1.05 is "resting on it", not "gone".
+    fxRing(c, FX_OWNER(e.owner), 1.9, 1.05, 520, { cls: "thick" }),
+    sleepFX(240).then(() => fxRing(c, FX_OWNER(e.owner), 1.4, 1.02, 380, { cls: "dashed" })),
+    fxGlow(c, "#cfd6ef", 1.3, 420, { peak: .55 }),
+    fxAfterglow(e.at, FX_OWNER(e.owner), 700, { peak: .4 }),
   ]);
 };
 
-/** And the moment it stops being a secret. This one both players see. */
+/**
+ * And the moment it breaks. This one both players see.
+ *
+ * The pawn SURVIVES this, which is the whole difference from the version that
+ * played here before — that one was in FX_C.dead and shook the board, because
+ * back then the reveal was a death. It borrows from FX_PLAY.armor instead:
+ * neutral shell colour, no red, no shatter of the piece itself, and the shards
+ * thrown away from whatever struck it. `from` is null on a crown, a spell or a
+ * transformation, and the fallback is armor's — straight up off the square.
+ */
 FX_PLAY.hollowReveal = function (e) {
   const c = fxCtr(e.at);
+  const S = fxSize();
+  const src = e.from != null ? fxCtr(e.from) : { x: c.x, y: c.y - S };
+  const bias = Math.atan2(c.y - src.y, c.x - src.x);
   return Promise.all([
-    fxRing(c, FX_C.dead, .3, 2.4, 620, { cls: "thick" }),
-    fxGlow(c, FX_C.dead, 1.9, 420, { peak: .9 }),
-    fxGlyph(c, "◌", FX_C.dead, 640, { size: .6 }),
-    fxShake(6, 260),
-    fxAfterglow(e.at, FX_C.dead, 820, { peak: .5 }),
+    fxGlow(c, "#ffffff", 1.7, 340, { peak: .95 }),
+    fxRing(c, "#cfd6ef", 1.0, 2.2, 560, { cls: "thick" }),
+    fxShockwave(c, "#cfd6ef", 620, { count: 2, reach: .5 }),
+    // The shell comes apart. Thrown along the blow, so it reads as broken by
+    // something rather than as having simply expired.
+    fxStreaks(c, "#cfd6ef", 9, 540, { bias }),
+    fxAfterglow(e.at, "#cfd6ef", 820, { peak: .5 }),
+  ]);
+};
+
+/**
+ * And the pawn steps back out where the shell first closed over it.
+ *
+ * Plays immediately after hollowReveal, so the shatter is still on the square
+ * it left — the two read as one beat: the shell breaks HERE, the pawn is THERE.
+ * A reassembly rather than a run: it does not travel the distance, because it
+ * never walked it. Both players see this; there is nothing left to hide.
+ */
+FX_PLAY.hollowReturn = function (e) {
+  const pd = e.piece;
+  const a = fxCtr(e.from), b = fxCtr(e.to), own = FX_OWNER(e.owner);
+  FX.mask(e.to);
+  const g = fxGhost(e.from, pd);
+  const ms = 620;
+
+  return Promise.all([
+    // Pulled out of the broken square and put back together on its own.
+    FX.landing(e.to, fxPlay(g, [
+      { transform: "translate(0,0) scale(1)", opacity: .9 },
+      { transform: `translate(${(b.x - a.x) * .35}px,${(b.y - a.y) * .35}px) scale(.55)`, opacity: .15, offset: .45 },
+      { transform: `translate(${b.x - a.x}px,${b.y - a.y}px) scale(1)`, opacity: 1 },
+    ], ms, { easing: "cubic-bezier(.5,0,.2,1)" })),
+    fxGlow(a, "#cfd6ef", 1.2, 360, { peak: .5 }),
+    // The arrival is the loud half — this is the square the card was about.
+    sleepFX(ms * .55).then(() => Promise.all([
+      fxRing(b, own, 2.0, .9, 480, { cls: "thick" }),
+      fxGlow(b, own, 1.5, 420, { peak: .8 }),
+      fxAfterglow(e.to, own, 860, { peak: .5 }),
+    ])),
   ]);
 };
 

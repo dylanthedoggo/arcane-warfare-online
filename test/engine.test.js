@@ -970,7 +970,7 @@ function hollowReady(seat = 0) {
   return live;
 }
 
-it("keeps the decoy out of the board, the transcript and the log at once", () => {
+it("keeps the shell out of the board, the transcript and the log at once", () => {
   const g = hollowReady(0);
   const at = engine.hollowTargets(0)[0];
   allowed(applyAction(0, { t: "cast", id: "hollow", payload: { target: at } }));
@@ -981,15 +981,15 @@ it("keeps the decoy out of the board, the transcript and the log at once", () =>
   assert(!("hollow" in foe.board[at]),
     "the field must not merely be false on their copy — it must be absent");
   assert(foe.fx.every((e) => e.type !== "hollow"), "nor may the effect reach them");
-  assert(foe.log.every((l) => !/decoy/i.test(l.text)), "nor a log line naming it");
+  assert(foe.log.every((l) => !/a shell closes over/i.test(l.text)), "nor a log line naming it");
 
   const mine = viewFor(live, 0, {});
   equal(mine.board[at].hollow, true, "while the owner sees all three");
   assert(mine.fx.some((e) => e.type === "hollow"));
-  assert(mine.log.some((l) => /decoy/i.test(l.text)));
+  assert(mine.log.some((l) => /a shell closes over/i.test(l.text)));
 });
 
-it("still tells the opponent that SOME pawn is now a decoy", () => {
+it("still tells the opponent that SOME pawn is now shelled", () => {
   // The bluff only works if they know there is one. What is hidden is which.
   const g = hollowReady(0);
   const at = engine.hollowTargets(0)[0];
@@ -999,7 +999,7 @@ it("still tells the opponent that SOME pawn is now a decoy", () => {
     "casting a card is public — it is the target that is not");
 });
 
-it("cannot be cast on somebody else's pawn, or on a piece already disguised", () => {
+it("cannot be cast on somebody else's pawn, or on a pawn already shelled", () => {
   const g = hollowReady(0);
   const theirs = anyPieceOf(getG(), 1);
   refused(applyAction(0, { t: "cast", id: "hollow", payload: { target: theirs } }), "pawn of yours");
@@ -1014,7 +1014,7 @@ it("can never capture", () => {
   const live = getG();
   assert(engine.captureMoves(rc(7, 4)).length > 0, "the fixture really does offer a jump");
   live.board[rc(7, 4)].hollow = true;
-  equal(engine.captureMoves(rc(7, 4)).length, 0, "and a decoy cannot take it");
+  equal(engine.captureMoves(rc(7, 4)).length, 0, "and a shelled pawn cannot take it");
   equal(engine.capturersFor(0).length, 0,
     "so the mandatory-capture rule does not bill it for walking away either");
 });
@@ -1026,35 +1026,330 @@ it("is revealed, and the spell wasted, when an enemy spell picks it out", () => 
   const g = staged([[rc(7, 4), 0], [rc(2, 3), 1], [rc(0, 1), 1]], 1);
   const live = getG();
   live.board[rc(7, 4)].hollow = true;
+  live.board[rc(7, 4)].hollowHome = rc(9, 8);
   live.players[1].hand = ["veil"];
   live.players[1].fp = 9;
   assert(engine.veilTargets(1).includes(rc(7, 4)),
-    "the decoy must still appear in the enemy's target list");
+    "the shelled pawn must still appear in the enemy's target list");
 
   allowed(applyAction(1, { t: "cast", id: "veil", payload: { target: rc(7, 4) } }));
   const after = getG();
-  equal(after.board[rc(7, 4)].hollow, false, "the disguise came off");
-  equal(after.board[rc(7, 4)].noCapture, 0, "and the stun never landed");
+  equal(after.board[rc(7, 4)], null, "a spell breaks the shell the same way a jump does");
+  assert(after.board[rc(9, 8)], "and the pawn steps back out where the shell was cast");
+  equal(after.board[rc(9, 8)].hollow, false, "the shell is spent");
+  equal(after.board[rc(9, 8)].noCapture, 0, "and the stun never landed");
   assert(after.log.some((l) => /was a Hollow/.test(l.text)), "the reveal is announced");
   assert(after.log.filter((l) => /was a Hollow/.test(l.text)).every((l) => l.only == null),
     "and announced to BOTH seats — the reveal is the payoff, not another secret");
 });
 
-it("is revealed by the crown", () => {
+it("wastes Mind Control too, and still charges the exhaustion for aiming at it", () => {
+  // A penalty that only landed when the spell worked would make guessing free.
+  const g = staged([[rc(7, 4), 0], [rc(2, 3), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(7, 4)].hollow = true;
+  live.board[rc(7, 4)].hollowHome = rc(9, 8);
+  live.players[1].hand = ["mindcontrol"];
+  live.players[1].fp = 9;
+
+  allowed(applyAction(1, { t: "cast", id: "mindcontrol", payload: { target: rc(7, 4) } }));
+  const after = getG();
+  assert(after.board[rc(9, 8)], "the pawn survives, and it is home");
+  equal(after.board[rc(9, 8)].hollow, false, "the shell is spent");
+  equal(after.mindControl, null, "and nothing was seized");
+  assert(after.players[1].noSpells > 0, "but the exhaustion lands anyway");
+});
+
+it("is revealed by the crown, and does NOT get dragged home for it", () => {
+  // The retreat is what the enemy's blow buys them. Being crowned is something
+  // you did on purpose, and yanking the new queen off the promotion rank for it
+  // would be a punishment nobody asked for.
   const g = staged([[rc(1, 2), 0], [rc(9, 4), 1]]);
   getG().board[rc(1, 2)].hollow = true;
+  getG().board[rc(1, 2)].hollowHome = rc(9, 8);
   allowed(applyAction(0, { t: "move", from: rc(1, 2), to: rc(0, 1), kind: "step" }));
   const p = getG().board[rc(0, 1)];
   equal(p.rank, "queen");
   equal(p.hollow, false, "nothing below carries a secret queen");
+  equal(getG().board[rc(9, 8)], null, "and she stays crowned where she was crowned");
 });
 
-it("is revealed by the capture that kills it", () => {
+/* ── the shell ───────────────────────────────────────────────────────────────
+   The half of this card that is a rule rather than a secret. Absorption lives
+   in resolveCapture and nowhere else, which is what makes an enemy jump
+   different from a sacrifice the owner chose — see the HOLLOW block in the
+   engine.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A shelled pawn of seat 0 at e5, with seat 1 to move and a jump at it.
+ *
+ * `home` is where the shell was closed over it — by default a free square well
+ * away from the action, so the retreat has somewhere to go and the tests can
+ * tell "stayed put" from "went home" without ambiguity. Pass rc(7,4) for a pawn
+ * that never moved since the cast.
+ */
+function shelled(home = rc(9, 8)) {
   const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 1);
-  getG().board[rc(7, 4)].hollow = true;
+  const live = getG();
+  live.board[rc(7, 4)].hollow = true;
+  live.board[rc(7, 4)].hollowHome = home;
+  return live;
+}
+
+it("absorbs an enemy jump, and the pawn steps back out where the shell was cast", () => {
+  const live = shelled(rc(9, 8));
+  const attacker = live.board[rc(6, 5)];
+  const fpBefore = live.players[1].fp;
+  const capsBefore = attacker.captures;
+
   allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
-  assert(getG().log.some((l) => /was a Hollow/.test(l.text)),
-    "the opponent finds out what they spent the jump on");
+  const after = getG();
+
+  equal(after.board[rc(7, 4)], null, "the pawn is NOT where the jump landed on it");
+  assert(after.board[rc(9, 8)], "it is back on the square the shell closed over it");
+  equal(after.board[rc(9, 8)].owner, 0, "and it is still its owner's");
+  equal(after.board[rc(9, 8)].hollow, false, "with the shell spent");
+  equal(after.board[rc(9, 8)].hollowHome, -1, "and nothing left to snap back to");
+  assert(after.board[rc(8, 3)], "the attacker completed the jump and landed beyond it");
+  equal(after.board[rc(6, 5)], null, "vacating the square it came from");
+  equal(after.players[1].fp, fpBefore, "a jump that took nothing pays no Focus");
+  equal(after.board[rc(8, 3)].captures, capsBefore,
+    "nor does it count toward the tally that gates a Phaser");
+  assert(after.log.some((l) => /was a Hollow/.test(l.text)), "the break is announced");
+  assert(after.log.some((l) => /back at/.test(l.text)), "and so is where it went");
+  assert(after.log.filter((l) => /was a Hollow|back at/.test(l.text)).every((l) => l.only == null),
+    "both to both seats — the reveal is the payoff, not another secret");
+});
+
+it("stands its ground when there is nowhere to step back to", () => {
+  // Somebody is on the old square. The shell is still spent and the pawn still
+  // survives — it simply keeps the square it is on. Never a swap, never a kill.
+  const live = shelled(rc(9, 8));
+  live.board[rc(9, 8)] = Object.assign({}, live.board[rc(7, 4)], { id: 999, hollow: false, hollowHome: -1 });
+
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  const after = getG();
+  assert(after.board[rc(7, 4)], "the pawn survives where it stood");
+  equal(after.board[rc(7, 4)].hollow, false, "the shell is spent all the same");
+  equal(after.board[rc(9, 8)].id, 999, "and the piece already at home is untouched");
+  assert(after.log.some((l) => /cannot go back/.test(l.text)), "and the player is told why");
+});
+
+it("refuses a home square the attacker has just landed on", () => {
+  // The landing square is on the far side of the victim, which is the very
+  // direction home lies in — so the two really can collide. The attacker is
+  // placed first precisely so the retreat can see it and decline.
+  const live = shelled(rc(8, 3));
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  const after = getG();
+  assert(after.board[rc(7, 4)], "the pawn holds its square");
+  equal(after.board[rc(8, 3)].owner, 1, "and the attacker keeps the one it landed on");
+});
+
+it("absorbs exactly one — the next jump kills", () => {
+  const live = shelled(rc(7, 4));      // never moved since the cast
+  applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" });
+  const after = getG();
+  assert(after.board[rc(7, 4)], "it stayed put, because home is where it stood");
+  equal(after.board[rc(7, 4)].hollow, false, "and the shell went on the first jump");
+
+  // Bring a second attacker and let it take the now-ordinary pawn.
+  const g2 = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 1);
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  equal(getG().board[rc(7, 4)], null, "an unshelled pawn dies to the same jump");
+});
+
+it("does not stop the mandatory-capture rule — the wasted jump is still forced", () => {
+  const live = shelled();
+  assert(engine.capturersFor(1).includes(rc(6, 5)),
+    "the enemy is still billed for a jump that will accomplish nothing");
+});
+
+it("does not save a pawn its own side chooses to sacrifice", () => {
+  const live = staged([[rc(7, 4), 0], [rc(5, 2), 0], [rc(0, 1), 1]], 0);
+  live.board[rc(7, 4)].hollow = true;
+  live.players[0].hand = ["cascade"];
+  live.players[0].fp = 9;
+
+  allowed(applyAction(0, { t: "cast", id: "cascade", payload: { sacrifice: rc(7, 4) } }));
+  equal(getG().board[rc(7, 4)], null,
+    "the shell answers the enemy, not a price the owner chose to pay");
+});
+
+it("is never the piece a skipped capture forfeits, because it never had the jump", () => {
+  // The forfeit only ever collects a piece that COULD have jumped, and a
+  // shelled pawn never can. So the shell is not a defence here — it is simply
+  // never the candidate. Worth pinning: it is the one own-piece removal the
+  // player does not choose, and the reason it cannot reach a shell is a rule
+  // two functions away (canCapture) rather than anything Hollow does.
+  const live = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 0);
+  assert(engine.capturersFor(0).includes(rc(7, 4)), "the fixture really does offer a jump");
+  live.board[rc(7, 4)].hollow = true;
+  assert(!engine.capturersFor(0).includes(rc(7, 4)),
+    "and once shelled that pawn is neither billed for the jump nor forfeit for skipping it");
+});
+
+it("does not save a pawn sacrificed to a transformation either", () => {
+  // The Juggernaut eats an ADJACENT friendly pawn, so the two have to touch.
+  const live = staged([[rc(7, 4), 0], [rc(6, 3), 0], [rc(0, 1), 1]], 0);
+  live.board[rc(7, 4)].hollow = true;
+  live.players[0].hand = ["juggernautSpell"];
+  live.players[0].fp = 9;
+  allowed(applyAction(0, {
+    t: "cast", id: "juggernautSpell", payload: { target: rc(6, 3), sacrifice: rc(7, 4) },
+  }));
+  equal(getG().board[rc(7, 4)], null, "the Juggernaut eats it, shell and all");
+});
+
+it("keeps the chain going, and a Sentinel still halts it", () => {
+  // A shelled pawn absorbs the first jump; the attacker lands and, having
+  // another jump from there, is still on a chain — exactly as armor behaves.
+  const live = staged([[rc(7, 4), 0], [rc(5, 2), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 1);
+  live.board[rc(7, 4)].hollow = true;
+  live.board[rc(7, 4)].hollowHome = rc(9, 8);
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  const after = getG();
+  assert(after.board[rc(9, 8)], "the shelled pawn survived the first jump, from home");
+  assert(after.board[rc(8, 3)], "and the attacker is on its landing square");
+});
+
+it("leaves an empty square behind, which can open a jump that was not there", () => {
+  // Worth pinning because it is a genuine consequence, not an accident: the
+  // retreat vacates a square mid-chain, and the board the chain code reads is
+  // the board after the retreat.
+  const live = shelled(rc(9, 8));
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  equal(getG().board[rc(7, 4)], null, "the jumped square is empty afterwards");
+});
+
+it("does not trigger Eye For An Eye, and does not spend the mark", () => {
+  const live = shelled(rc(9, 8));
+  live.board[rc(7, 4)].eyeMark = 3;
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  const after = getG();
+  assert(after.board[rc(8, 3)], "the capturer is alive — the Eye avenges a death, and none happened");
+  // Still owed, and it travelled home with the pawn. It ticks down with the
+  // turn like any other mark, which is a different thing from being SPENT — a
+  // jump that killed nothing does not cash it in.
+  assert(after.board[rc(9, 8)].eyeMark > 0,
+    "and the mark is still there for the jump that finally lands");
+});
+
+it("walks out from under Hopscotch's second blow as well", () => {
+  // Hopscotch aims at lastCapture.victim, which is the square the pawn LEFT.
+  // Nothing in Hopscotch knows about the retreat; its existing `if (v)` guard
+  // is what makes this work, and that is the point.
+  const live = shelled(rc(9, 8));
+  live.players[1].hand = ["hopscotch"];
+  live.players[1].fp = 9;
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  const mid = getG();
+  assert(mid.board[rc(9, 8)], "it went home");
+  assert(mid.lastCapture && mid.lastCapture.survived,
+    "and the jump is recorded the same way armor records one — survived");
+  allowed(applyAction(1, { t: "cast", id: "hopscotch", payload: {} }));
+  assert(getG().board[rc(9, 8)], "the second blow falls on the square it already left");
+});
+
+it("...but Hopscotch does finish it when it had nowhere to go", () => {
+  const live = shelled(rc(7, 4));      // home is where it stands: no retreat
+  live.players[1].hand = ["hopscotch"];
+  live.players[1].fp = 9;
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  assert(getG().board[rc(7, 4)], "survived the jump, standing still");
+  allowed(applyAction(1, { t: "cast", id: "hopscotch", payload: {} }));
+  equal(getG().board[rc(7, 4)], null, "and the second blow lands on a pawn with no shell left");
+});
+
+it("is shattered by a transformation — no secret shell on a Sentinel", () => {
+  const live = staged([[rc(7, 4), 0], [rc(0, 1), 1]], 0);
+  live.board[rc(7, 4)].hollow = true;
+  live.players[0].hand = ["sentinelSpell"];
+  live.players[0].fp = 9;
+  getG().board[rc(7, 4)].hollowHome = rc(9, 8);
+  allowed(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: rc(7, 4) } }));
+  equal(getG().board[rc(7, 4)].form, "sentinel", "the form landed");
+  equal(getG().board[rc(7, 4)].hollow, false, "and it gives the shell away");
+  assert(getG().log.some((l) => /was a Hollow/.test(l.text)), "publicly");
+  equal(getG().board[rc(9, 8)], null,
+    "and it stays where you built it — a transformation is not the enemy's blow");
+});
+
+it("is re-castable once the shell has been spent, and remembers the new square", () => {
+  const live = shelled(rc(9, 8));
+  applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" });
+  const after = getG();
+  after.turn = 0;
+  after.phase = "declare";
+  after.hasActed = false;
+  after.players[0].hand = ["hollow"];
+  after.players[0].fp = 9;
+  assert(engine.hollowTargets(0).includes(rc(9, 8)),
+    "a pawn whose shell is gone is an ordinary pawn again");
+  allowed(applyAction(0, { t: "cast", id: "hollow", payload: { target: rc(9, 8) } }));
+  equal(getG().board[rc(9, 8)].hollow, true, "and can wear a second one");
+  equal(getG().board[rc(9, 8)].hollowHome, rc(9, 8),
+    "whose home is where THIS shell closed, not where the last one did");
+});
+
+it("carries its home with it however far it walks", () => {
+  const live = staged([[rc(7, 4), 0], [rc(0, 1), 1]], 0);
+  live.players[0].hand = ["hollow"];
+  live.players[0].fp = 9;
+  allowed(applyAction(0, { t: "cast", id: "hollow", payload: { target: rc(7, 4) } }));
+  equal(getG().board[rc(7, 4)].hollowHome, rc(7, 4), "the cast square is the home square");
+
+  // Walk it. The home does not move with it — that is the entire mechanic.
+  const g = getG();
+  g.turn = 0; g.phase = "declare"; g.hasActed = false;
+  allowed(applyAction(0, { t: "move", from: rc(7, 4), to: rc(6, 3), kind: "step" }));
+  const moved = getG().board[rc(6, 3)];
+  equal(moved.hollow, true, "the shell travels with the pawn");
+  equal(moved.hollowHome, rc(7, 4), "the square it will come back to does not");
+});
+
+it("hides the home square from the enemy as thoroughly as the shell itself", () => {
+  // A home square on a piece would say "this one is shelled" just as loudly as
+  // the flag does, so it has to be redacted by the same mechanism.
+  assert(engine.SECRET_PIECE_FIELDS.includes("hollowHome"),
+    "hollowHome must be on the redaction list");
+  const live = shelled(rc(9, 8));
+  const foe = viewFor(live, 1, {});
+  assert(!("hollowHome" in foe.board[rc(7, 4)]), "and absent, not merely blanked, on their copy");
+  equal(viewFor(live, 0, {}).board[rc(7, 4)].hollowHome, rc(9, 8), "while the owner is told");
+});
+
+it("cannot be stacked with a twinning or a superposition, in either order", () => {
+  // Both of those take a pawn off the board without passing through
+  // resolveCapture, so a shell on one would evaporate having done nothing.
+  const live = staged([[rc(5, 4), 0], [rc(0, 1), 1]], 0);
+  assert(engine.hollowTargets(0).includes(rc(5, 4)), "an ordinary pawn is fair game");
+  assert(engine.twinTargets(0).includes(rc(5, 4)));
+  assert(engine.quantumTargets(0).includes(rc(5, 4)));
+
+  live.board[rc(5, 4)].hollow = true;
+  assert(!engine.twinTargets(0).includes(rc(5, 4)), "a shelled pawn cannot be twinned");
+  assert(!engine.quantumTargets(0).includes(rc(5, 4)), "nor superposed");
+
+  live.board[rc(5, 4)].hollow = false;
+  live.board[rc(5, 4)].twin = 77;
+  assert(!engine.hollowTargets(0).includes(rc(5, 4)), "and a twin cannot be shelled");
+  live.board[rc(5, 4)].twin = 0;
+  live.board[rc(5, 4)].quantum = 77;
+  assert(!engine.hollowTargets(0).includes(rc(5, 4)), "nor can half a superposition");
+});
+
+it("leaves the enemy's copy of the pawn shaped identically before and after", () => {
+  // A spent shell must not be detectable by what the object looks like. viewFor
+  // deletes the field either way, so both copies have the same keys.
+  const live = shelled(rc(9, 8));
+  const before = Object.keys(viewFor(live, 1, {}).board[rc(7, 4)]).sort().join(",");
+  assert(!before.split(",").includes("hollow"), "the field is absent while the shell holds");
+
+  applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" });
+  const after = Object.keys(viewFor(getG(), 1, {}).board[rc(9, 8)]).sort().join(",");
+  equal(after, before, "and absent in exactly the same way once it is spent");
 });
 
 /* ── Quantum Pawn ────────────────────────────────────────────────────────── */

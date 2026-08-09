@@ -188,11 +188,23 @@ button:disabled{cursor:not-allowed}
 .piece.sentinel{border-radius:14%;width:84%;height:84%}
 .piece.marked{outline:2.5px solid var(--bad);outline-offset:2.5px}
 .piece.veiled{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(120,255,220,.75) inset}
-/* Only ever drawn on your own decoys — see renderBoard. Deliberately quiet:
-   it has to be legible to the player holding it without turning into a tell
+/* Only ever drawn on your own shells — see renderBoard. A shield, not a ghost:
+   the pawn under it is alive and reads at full strength, with the shell sitting
+   around it. Deliberately NOT .piece.armored's spinning ring — that class is
+   public, and a shell that looked like armor would announce itself. Still quiet
+   enough to be legible to the player holding it without turning into a tell
    over somebody's shoulder. */
-.piece.hollow{opacity:.72;box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(255,255,255,.22) inset}
-.piece.hollow .glyph{opacity:.5}
+.piece.hollow{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(228,236,255,.5) inset, 0 0 0 2px rgba(228,236,255,.3)}
+/* The square one of YOUR shells will put its pawn back on — see renderBoard,
+   which gates it on the same redacted field the ring uses. Drawn as an empty
+   outline rather than a fill: it is a place, not a piece, and it must not read
+   as a move dot. `.blocked` is the same square with somebody standing on it,
+   which means the retreat has nowhere to go. */
+.cell.hollowhome::after{
+  content:"";position:absolute;inset:16%;border-radius:50%;pointer-events:none;
+  border:2px dashed rgba(228,236,255,.55);
+}
+.cell.hollowhome.blocked::after{border-color:rgba(240,87,107,.5);border-style:dotted}
 /* Both halves of a superposition, drawn for everybody. */
 .piece.quantum{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(150,190,255,.55) inset}
 /* And which half is which, drawn only for the player entitled to know. */
@@ -823,6 +835,27 @@ function renderBoard() {
     }
   }
 
+  // Where each of YOUR shells will put its pawn back. The retreat is the whole
+  // card and it is invisible on the board otherwise — without this the caster
+  // has to hover the pawn to remember which square they are playing toward.
+  //
+  // Gated exactly like the shell ring above, and on the same field: viewFor
+  // deletes hollowHome from every enemy piece, so online the marker cannot be
+  // drawn for the opponent even by accident. The viewSeat() half is what covers
+  // the modes where this device holds the whole game — against the machine, the
+  // full state is right here and only the seat asking may read it.
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (!p || !p.hollow || !(p.hollowHome >= 0) || p.hollowHome === i) continue;
+    if (!(G.dev || p.owner === viewSeat())) continue;
+    const home = CELL_NODES[p.hollowHome];
+    home.classList.add("hollowhome");
+    if (G.board[p.hollowHome]) home.classList.add("blocked");
+    home.title = G.board[p.hollowHome]
+      ? `Your Hollow at ${sq(i)} wants to come back here — but this square is occupied, so it would have to stand its ground instead.`
+      : `Your Hollow at ${sq(i)} steps back out here when its shell breaks.`;
+  }
+
   // The Herald's banner reaches exactly one diagonal step — a friendly pawn
   // landing adjacent to it may advance one extra square. That is a real rule
   // with real consequences and the board never said a word about it, so the
@@ -858,6 +891,17 @@ function renderBoard() {
 }
 
 function describePiece(p, i) {
+  /**
+   * May this device read `p`'s secrets — the concealment-card fields?
+   *
+   * Online the question is already settled: viewFor deleted them, so the
+   * branches below simply do not fire. It is the OFFLINE modes this exists for.
+   * Against the machine the client holds the whole game, enemy fields and all,
+   * so a tooltip that just tested `p.hollow` would cheerfully announce the
+   * machine's own Hollow to the player hovering it — the board stopped doing
+   * that at the `.hollow` class and the tooltip was still doing it.
+   */
+  const mayRead = G.dev || p.owner === viewSeat();
   const bits = [`${PLAYERS[p.owner].name} ${pieceLabel(p)} · ${sq(i)}`];
   if (p.form) bits.push(FORMS[p.form].ability);
   if (p.armor) bits.push("Armored — survives the first capture.");
@@ -866,11 +910,14 @@ function describePiece(p, i) {
   if (p.p_frozen > 0) bits.push(`PENALTY PENDING — will be frozen for ${p.p_frozen} turn(s) starting next turn.`);
   if (p.p_noCapture > 0) bits.push(`PENALTY PENDING — will be unable to capture for ${p.p_noCapture} turn(s).`);
   if (p.twin) bits.push("TEMPORAL TWIN — both bodies are real and both move each turn. Whatever ends either one ends both.");
+  // The superposition itself is public — both bodies are plainly on the board.
+  // WHICH of them is the pawn is not, so that half needs the same gate.
   if (p.quantum)
-    bits.push(p.quantumReal === true ? "SUPERPOSED — and this is the real pawn. Neither square can capture."
-      : p.quantumReal === false ? "SUPERPOSED — this square is the empty half. Neither can capture."
+    bits.push(mayRead && p.quantumReal === true ? "SUPERPOSED — and this is the real pawn. Neither square can capture."
+      : mayRead && p.quantumReal === false ? "SUPERPOSED — this square is the empty half. Neither can capture."
       : "SUPERPOSED — one of these two squares holds the pawn. Neither can capture.");
-  if (p.hollow) bits.push("HOLLOW — a decoy. It cannot capture, and your opponent sees an ordinary pawn.");
+  if (p.hollow && mayRead)
+    bits.push(`HOLLOW — a shell. Your opponent sees an ordinary pawn. The first enemy jump or enemy spell aimed at it breaks on the shell, takes nothing, and this pawn steps back out at ${p.hollowHome >= 0 ? sq(p.hollowHome) : "its old square"}${p.hollowHome >= 0 && G.board[p.hollowHome] ? " — which is occupied right now, so it would have to stand its ground instead" : ""}. It cannot capture until then, and it will not save this pawn from a sacrifice you choose yourself.`);
   if (p.eyeMark > 0) bits.push(`Eye For An Eye — marked for ${p.eyeMark} more enemy turn(s).`);
   if (p.veilBy != null && p.noCapture > 0)
     bits.push(`${PLAYERS[p.veilBy].name} owes friendly fire when this stun expires.`);
@@ -1554,7 +1601,7 @@ function beginCast(id, caster) {
       return;
 
     case "hollow":
-      target("Choose a pawn to hollow out — your opponent will not be told which",
+      target("Choose a pawn to close a shell over — it is the square it comes back to, and your opponent will not be told which",
         hollowTargets(caster), (t) => finish({ target: t }));
       return;
 
@@ -2390,12 +2437,30 @@ let AI_NODES = 0, AI_DEADLINE = 0, AI_TIMEUP = false;
 
 /* ── fast make / unmake (search only — no logging, no FP, no penalties) ──── */
 
+/**
+ * A Hollow's shell the search is entitled to know about.
+ *
+ * The machine may reason about its OWN shells — it cast them — and it has to,
+ * or a shell it paid 3 Focus for would be worth nothing to it. It may NOT
+ * reason about the opponent's: a search that steers around a shelled enemy
+ * pawn has read a field viewFor deletes, and the card is dead. So the machine
+ * jumps into enemy shells exactly like a person does, and finds out the same
+ * way — by spending the jump.
+ *
+ * (canCapture still reads `hollow` on both sides, so the search can infer an
+ * enemy shell from a pawn that declines a jump it plainly has. That leak is
+ * older than this function and is documented at engine.js canCapture. Named
+ * here so it is not rediscovered as something new.)
+ */
+const aiOwnShell = (v) => !!v.hollow && v.owner === AI.side;
+
 function applyStep(from, mv) {
   const p = G.board[from];
   const rec = {
     from, to: mv.to, kind: mv.kind, piece: p,
     prevRank: p.rank, prevCaptures: p.captures,
-    victimIdx: -1, victimPiece: null, victimKeptArmor: false,
+    victimIdx: -1, victimPiece: null, victimKeptArmor: false, victimKeptShell: false,
+    victimFledTo: -1, victimHome: -1,
     attackerDied: false, swapped: null, promoted: false,
   };
 
@@ -2404,12 +2469,33 @@ function applyStep(from, mv) {
     rec.victimIdx = mv.victim;
     rec.victimPiece = v;
     if (v.armor) { v.armor = false; rec.victimKeptArmor = true; }
+    else if (aiOwnShell(v)) {
+      rec.victimKeptShell = true;
+      rec.victimHome = v.hollowHome;
+      v.hollow = false; v.hollowHome = -1;
+    }
     else { G.board[mv.victim] = null; }
     G.board[from] = null;
     G.board[mv.to] = p;
-    p.captures++;
-    // Eye For An Eye drags the capturer down with its prey.
-    if (!rec.victimKeptArmor && v.eyeMark > 0) { G.board[mv.to] = null; rec.attackerDied = true; }
+    // The retreat, mirroring breakShell — and for the same reason it is done
+    // here and not before the landing: home may BE the landing square, and an
+    // occupied home means the pawn stays put.
+    if (rec.victimKeptShell) {
+      const h = rec.victimHome;
+      if (h >= 0 && h !== mv.victim && !G.board[h] && !isBarrier(h)) {
+        G.board[mv.victim] = null;
+        G.board[h] = v;
+        rec.victimFledTo = h;
+      }
+    }
+    // A jump that broke on a shell took nothing, so it must not count toward
+    // the lifetime tally that gates the Phaser — same as the engine.
+    if (!rec.victimKeptShell) p.captures++;
+    // Eye For An Eye drags the capturer down with its prey. Nothing died to a
+    // shell, so nothing is avenged and the mark is not spent.
+    if (!rec.victimKeptArmor && !rec.victimKeptShell && v.eyeMark > 0) {
+      G.board[mv.to] = null; rec.attackerDied = true;
+    }
   } else if (mv.kind === "swap") {
     const other = G.board[mv.to];
     rec.swapped = other;
@@ -2432,9 +2518,18 @@ function undoStep(rec) {
   p.rank = rec.prevRank;
   p.captures = rec.prevCaptures;
   if (rec.kind === "capture") {
+    // The fled square is cleared FIRST, before the attacker goes back. A
+    // retreat can land on the square the attacker jumped FROM — it was empty by
+    // then — and clearing afterwards would erase the attacker we had just put
+    // back there.
+    if (rec.victimFledTo >= 0) G.board[rec.victimFledTo] = null;
     G.board[rec.to] = null;
     G.board[rec.from] = p;
     if (rec.victimKeptArmor) rec.victimPiece.armor = true;
+    if (rec.victimKeptShell) {
+      rec.victimPiece.hollow = true;
+      rec.victimPiece.hollowHome = rec.victimHome;
+    }
     G.board[rec.victimIdx] = rec.victimPiece;
   } else if (rec.kind === "swap") {
     G.board[rec.from] = p;
@@ -2917,23 +3012,29 @@ function aiSpellCandidates(phaseName) {
     out.push({ id: "tactician", payload: {} });
   if (have("chokepoint") && chokepointTarget(AI.side) >= 0)
     out.push({ id: "chokepoint", payload: {} });
-  // Hollow is a bluff, and a bluff has no value the position evaluator can
-  // see — the board after casting it is a board with one pawn that can no
-  // longer capture, which scores strictly WORSE. Its worth is entirely in
-  // what the opponent does not know, so it rides in on `bonus` the same way
-  // Stutter's does, rather than being smuggled into sideScore where it would
-  // also tell the machine about the OPPONENT's decoys. See STUTTER_DENIAL.
+  // Hollow is a shield now, and most of what a shield is worth the search can
+  // see for itself: applyStep keeps the machine's own shelled pawn alive under
+  // an enemy jump, so the leaf position simply holds more material. What it
+  // CANNOT see is the concealment — the jumps the opponent never makes because
+  // they cannot tell which pawn is carrying the shell — and that is the part
+  // that rides in on `bonus`, the same way Stutter's does. It stays out of
+  // sideScore, which would price the OPPONENT's shells too and hand the
+  // machine a secret it is not entitled to. See STUTTER_DENIAL and aiOwnShell.
   //
-  // What can be judged is which pawn to spend: one that has no capture to
-  // give up, and that stands where the enemy has to keep respecting it.
-  if (have("hollow"))
-    for (const i of hollowTargets(AI.side)
+  // What can be judged here is which pawn to spend it on: one that is already
+  // under the axe, and one with no capture of its own to give up — the
+  // no-capture price is permanent, so shelling a live threat throws the threat
+  // away to save the pawn.
+  if (have("hollow")) {
+    const doomed = new Set(attacked);
+    for (const c of hollowTargets(AI.side)
       .filter((i) => !captureMoves(i).length)
-      .map((i) => ({ i, near: adjacentTo(i, (q) => isEnemy(q, AI.side)).length }))
-      .filter((c) => c.near > 0)
-      .sort((a, b) => b.near - a.near)
+      .map((i) => ({ i, hot: doomed.has(i), near: adjacentTo(i, (q) => isEnemy(q, AI.side)).length }))
+      .filter((c) => c.hot || c.near > 0)
+      .sort((a, b) => (b.hot - a.hot) || (b.near - a.near))
       .slice(0, aiWide(3)))
-      out.push({ id: "hollow", payload: { target: i.i }, bonus: HOLLOW_BLUFF + 12 * i.near });
+      out.push({ id: "hollow", payload: { target: c.i }, bonus: HOLLOW_SHELL + (c.hot ? 24 : 8 * c.near) });
+  }
 
   if (have("twin") && !G.hasActed)
     for (const i of twinTargets(AI.side).slice(0, aiWide(3))) {
@@ -3006,18 +3107,24 @@ function aiSpellCandidates(phaseName) {
 const STUTTER_DENIAL = 90;
 
 /**
- * And what a Hollow is worth, on the same terms.
+ * And what a Hollow's concealment is worth, on the same terms — only the
+ * concealment, because the shell itself is no longer invisible to the search.
  *
- * This one is frankly unmeasurable: the card's whole value is a belief in
- * somebody else's head, and there is no position after the cast that is worth
- * more than the position before it. So rather than invent a number, this is
- * set to roughly what the cast COSTS — 3 Focus and a card, a little over 60
- * points of resourceValue — which makes the machine willing to play it in a
- * quiet position and unwilling to pay a real tempo price for it. The per-enemy
- * premium at the call site is the only part with an actual argument behind it:
- * a decoy nobody has to walk past is not deceiving anyone.
+ * The old number here was 62, roughly what the cast costs, and it was set that
+ * way for a reason that has since stopped being true: back when the card was a
+ * pure bluff, NO position after the cast could score better than the position
+ * before it, so the bonus had to carry the entire case for playing it. It does
+ * not any more. applyStep keeps a shelled pawn alive under an enemy jump, so
+ * the search now prices the saved pawn on its own. Leaving this at 62 would
+ * count the card twice and the machine would spam it.
+ *
+ * What is left for this constant to cover is the half the search still cannot
+ * reach at depth: the opponent declining a jump because they do not know which
+ * pawn is shelled. 24 is "worth playing in a quiet position, not worth paying
+ * a tempo for" — and the premium at the call site is the part with a real
+ * argument behind it: a shell nobody is swinging at has not saved anything.
  */
-const HOLLOW_BLUFF = 62;
+const HOLLOW_SHELL = 24;
 
 /**
  * And a Quantum Pawn's, on the same footing and for the same reason.
@@ -4212,9 +4319,67 @@ function runTests() {
   ok("...so the mandatory-capture rule stops billing it", capturersFor(0).length === 0);
   ok("...but it can still move", simpleMoves(rc(7, 4)).length > 0);
   ok("...and the line naming it is private to its owner",
-    G.log.filter((l) => /decoy/i.test(l.text)).every((l) => l.only === 0));
+    G.log.filter((l) => /a shell closes over/i.test(l.text)).every((l) => l.only === 0));
   ok("...while the cast itself is public",
     G.log.some((l) => /casts Hollow/.test(l.text) && l.only == null));
+
+  /* §3b. The shell, and the one thing about it a render can get wrong: after it
+     is spent the pawn is still there, and neither seat may still be shown a
+     marker for a shell that no longer exists. */
+  {
+    blank(1, { mode: "ai" });
+    put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(0, 1), 1);
+    G.board[rc(7, 4)].hollow = true;
+    G.board[rc(7, 4)].hollowHome = rc(9, 8);
+    G.turn = 1; G.phase = "declare"; G.hasActed = false;
+    const capsWas = G.board[rc(6, 5)].captures;
+    performMove(rc(6, 5), captureMoves(rc(6, 5)).find((m) => m.victim === rc(7, 4)));
+    ok("an enemy jump breaks the shell and the pawn steps back out where it was cast",
+      !G.board[rc(7, 4)] && !!G.board[rc(9, 8)] && G.board[rc(9, 8)].hollow === false);
+    ok("...with the attacker on its landing square", !!G.board[rc(8, 3)]);
+    ok("...paid for nothing", G.board[rc(8, 3)].captures === capsWas);
+    ok("...and the reveal is public", G.log.some((l) => /was a Hollow/.test(l.text) && l.only == null));
+    renderBoard();
+    ok("...so no shell marker survives the break, from either chair",
+      !CELL_NODES.some((n) => n.querySelector(".piece.hollow")));
+    ok("...while the pawn itself is still drawn, at home",
+      !!CELL_NODES[rc(9, 8)].querySelector(".piece")
+      && !CELL_NODES[rc(7, 4)].querySelector(".piece"));
+  }
+
+  /* §3c. The home marker, and the tooltip beside it. Both say which pawn is
+     shelled, so both are owner-only — and the tooltip is the one that was
+     still talking: the board stopped at the .hollow class and describePiece
+     did not. Vs the machine this device holds the whole game, so a bare
+     `if (p.hollow)` would have announced the machine's own shell. */
+  {
+    const hWas = { on: AI.on, side: AI.side };
+    blank(0, { mode: "ai" });
+    put(rc(7, 4), 0); put(rc(3, 2), 1); put(rc(0, 1), 1);
+    G.board[rc(7, 4)].hollow = true; G.board[rc(7, 4)].hollowHome = rc(9, 8);
+    G.board[rc(3, 2)].hollow = true; G.board[rc(3, 2)].hollowHome = rc(1, 0);
+    AI.on = true; AI.side = 1; G.turn = 0; UI.revealed = true;
+    renderBoard();
+
+    ok("your own shell marks the square it comes back to",
+      CELL_NODES[rc(9, 8)].classList.contains("hollowhome"));
+    ok("...and the machine's does NOT — that square would name its decoy",
+      !CELL_NODES[rc(1, 0)].classList.contains("hollowhome"));
+    ok("...your tooltip tells you about your shell",
+      /HOLLOW/.test(describePiece(G.board[rc(7, 4)], rc(7, 4))));
+    ok("...and says nothing about the machine's",
+      !/HOLLOW/.test(describePiece(G.board[rc(3, 2)], rc(3, 2))));
+    ok("...nor does the tooltip leak which half of an enemy superposition is real",
+      !/real pawn|empty half/.test(
+        describePiece(Object.assign({}, G.board[rc(3, 2)], { quantum: 5, quantumReal: true }), rc(3, 2))));
+
+    // A blocked home says so rather than promising a retreat that cannot happen.
+    put(rc(9, 8), 0);
+    renderBoard();
+    ok("...and an occupied home is marked as blocked",
+      CELL_NODES[rc(9, 8)].classList.contains("blocked"));
+    AI.on = hWas.on; AI.side = hWas.side;
+  }
 
   /* §3c. The machine's contract, and the one that matters: it must not be
      able to price a board with a decoy differently from a board without one.
@@ -4239,20 +4404,94 @@ function runTests() {
     const hWas = { on: AI.on, side: AI.side, fast: AI.fast, level: AI.level };
     blank(0, { mode: "ai" });
     // A pawn standing next to an enemy but with its jump blocked: exactly the
-    // pawn the finder is supposed to pick, since hollowing out a real threat
-    // would throw the threat away.
+    // pawn the finder is supposed to pick, since shelling a real threat would
+    // throw the threat away to save the pawn.
     put(rc(7, 4), 0); put(rc(9, 0), 0);
     put(rc(6, 5), 1); put(rc(5, 6), 1); put(rc(0, 1), 1);
     G.turn = 0; G.phase = "declare";
     G.players[0].fp = 9; G.players[0].hand = ["hollow"];
     AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
     const hCands = aiSpellCandidates("declare").filter((c) => c.id === "hollow");
-    ok("the machine is offered a decoy, and prefers a pawn with no jump to give up",
+    ok("the machine is offered a shell, and prefers a pawn with no jump to give up",
       hCands.length > 0 && hCands.every((c) => captureMoves(c.payload.target).length === 0),
       hCands.map((c) => sq(c.payload.target)).join(","));
     ok("...carrying the worth the evaluator cannot see",
-      hCands.every((c) => c.bonus >= HOLLOW_BLUFF));
-    ok("...and it pays for one", aiCastOnce("declare") && countHollow(0) === 1, countHollow(0));
+      hCands.every((c) => c.bonus >= HOLLOW_SHELL));
+    /* And it declines HERE, which is the point of having cut the bonus. That
+       pawn is attacked but can simply walk away, so 3 Focus and a permanent
+       loss of its jump buys nothing the position did not already have. The old
+       bluff-era bonus was large enough to cast anyway. */
+    ok("...but declines when the pawn could just step out of the way",
+      !aiCastOnce("declare") && countHollow(0) === 0, countHollow(0));
+
+    /* Where the shell genuinely IS the answer, it pays. This pawn is attacked
+       and frozen, so there is no walking away — and the search sees the save
+       for itself now, which is why the bonus does not have to carry it. */
+    blank(0, { mode: "ai" });
+    put(rc(7, 4), 0); put(rc(9, 0), 0); put(rc(6, 5), 1); put(rc(0, 1), 1);
+    G.board[rc(7, 4)].frozen = 2;
+    G.turn = 0; G.phase = "declare"; G.hasActed = false;
+    G.players[0].fp = 9; G.players[0].hand = ["hollow"];
+    ok("a pawn that is attacked and cannot run is worth a shell, and the machine pays",
+      aiCastOnce("declare") && countHollow(0) === 1, countHollow(0));
+
+    /* The shield reading: given a pawn that is actually under the axe and a
+       second one merely standing near somebody, the finder has to pick the
+       one about to be taken. That preference is the whole redesign. */
+    blank(0, { mode: "ai" });
+    put(rc(7, 4), 0); put(rc(3, 2), 0); put(rc(9, 0), 0);
+    put(rc(6, 5), 1); put(rc(5, 6), 1); put(rc(2, 3), 1); put(rc(0, 1), 1);
+    G.turn = 0; G.phase = "declare"; G.hasActed = false;
+    G.players[0].fp = 9; G.players[0].hand = ["hollow"];
+    const doomed = aiAttackedPieces(0).filter((i) => hollowTargets(0).includes(i) && !captureMoves(i).length);
+    const hRanked = aiSpellCandidates("declare").filter((c) => c.id === "hollow");
+    ok("the finder puts the pawn that is about to be taken first",
+      doomed.length === 0 || (hRanked.length > 0 && doomed.includes(hRanked[0].payload.target)),
+      `doomed=${doomed.map(sq).join(",")} offered=${hRanked.map((c) => sq(c.payload.target)).join(",")}`);
+
+    /* And the search's half: the machine's OWN shell survives a jump inside
+       applyStep, while an enemy's does not — reading that would be a leak. */
+    blank(1, { mode: "ai" });
+    put(rc(7, 4), 0); put(rc(6, 5), 1);
+    AI.side = 0;
+    G.board[rc(7, 4)].hollow = true;
+    G.board[rc(7, 4)].hollowHome = rc(9, 8);
+    let mvS = captureMoves(rc(6, 5)).find((m) => m.victim === rc(7, 4));
+    let recS = applyStep(rc(6, 5), mvS);
+    ok("the search keeps its own shelled pawn alive under a jump, and sends it home",
+      !G.board[rc(7, 4)] && !!G.board[rc(9, 8)] && G.board[rc(9, 8)].hollow === false);
+    ok("...without paying it a capture", G.board[rc(8, 3)].captures === 0);
+    undoStep(recS);
+    ok("...and unmake puts the pawn, the shell and its home back",
+      !!G.board[rc(7, 4)] && G.board[rc(7, 4)].hollow === true
+      && G.board[rc(7, 4)].hollowHome === rc(9, 8) && !G.board[rc(9, 8)] && !G.board[rc(8, 3)]);
+
+    /* Unmake has to survive the nastiest board the retreat can produce: a home
+       square that IS the square the attacker jumped from. Clearing the fled
+       square after restoring the attacker would erase the attacker. */
+    G.board[rc(7, 4)].hollowHome = rc(6, 5);
+    recS = applyStep(rc(6, 5), mvS);
+    ok("a retreat onto the attacker's own origin square is legal — it is empty by then",
+      !!G.board[rc(6, 5)] && G.board[rc(6, 5)].owner === 0 && !!G.board[rc(8, 3)]);
+    undoStep(recS);
+    ok("...and unmake still puts both pieces back where they belong",
+      !!G.board[rc(6, 5)] && G.board[rc(6, 5)].owner === 1
+      && !!G.board[rc(7, 4)] && G.board[rc(7, 4)].owner === 0 && !G.board[rc(8, 3)]);
+
+    /* And a home the attacker has just landed on is refused, same as the engine. */
+    G.board[rc(7, 4)].hollowHome = rc(8, 3);
+    recS = applyStep(rc(6, 5), mvS);
+    ok("a home square under the attacker is refused; the pawn stands its ground",
+      !!G.board[rc(7, 4)] && G.board[rc(7, 4)].owner === 0 && G.board[rc(8, 3)].owner === 1);
+    undoStep(recS);
+
+    AI.side = 1;
+    G.board[rc(7, 4)].hollowHome = rc(9, 8);
+    recS = applyStep(rc(6, 5), mvS);
+    ok("but an ENEMY shell is invisible to it — the jump kills, as it would for a person",
+      !G.board[rc(7, 4)] && !G.board[rc(9, 8)]);
+    undoStep(recS);
+
     AI.on = hWas.on; AI.side = hWas.side; AI.fast = hWas.fast; AI.level = hWas.level;
   }
 

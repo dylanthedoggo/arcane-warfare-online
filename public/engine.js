@@ -333,9 +333,9 @@ const SPELLS = {
   hollow: {
     name: "Hollow", cost: 3, rarity: "rare", group: "Transformation", when: "declare",
     hidden: true,
-    flavor: "It stands like the others. It cannot do what the others can.",
-    text: "One of your pawns becomes a decoy. On your opponent's screen it is an ordinary pawn — but it can never capture, and an enemy spell aimed at it is wasted.",
-    penalty: "It reveals itself the moment a spell touches it, when it is crowned, and on the capture that kills it.",
+    flavor: "They will spend a jump on it. It was never where they were looking.",
+    text: "A shell closes over one of your pawns, and remembers the square. On your opponent's screen it is an ordinary pawn — walk it as far as you like. The first enemy jump or enemy spell aimed at it breaks on the shell, takes nothing, and the pawn steps back out where the shell first closed over it.",
+    penalty: "While the shell holds, that pawn can never capture. It shatters on the crown and on any transformation, it will not save a pawn you choose to sacrifice yourself, and if its old square is occupied there is nowhere to step back to.",
     timing: "Declare Action phase only.",
   },
   twin: {
@@ -392,7 +392,11 @@ function mkPiece(owner, rank, g = G) {
     captures: 0,          // lifetime captures, gates Phaser + Enchanter
     frozen: 0,            // turns this piece cannot move or capture
     noCapture: 0,         // Static Veil — may move, may not capture
-    hollow: false,        // Hollow — a decoy. SECRET: see SECRET_PIECE_FIELDS
+    hollow: false,        // Hollow — an unspent shell. SECRET: see SECRET_PIECE_FIELDS
+    // The square the shell was closed over it on, and the square it snaps back
+    // to when the shell breaks. SECRET for the same reason `hollow` is: a home
+    // square on a piece would say "this one is shelled" just as loudly.
+    hollowHome: -1,       // SECRET
     // Quantum Pawn. `quantum` links the two squares and is PUBLIC — casting
     // the card is announced, and both bodies are plainly on the board. Which
     // of them is the real one is the entire secret; see SECRET_PIECE_FIELDS.
@@ -752,11 +756,12 @@ function canAct(p) {
 /**
  * Can this piece perform a capture right now?
  *
- * A Hollow never can, and that is the one place its secret is visible to a
- * rule rather than to a player. The machine's search reads captureMoves and so
- * can tell an enemy Hollow from a real pawn by what it threatens — a leak the
- * plan for this card accepted rather than pay for a projected board. Against a
- * person, who only sees viewFor's output, the bluff is intact.
+ * A shelled pawn never can — that is the Hollow's standing price — and it is
+ * the one place its secret is visible to a rule rather than to a player. The
+ * machine's search reads captureMoves and so can tell a shelled enemy pawn
+ * from a real one by what it threatens: an inherited leak this card accepted
+ * rather than pay for a projected board, and one the shell redesign did not
+ * make any worse. Against a person, who only sees viewFor's output, it holds.
  */
 function canCapture(p) {
   return canAct(p) && p.noCapture <= 0 && !p.hollow && !p.quantum;
@@ -1227,12 +1232,22 @@ function mindControlTargets(owner) {
   }
   return out;
 }
-/** Your own untransformed pawns that are not already decoys. */
+/**
+ * Your own untransformed pawns that are not already wearing a shell.
+ *
+ * Twinned and superposed pawns are barred, and the exclusion is mutual — see
+ * twinTargets and quantumTargets. A shell has to be able to absorb a jump, and
+ * both of those cards take a pawn off the board by a route that never reaches
+ * resolveCapture: severTwin removes the partner outright, and collapseQuantum
+ * nulls a square directly. A shell on either would evaporate without ever
+ * having done its job.
+ */
 function hollowTargets(owner) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
-    if (isAlly(p, owner) && p.rank === "pawn" && !p.form && !p.hollow) out.push(i);
+    if (isAlly(p, owner) && p.rank === "pawn" && !p.form
+      && !p.hollow && !p.twin && !p.quantum) out.push(i);
   }
   return out;
 }
@@ -1274,7 +1289,7 @@ function quantumTargets(owner) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
-    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.quantum) continue;
+    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.quantum || p.hollow) continue;
     if (p.everAdjacent) continue;
     if (adjacentTo(i, (q) => isEnemy(q, owner)).length) continue;   // nor right now
     if (quantumSpots(i).length) out.push(i);
@@ -1368,7 +1383,7 @@ function twinTargets(owner) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
-    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.twin || p.quantum) continue;
+    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.twin || p.quantum || p.hollow) continue;
     if (quantumSpots(i).length) out.push(i);
   }
   return out;
@@ -1635,8 +1650,11 @@ function removePiece(i, why = "captured", kind = "capture") {
   const p = G.board[i];
   if (!p) return null;
   // Before the death event, so the transcript reads in the order it happened:
-  // the disguise comes off, and then the piece goes.
-  if (p.hollow) revealHollow(i, "it is gone now, and it never could have taken anything");
+  // the shell comes off, and then the piece goes. Reaching here at all means
+  // the shell was not spent on an enemy — an enemy jump is absorbed back in
+  // resolveCapture and never gets this far. This is the owner giving the pawn
+  // up, or a rule collecting it, and the shell is worth nothing against either.
+  if (p.hollow) revealHollow(i, "the shell goes with it, and it never could have taken anything");
   fx("death", { at: i, kind, piece: fxPiece(p) });
   G.board[i] = null;
   const P = G.players[p.owner];
@@ -1678,8 +1696,8 @@ function promoteIfDue(i) {
   const p = G.board[i];
   if (!p || p.rank !== "pawn" || rowOf(i) !== promoRow(p.owner)) return false;
   // A crowning happens in front of both players, and nothing below carries a
-  // secret queen, so the disguise cannot survive it.
-  revealHollow(i, "the crown gives it away");
+  // secret queen, so the shell cannot survive it.
+  revealHollow(i, "the crown shatters it");
   // And a twin cannot be in two ranks at once. The crown is worth the body.
   severTwin(i, "vanishes — its twin has been crowned");
   p.rank = "queen";
@@ -1692,8 +1710,8 @@ function promoteIfDue(i) {
 }
 
 /**
- * Resolve a single capture jump. Handles Juggernaut armor and the Eye For An
- * Eye retaliation. Returns { destroyed, retaliated }.
+ * Resolve a single capture jump. Handles the Hollow's shell, Juggernaut armor
+ * and the Eye For An Eye retaliation. Returns { destroyed, retaliated }.
  */
 function resolveCapture(fromIdx, mv) {
   const attacker = G.board[fromIdx];
@@ -1709,6 +1727,27 @@ function resolveCapture(fromIdx, mv) {
     G.board[fromIdx] = null;
     G.board[mv.to] = attacker;
     return { destroyed: false, retaliated: false, whiffed: true };
+  }
+
+  // The Hollow's shell, and the only place in this file that one is ever spent
+  // by an enemy. Every other way a piece leaves the board runs through
+  // removePiece, and every one of those is either the owner spending the pawn
+  // or a rule collecting it — neither of which a shell is meant to answer. The
+  // shell answers a JUMP, and a jump only ever arrives here.
+  //
+  // The attacker lands first and the pawn goes home second, in that order. The
+  // landing square is on the far side of the victim, which is the direction the
+  // victim's own home lies in — so the two really can be the same square, and
+  // breakShell has to be looking at a board the attacker is already standing on
+  // to refuse it.
+  if (victim.hollow) {
+    // Returning here rather than falling through is the whole point. It skips
+    // awardFP and attacker.captures++ below: a jump that took nothing must not
+    // pay Focus, and must not be the capture that earns somebody a Phaser.
+    G.board[fromIdx] = null;
+    G.board[mv.to] = attacker;
+    const rest = breakShell(mv.victim, "the jump found a shell, and there was nothing under it to take", fromIdx);
+    return { destroyed: false, retaliated: false, shelled: true, fled: rest !== mv.victim };
   }
 
   if (victim.armor) {
@@ -1743,17 +1782,57 @@ function resolveCapture(fromIdx, mv) {
 /* ══════════════════════════════════════════════════════════════════════════
    HOLLOW
 
-   A decoy pawn. Everything about it that matters is what the OPPONENT cannot
-   see: `hollow` is stripped from their view by SECRET_PIECE_FIELDS, the cast
-   is logged to the caster alone, and the effect that marks it carries `only`.
-   All they are told — because castSpell announces every card — is that one of
-   those pawns is now a fake. Which one is the whole card.
+   A shell that closes over one of your own pawns. There is no second piece:
+   the shell and the pawn share one square, move as one, and are one object
+   here — `hollow` on the pawn is the shell. That is why nothing in the move
+   code, the chain code or the promotion code had to learn about it.
 
-   The reveal is the opposite, and deliberately so: it is loud, public, and
-   goes to both seats. There are three ways to trigger it, and each is a moment
-   the fiction could not have survived anyway.
+   What the OPPONENT cannot see is which pawn is wearing one. `hollow` is
+   stripped from their view by SECRET_PIECE_FIELDS, the cast is logged to the
+   caster alone, and the effect that marks it carries `only`. All they are told
+   — because castSpell announces every card — is that one of those pawns is
+   now shelled. Which one is the whole card.
 
-     · A SPELL AIMED AT IT. Note what this is NOT: the enemy's target finders
+   WHAT IT DOES. It absorbs exactly one enemy blow — and then the pawn is not
+   where the blow landed. It steps back out on `hollowHome`, the square the
+   shell was closed over it on, however far across the board that is by then.
+   The price is permanent and paid up front: while the shell holds, that pawn
+   can never capture (canCapture). A shield you cannot swing.
+
+   THE RETREAT IS THE CARD. Without it this is Juggernaut armor with a secret
+   attached: eat a blow, stand there, carry on. What makes it a different card
+   is that the enemy does not merely fail to take the pawn — they have spent a
+   jump undoing every step it has walked since the cast. The further you walk
+   it, the more the shell is worth, and the more it looks like a pawn worth
+   jumping. That tension is the whole card: the bluff and the payoff are the
+   same piece of information.
+
+   The one thing that can go wrong is that home is not free. Somebody may be
+   standing on it — including, and this is not a corner case, the very attacker
+   that has just landed, because the landing square lies on the far side of the
+   victim, which is the direction home is in. So resolveCapture lands the
+   attacker BEFORE calling breakShell, and breakShell refuses an occupied home
+   and leaves the pawn where it stands. It is a retreat, not a swap, and it is
+   never a capture.
+
+   WHERE THE ABSORPTION LIVES, and this is the load-bearing decision:
+   resolveCapture, and nowhere else. It is reached from performMove for a real
+   enemy jump and from nothing else, which is exactly the shape of the rule —
+   the shell answers the enemy, not the owner. Every self-sacrifice (the
+   Juggernaut's armor, the Enchanter, the Alchemist, Temporal Cascade, the
+   Martyr's Pledge) and every forfeit for a skipped capture calls removePiece
+   directly, so the pawn dies and the shell dies with it. Feeding your own
+   shelled pawn to your own card costs you both. Putting the absorption in
+   removePiece instead would have had to tell those two cases apart by hand,
+   and would have got it wrong the first time somebody added a third.
+
+   THE REVEAL is the opposite of the cast, and deliberately so: it is loud,
+   public, and goes to both seats. Four things trigger it.
+
+     · AN ENEMY JUMP. The shell is spent, the pawn lives, and it goes home.
+
+     · A SPELL AIMED AT IT. Same: wasted, and the pawn goes home. Note what
+       this is NOT: the enemy's target finders
        are left alone, so a Hollow still appears in every list the opponent can
        build. Quietly filtering it out would have leaked it — an option that
        vanishes for no visible reason is an answer — and it would have made the
@@ -1763,23 +1842,104 @@ function resolveCapture(fromIdx, mv) {
      · THE CROWN. A pawn that reaches the far rank becomes a queen in plain
        sight; a secret queen is not a thing the rest of this file could carry.
 
-     · THE CAPTURE THAT KILLS IT. It was a real pawn and it really died — the
-       reveal here is not mechanical, it is the opponent finding out what they
-       spent the jump on.
+     · ANY TRANSFORMATION. Same reasoning. A Sentinel is visibly not an
+       ordinary pawn, so the disguise is already over; carrying the flag on
+       past that point would leave a secret shell on a piece nobody could
+       mistake for a pawn.
+
+   The last two reveal WITHOUT the retreat, and that is the line: the retreat
+   is what the enemy's blow buys them, so only the enemy's blow triggers it.
+   Being crowned or transformed is something you did on purpose, and dragging
+   the piece backwards across the board for it would be a punishment nobody
+   asked for — a queen yanked off the promotion rank the instant she is made.
+   revealHollow is the plain version; breakShell is reveal-and-retreat.
+
+   WHAT THE SHELL DOES NOT STOP:
+
+     · THE MANDATORY-CAPTURE RULE. A jump at a shelled pawn is still a jump the
+       opponent is forced to take. This is the card's teeth — it can compel an
+       enemy into a turn that accomplishes nothing.
+
+     · HOPSCOTCH'S SECOND BLOW — but only if the pawn is still there to take.
+       The shell leaves lastCapture.survived true, the same as armor, so
+       Hopscotch aims at lastCapture.victim to finish what the jump started. If
+       the retreat happened that square is empty and its `if (v)` guard does
+       nothing: the pawn walked out from under the second blow as well. If home
+       was occupied and the pawn stayed put, Hopscotch kills it. No code in
+       Hopscotch knows any of this, which is the point.
+
+     · THE ENCHANTER'S SWAP. It moves a piece and removes nothing. A shell
+       answers a jump, not a shove.
+
+     · TWIN SEVERANCE AND QUANTUM COLLAPSE. Both take a pawn off the board
+       without passing through resolveCapture, which is why hollowTargets bars
+       both — see the note there.
+
+   EYE FOR AN EYE does not fire on an absorbed jump, and the mark is not spent.
+   The Eye avenges a death; nothing died. The mark is still there for the jump
+   that finally lands.
+
+   CHRONOS'S GAZE can un-spend a shell, because `hollow` is a plain boolean on
+   a piece and rewinds with the board like everything else — captures, Focus
+   and armor all behave the same way. The public reveal in the log does NOT
+   rewind, so the opponent keeps what they learned. That asymmetry is correct:
+   you cannot unlearn a thing, and a rewound shell whose location is known is
+   worth much less than a fresh one.
    ══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Drop the disguise on the piece at `i`, if it was wearing one. Returns true
+ * Shatter the shell on the piece at `i`, if it was wearing one. Returns true
  * if something was actually revealed, so callers can decide whether to spend
  * the spell that did it.
+ *
+ * `from` is the square the blow came from, when there was one. It is only
+ * ever read by the animation, which throws the shards away from the attacker;
+ * the crown, a spell and a transformation all leave it null.
  */
-function revealHollow(i, why) {
+function revealHollow(i, why, from = null) {
   const p = G.board[i];
   if (!p || !p.hollow) return false;
   p.hollow = false;
-  fx("hollowReveal", { at: i, owner: p.owner });
+  p.hollowHome = -1;      // spent; nothing left to snap back to
+  fx("hollowReveal", { at: i, owner: p.owner, from });
   log(`The pawn at ${sq(i)} was a Hollow — ${why}.`, "big");
   return true;
+}
+
+/**
+ * The enemy broke the shell: reveal it, and send the pawn home.
+ *
+ * This is the difference between this card and the Juggernaut's armor, which
+ * it would otherwise be a second copy of. Armor eats a blow and leaves the
+ * piece where it stood. A shell eats a blow and the pawn is not there any more
+ * — it is back on the square the shell was closed over it on, which may be
+ * most of the board away. What the enemy spent the jump on was the distance.
+ *
+ * Returns the square the pawn ended up on, or -1 if there was no shell here.
+ * Callers that place other pieces on the board — resolveCapture lands an
+ * attacker — must do that BEFORE calling this, so the retreat can see the
+ * settled board and refuse a square somebody has just taken.
+ */
+function breakShell(i, why, from = null) {
+  const p = G.board[i];
+  if (!p || !p.hollow) return -1;
+  const home = p.hollowHome;
+  revealHollow(i, why, from);
+
+  // No home, home is where it already stands, or somebody is standing there
+  // now — including the attacker that has just landed. The pawn keeps the
+  // square it is on. It is a retreat, not a swap, and never a capture.
+  if (home < 0 || home === i || G.board[home] || isBarrier(home)) {
+    if (home >= 0 && home !== i)
+      log(`It cannot go back to ${sq(home)} — the square is not free — so it stands where it is.`, "rule");
+    return i;
+  }
+
+  G.board[i] = null;
+  G.board[home] = p;
+  fx("hollowReturn", { from: i, to: home, owner: p.owner, piece: fxPiece(p) });
+  log(`The pawn it was hiding is back at ${sq(home)}, where the shell first closed over it.`, "big");
+  return home;
 }
 
 /** Does a capturing piece that landed on `i` have to stop because of a Sentinel? */
@@ -2368,6 +2528,11 @@ function applyTransform(i, form, choices = {}) {
   // A transformation is the third thing that ends a twinning — the two bodies
   // were one pawn, and one of them has just stopped being a pawn.
   severTwin(i, "vanishes — its twin has been transformed");
+  // And it is the fourth thing that shatters a shell. A Sentinel is visibly
+  // not an ordinary pawn, so the disguise is over the moment the form lands;
+  // carrying the flag past here would leave a secret shell on a piece nobody
+  // could mistake for a pawn in the first place.
+  revealHollow(i, "the shape it has just taken cannot be hidden inside a pawn");
 
   // The FP cost is paid once, generically, by castSpell — every form is now
   // reached only through its spell, and F.cost mirrors that spell's cost.
@@ -2534,7 +2699,7 @@ function castSpell(id, caster, payload = {}) {
 
     /* ── Combat ───────────────────────────────────────────────────────── */
     case "veil": {
-      if (revealHollow(payload.target, "Static Veil finds nothing in it to stun")) break;
+      if (breakShell(payload.target, "Static Veil breaks on the shell and finds nothing to stun") >= 0) break;
       const t = G.board[payload.target];
       fx("veil", { at: payload.target });
       effNow(t, "noCapture", 2);
@@ -2547,10 +2712,10 @@ function castSpell(id, caster, payload = {}) {
     }
 
     case "mindcontrol": {
-      if (revealHollow(payload.target, "there is no will in it to seize")) {
+      if (breakShell(payload.target, "the shell takes the command, and there is no will behind it to seize") >= 0) {
         // The exhaustion still lands. The card was spent either way, and a
         // penalty that only applies when the spell worked would make aiming at
-        // a suspected decoy free.
+        // a suspected shell free.
         effNow(P, "noSpells", 1);
         effNext(P, "noSpells", 1);
         break;
@@ -2764,11 +2929,12 @@ function castSpell(id, caster, payload = {}) {
       const at = payload.target;
       const p = G.board[at];
       p.hollow = true;
+      p.hollowHome = at;      // where it comes back to, however far it walks
       // Both of these carry an audience. The public half of this card is the
       // "casts Hollow" line castSpell already wrote — the opponent learns that
-      // one of those pawns is a fake, and nothing more.
+      // one of those pawns is shelled, and nothing more.
       fx("hollow", { at, owner: caster, only: caster });
-      log(`Hollow — your pawn at ${sq(at)} is a decoy now. It cannot capture, and only you can tell.`,
+      log(`Hollow — a shell closes over your pawn at ${sq(at)}. Walk it wherever you like: the first enemy jump or spell aimed at it breaks on the shell, and the pawn steps back out at ${sq(at)}. It cannot capture until then, and only you can tell which pawn it is.`,
         "rule", caster);
       break;
     }
@@ -3500,7 +3666,7 @@ const VIEW_LOG_TAIL = 80;
  * on the foe's copy, so a client that tests for the field cannot tell a
  * concealed piece from an ordinary one by the shape of the object.
  */
-const SECRET_PIECE_FIELDS = ["hollow", "quantumReal"];
+const SECRET_PIECE_FIELDS = ["hollow", "hollowHome", "quantumReal"];
 
 /** Is this fx event or log line addressed to a seat other than `seat`? */
 const forOtherSeat = (e, seat) => e && e.only != null && e.only !== seat;
@@ -3578,7 +3744,7 @@ if (typeof module !== "undefined" && module.exports) {
     countPieces, countForm, spellBlocker, transformBlocker, eligibleSpellIds, modeSpellIds,
     evasiveTargets, evasiveDests, mirrorTargets, veilTargets, mindControlTargets,
     eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
-    hollowTargets, revealHollow,
+    hollowTargets, revealHollow, breakShell,
     quantumTargets, quantumSpots, quantumPair, collapseQuantum,
     twinTargets, twinPartner, severTwin, twinDebt,
     juggernautArmorPool, enchanterSacrificeOptions,
