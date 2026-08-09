@@ -891,6 +891,8 @@ const FX_HOLD = {
   pressure:     () => 800,
   hollow:       () => 620,
   hollowReveal: () => 700,
+  quantum:         () => 900,
+  quantumCollapse: () => 1000,
 };
 
 FX.holdOf = function (e) {
@@ -2138,6 +2140,38 @@ FX_PLAY.hollowReveal = function (e) {
     fxShake(6, 260),
     fxAfterglow(e.at, FX_C.dead, 820, { peak: .5 }),
   ]);
+};
+
+/**
+ * A pawn splits across two squares. Both players see this — the link is
+ * public — so it plays to the middle of the board rather than to one side.
+ */
+FX_PLAY.quantum = function (e) {
+  const a = fxCtr(e.at), b = fxCtr(e.spot), own = FX_OWNER(e.owner);
+  return Promise.all([
+    fxBanner(SPELLS.quantum.name, SPELLS.quantum.flavor, own, 1300),
+    fxRing(a, own, .3, 1.9, 620, { cls: "dashed" }),
+    sleepFX(160).then(() => fxRing(b, own, .3, 1.9, 620, { cls: "dashed" })),
+    fxGlow(b, own, 1.6, 520, { peak: .7 }),
+    fxAfterglow(e.at, own, 900, { peak: .4 }),
+    fxAfterglow(e.spot, own, 900, { peak: .4 }),
+  ]);
+};
+
+/**
+ * And the moment it stops being two things. The struck square gets the hard
+ * beat whichever way the answer fell — that is where the player was looking.
+ */
+FX_PLAY.quantumCollapse = function (e) {
+  const c = fxCtr(e.at);
+  const out = [
+    fxShockwave(c, e.wasReal ? FX_C.dead : FX_C.time, 900, { count: 3 }),
+    fxGlyph(c, e.wasReal ? "◉" : "◌", e.wasReal ? FX_C.dead : FX_C.time, 700, { size: .65 }),
+    fxShake(e.wasReal ? 8 : 4, 300),
+  ];
+  if (e.other != null)
+    out.push(fxCollapse(fxCtr(e.other), FX_C.time, 700, { count: 2, reach: .9 }));
+  return Promise.all(out);
 };
 
 /* ══════════════════════════════════════════════════════════════════════════

@@ -650,11 +650,15 @@ function staged(pieces, first = 0) {
   g.turnNo = 0;
   beginTurn(first);
   const live = getG();
+  // Cloned from a piece the engine itself made, rather than written out here:
+  // a literal goes stale the moment a card adds a field, and it goes stale
+  // silently — the field reads `undefined` and every test still passes until
+  // one of them happens to look at it.
+  const shape = live.board.find(Boolean);
   live.board = new Array(live.board.length).fill(null);
   for (const [i, owner, rank] of pieces) {
-    const p = { id: live.seq++, owner, rank: rank || "pawn", form: null, armor: false,
-                captures: 0, frozen: 0, noCapture: 0, veilBy: null, eyeMark: 0 };
-    live.board[i] = p;
+    live.board[i] = Object.assign({}, shape,
+      { id: live.seq++, owner, rank: rank || "pawn", everAdjacent: false });
   }
   live.turn = first;
   live.phase = "declare";
@@ -1051,6 +1055,144 @@ it("is revealed by the capture that kills it", () => {
   allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
   assert(getG().log.some((l) => /was a Hollow/.test(l.text)),
     "the opponent finds out what they spent the jump on");
+});
+
+/* ── Quantum Pawn ────────────────────────────────────────────────────────── */
+
+describe("a superposition is public, but which half is real is not");
+
+/** Cast Quantum Pawn for `seat` and hand back [gameState, squareA, squareB]. */
+function superposed(seat = 0) {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.turn = seat; live.phase = "declare"; live.hasActed = false;
+  live.players[seat].hand = ["quantum"];
+  live.players[seat].fp = 9;
+  const at = engine.quantumTargets(seat)[0];
+  const spot = engine.quantumSpots(at)[0];
+  allowed(applyAction(seat, { t: "cast", id: "quantum", payload: { target: at, spot } }));
+  return [getG(), at, spot];
+}
+
+it("shows both bodies to both players but tells only the owner which is which", () => {
+  const [g, a, b] = superposed(0);
+  equal(g.board[a].quantum, g.board[b].quantum, "the two squares share a link");
+  assert(g.board[a].quantum !== 0, "and it is a real link, not zero");
+  equal(g.board[a].quantumReal !== g.board[b].quantumReal, true, "exactly one of them is real");
+
+  const foe = viewFor(g, 1, {});
+  equal(foe.board[a].quantum, foe.board[b].quantum, "the opponent can see the pair — that much is public");
+  assert(!("quantumReal" in foe.board[a]) && !("quantumReal" in foe.board[b]),
+    "but not which of them the pawn is");
+  assert(foe.log.every((l) => !/real pawn is/.test(l.text)), "and the log does not say either");
+  assert(viewFor(g, 0, {}).log.some((l) => /real pawn is/.test(l.text)), "while the owner is told");
+});
+
+it("neither half can capture", () => {
+  const [g, a, b] = superposed(0);
+  load(g);
+  equal(captureMoves(a).length, 0);
+  equal(captureMoves(b).length, 0);
+});
+
+it("refuses a pawn that has already stood beside an enemy", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.players[0].hand = ["quantum"];
+  live.players[0].fp = 9;
+  const at = engine.quantumTargets(0)[0];
+  const spot = engine.quantumSpots(at)[0];
+  live.board[at].everAdjacent = true;
+  refused(applyAction(0, { t: "cast", id: "quantum", payload: { target: at, spot } }),
+    "stood beside an enemy");
+});
+
+it("refuses a second square that is not an empty dark square beside the first", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  getG().players[0].hand = ["quantum"];
+  getG().players[0].fp = 9;
+  const at = engine.quantumTargets(0)[0];
+  for (const bad of [at, emptySquare(getG()), anyPieceOf(getG(), 1)])
+    refused(applyAction(0, { t: "cast", id: "quantum", payload: { target: at, spot: bad } }),
+      "beside the first");
+});
+
+it("a jump at the empty half takes nothing and pays nothing", () => {
+  // Staged by hand so the answer is known: the struck square is the ghost.
+  // Violet advances down the board, so its attacker sits ABOVE the pair.
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].quantum = 77; live.board[rc(5, 4)].quantumReal = true;
+  live.board[rc(5, 6)].quantum = 77; live.board[rc(5, 6)].quantumReal = false;
+  live.players[1].fp = 0;
+
+  // Violet jumps the GHOST at rc(5,6), landing on rc(6,7).
+  allowed(applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" }));
+  const after = getG();
+  equal(after.board[rc(5, 6)], null, "the ghost is gone");
+  assert(after.board[rc(5, 4)], "and the real pawn is untouched");
+  equal(after.board[rc(5, 4)].quantum, 0, "the superposition is over for good");
+  equal(after.board[rc(6, 7)] && after.board[rc(6, 7)].owner, 1, "the attacker completed the jump");
+  equal(after.players[1].fp, 0, "and was paid nothing for it");
+  equal(after.board[rc(6, 7)].captures, 0, "it does not even count as a capture");
+  equal(after.lastCapture, null, "so there is nothing for Hopscotch to reverse");
+});
+
+it("a jump at the real half captures it and the ghost vanishes", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].quantum = 77; live.board[rc(5, 4)].quantumReal = false;
+  live.board[rc(5, 6)].quantum = 77; live.board[rc(5, 6)].quantumReal = true;
+  live.players[1].fp = 0;
+
+  allowed(applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" }));
+  const after = getG();
+  equal(after.board[rc(5, 6)], null, "the real pawn was taken");
+  equal(after.board[rc(5, 4)], null, "and the ghost went with it");
+  assert(after.players[1].fp > 0, "this one really was a capture, and was paid for");
+});
+
+it("the collapse is announced to both seats — there is nothing left to hide", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].quantum = 77; live.board[rc(5, 4)].quantumReal = true;
+  live.board[rc(5, 6)].quantum = 77; live.board[rc(5, 6)].quantumReal = false;
+  applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" });
+  const after = getG();
+  const lines = after.log.filter((l) => /never occupied|all along/.test(l.text));
+  assert(lines.length > 0, "the collapse is on the record");
+  assert(lines.every((l) => l.only == null), "and on both players' record");
+});
+
+it("gives the same answer from the same state, so a rewind cannot reroll it", () => {
+  const [a] = superposed(0);
+  const first = a.board.map((p) => (p && p.quantum ? (p.quantumReal ? "R" : "g") : ".")).join("");
+  const [b] = superposed(0);
+  equal(b.board.map((p) => (p && p.quantum ? (p.quantumReal ? "R" : "g") : ".")).join(""), first,
+    "a seeded flip — the machine's search rewinds through this constantly");
+});
+
+it("records having stood beside an enemy, which is a fact about the past", () => {
+  // Gold advances UP the board, toward row 0 — so it closes on a Violet piece
+  // sitting at a lower row number, not a higher one.
+  const g = staged([[rc(5, 4), 0], [rc(3, 2), 1], [rc(0, 1), 1]]);
+  equal(getG().board[rc(5, 4)].everAdjacent, false, "not yet recorded at setup");
+  assert(engine.quantumTargets(0).includes(rc(5, 4)), "and it is a legal target while untouched");
+
+  allowed(applyAction(0, { t: "move", from: rc(5, 4), to: rc(4, 3), kind: "step" }));
+  const p = getG().board[rc(4, 3)];
+  equal(p.everAdjacent, true, "it walked up beside one, and that does not un-happen");
+  load(getG());
+  assert(!engine.quantumTargets(0).includes(rc(4, 3)), "so it can never be split again");
 });
 
 /* ══════════════════════════════════════════════════════════════════════════

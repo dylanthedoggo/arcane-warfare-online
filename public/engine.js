@@ -338,6 +338,14 @@ const SPELLS = {
     penalty: "It reveals itself the moment a spell touches it, when it is crowned, and on the capture that kills it.",
     timing: "Declare Action phase only.",
   },
+  quantum: {
+    name: "Quantum Pawn", cost: 5, rarity: "legendary", maxDraws: 1,
+    group: "Transformation", when: "declare", hidden: true,
+    flavor: "Ask which one is real and you have already lost the answer.",
+    text: "One of your pawns comes to stand on two squares at once. Only the engine — and you — know which is the real one. Neither can capture, and a jump at the wrong one takes nothing at all.",
+    penalty: "It must never yet have stood beside an enemy. The first jump at either square collapses it for good.",
+    timing: "Declare Action phase only.",
+  },
   pressure: {
     name: "Pressure", cost: 3, rarity: "uncommon", group: "Game Altering", when: "any",
     onlineOnly: true,
@@ -377,6 +385,12 @@ function mkPiece(owner, rank, g = G) {
     frozen: 0,            // turns this piece cannot move or capture
     noCapture: 0,         // Static Veil — may move, may not capture
     hollow: false,        // Hollow — a decoy. SECRET: see SECRET_PIECE_FIELDS
+    // Quantum Pawn. `quantum` links the two squares and is PUBLIC — casting
+    // the card is announced, and both bodies are plainly on the board. Which
+    // of them is the real one is the entire secret; see SECRET_PIECE_FIELDS.
+    quantum: 0,           // shared id of a superposition, 0 if none
+    quantumReal: false,   // SECRET
+    everAdjacent: false,  // has it ever stood beside an enemy? gates the cast
     veilBy: null,         // who cast the veil (owed the friendly-fire penalty)
     eyeMark: 0,           // Eye For An Eye — opponent turns remaining
   };
@@ -499,6 +513,7 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     stutter: null,          // Stutter — { player, banned } a turn owed a second attempt
     turnAction: null,       // what this turn has been spent on — see noteTurnAction
     timeoutSeq: 0,          // monotonic; seeds the referee's turn when a clock runs out
+    quantumSeq: 0,          // monotonic; seeds which half of a superposition is real
     setAside: [],           // Phaser cards parked while a Phaser lives
     removed: [],            // Temporal Cascade after use
     log: [],
@@ -724,7 +739,7 @@ function canAct(p) {
  * person, who only sees viewFor's output, the bluff is intact.
  */
 function canCapture(p) {
-  return canAct(p) && p.noCapture <= 0 && !p.hollow;
+  return canAct(p) && p.noCapture <= 0 && !p.hollow && !p.quantum;
 }
 
 /** Diagonal directions this piece may travel. Pawns advance only. */
@@ -1129,6 +1144,11 @@ function spellBlocker(id, caster = G.turn) {
       if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
       if (!hollowTargets(caster).length) return "No untransformed pawn of yours is left to hollow out.";
       break;
+    case "quantum":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!quantumTargets(caster).length)
+        return "No pawn of yours is untouched enough — it must never yet have stood beside an enemy, and it needs an empty square beside it.";
+      break;
   }
   return null;
 }
@@ -1187,6 +1207,101 @@ function hollowTargets(owner) {
     if (isAlly(p, owner) && p.rank === "pawn" && !p.form && !p.hollow) out.push(i);
   }
   return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   QUANTUM PAWN
+
+   One pawn on two squares. Both bodies are real pieces on the board and the
+   link between them is public — the cast is announced and the opponent can
+   plainly see two pawns appear where one stood. What they cannot see is which
+   of the two is the pawn, and that one field is the whole card.
+
+   THE READING. The doc says "a pawn exists on two squares" and "when either is
+   attacked it collapses: 50% the attacker hits nothing". It does not say the
+   two move together, so they do not: each is an ordinary pawn taking ordinary
+   turns, which leaves the one-action-per-turn model completely untouched. The
+   50% is therefore settled at CAST time rather than at the moment of the jump
+   — the engine flips once, in secret, and both players live with the answer.
+   That is what "the engine knows which is real" has to mean if the caster is
+   ever to make a decision with it.
+
+   THE FLIP is seeded off the game seed and a counter on G, like every other
+   roll here. Math.random() would break snapshot/restore — the machine's search
+   sandboxes speculative casts behind exactly that — and a rewound game would
+   come back with a different pawn being the real one.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** Empty dark squares beside `i` that a second body could stand on. */
+function quantumSpots(i) {
+  return adjacentTo(i, (q, j) => !q && isDark(j) && !isBarrier(j));
+}
+
+/**
+ * Pawns that could still be split. "Never yet stood beside an enemy" is the
+ * doc's own condition and it is what stops the card being used to rescue a
+ * pawn that is already under the axe.
+ */
+function quantumTargets(owner) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.quantum) continue;
+    if (p.everAdjacent) continue;
+    if (adjacentTo(i, (q) => isEnemy(q, owner)).length) continue;   // nor right now
+    if (quantumSpots(i).length) out.push(i);
+  }
+  return out;
+}
+
+/** Both squares of the superposition `id` is part of. */
+function quantumPair(id) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) if (G.board[i] && G.board[i].quantum === id) out.push(i);
+  return out;
+}
+
+/**
+ * A jump has been aimed at one square of a superposition. Settle it.
+ *
+ * Returns true if the struck square held the real pawn — in which case the
+ * caller carries on and captures it like anything else. False means the
+ * attacker has jumped at nothing, and the pawn was somewhere else all along.
+ *
+ * Either way the superposition is over: this is the "collapsing ends it
+ * permanently" half of the card, and it is loudly public, because after this
+ * there is nothing left to keep quiet about.
+ */
+function collapseQuantum(struckIdx) {
+  const hit = G.board[struckIdx];
+  const wasReal = !!hit.quantumReal;
+  const id = hit.quantum;
+  const other = quantumPair(id).find((j) => j !== struckIdx);
+
+  fx("quantumCollapse", { at: struckIdx, other: other != null ? other : null, wasReal });
+  if (wasReal) {
+    // The struck square held the pawn. The far body was never anything.
+    if (other != null) {
+      const ghost = G.board[other];
+      ghost.quantum = 0;
+      G.board[other] = null;
+      fx("death", { at: other, kind: "quantum", piece: fxPiece(ghost) });
+      log(`The superposition collapses — the pawn at ${sq(other)} was never there.`, "big");
+    }
+    hit.quantum = 0;
+    hit.quantumReal = false;
+  } else {
+    // The jump found the empty half. The real pawn stands where it always did.
+    G.board[struckIdx] = null;
+    log(`The jump at ${sq(struckIdx)} passes through nothing — that square was never occupied.`, "big");
+    if (other != null) {
+      const real = G.board[other];
+      real.quantum = 0;
+      real.quantumReal = false;
+      log(`The pawn was at ${sq(other)} all along, and is an ordinary pawn now.`, "big");
+    }
+  }
+  return wasReal;
 }
 
 function eyeTargets(owner) {
@@ -1471,6 +1586,17 @@ function resolveCapture(fromIdx, mv) {
   const victim = G.board[mv.victim];
   let destroyed = false, retaliated = false;
 
+  // A superposition is settled before anything else can look at the victim —
+  // armor, the Eye's mark and the promotion check all assume there is a piece
+  // there to reason about, and half the time there is not.
+  if (victim.quantum && !collapseQuantum(mv.victim)) {
+    // Nothing was there. The attacker completes the jump and is paid for none
+    // of it: no Focus, no lifetime capture, and no chain to continue.
+    G.board[fromIdx] = null;
+    G.board[mv.to] = attacker;
+    return { destroyed: false, retaliated: false, whiffed: true };
+  }
+
   if (victim.armor) {
     victim.armor = false;
     fx("armor", { at: mv.victim, from: fromIdx });
@@ -1610,6 +1736,16 @@ function performMove(from, mv, opts = {}) {
     const before = G.chain != null;
     const res = resolveCapture(from, mv);
     log(`${PLAYERS[owner].name} jumps ${sq(from)} → ${sq(mv.to)}.`, "p" + owner);
+    if (res.whiffed) {
+      // The jump found an empty half of a superposition. It took nothing, so
+      // there is nothing for Hopscotch to reverse and nothing to chain from —
+      // a sequence of jumps is a sequence of CAPTURES, and this was not one.
+      G.lastCapture = null;
+      G.chain = null;
+      promoteIfDue(mv.to);
+      finishAction(mv.to);
+      return;
+    }
     G.lastCapture = { from, to: mv.to, victim: mv.victim, survived: !res.destroyed };
 
     if (res.retaliated) {           // the capturer is gone; nothing can chain
@@ -1754,6 +1890,10 @@ function tickDownFor(player) {
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
     if (!p) continue;
+    // Quantum Pawn's precondition is a fact about a piece's PAST, not about
+    // where it is standing now, so it has to be recorded as it happens. Once
+    // set it never clears — a pawn that has been looked at has been looked at.
+    if (!p.everAdjacent && adjacentTo(i, (q) => isEnemy(q, p.owner)).length) p.everAdjacent = true;
     if (p.owner === player) {
       const wasVeiled = p.noCapture > 0;
       tickEffects(p, PIECE_EFFECTS);
@@ -2496,6 +2636,32 @@ function castSpell(id, caster, payload = {}) {
       break;
     }
 
+    case "quantum": {
+      const from = payload.target, to = payload.spot;
+      const p = G.board[from];
+      const twin = mkPiece(caster, "pawn");
+      // Everything about the far body has to match, or the difference between
+      // them becomes the tell that the secret field was hiding.
+      twin.captures = p.captures;
+      twin.frozen = p.frozen;
+      twin.p_frozen = p.p_frozen || 0;
+      twin.everAdjacent = p.everAdjacent;
+      G.board[to] = twin;
+
+      const id = p.id;                     // the real pawn's id names the pair
+      p.quantum = id; twin.quantum = id;
+      const rng = mulberry32((G.seed + G.turnNo * 104729 + G.quantumSeq++) | 0);
+      const realIsOrigin = rng() < 0.5;
+      p.quantumReal = realIsOrigin;
+      twin.quantumReal = !realIsOrigin;
+
+      fx("quantum", { at: from, spot: to, owner: caster });
+      log(`Quantum Pawn — ${PLAYERS[caster].name}'s pawn stands on both ${sq(from)} and ${sq(to)}. Neither can capture.`, "big");
+      log(`Only you know it: the real pawn is the one at ${sq(realIsOrigin ? from : to)}.`,
+        "rule", caster);
+      break;
+    }
+
     case "pressure": {
       const victim = 1 - caster;
       // Their turn has not started, so it lands now; ours has, so it is parked
@@ -2998,6 +3164,13 @@ function dispatchAction(seat, a) {
             return fail("That is not an untransformed pawn of yours to hollow out.");
           payload.target = want.target;
           break;
+        case "quantum":
+          if (!quantumTargets(seat).includes(want.target))
+            return fail("That pawn cannot be split — it has stood beside an enemy, or has no empty square beside it.");
+          if (!quantumSpots(want.target).includes(want.spot))
+            return fail("The second square must be an empty dark square beside the first.");
+          payload.target = want.target; payload.spot = want.spot;
+          break;
         case "cascade":
           if (!friendlyPawns(seat).includes(want.sacrifice)) return fail("Temporal Cascade must be paid with one of your pawns.");
           payload.sacrifice = want.sacrifice;
@@ -3158,7 +3331,7 @@ const VIEW_LOG_TAIL = 80;
  * on the foe's copy, so a client that tests for the field cannot tell a
  * concealed piece from an ordinary one by the shape of the object.
  */
-const SECRET_PIECE_FIELDS = ["hollow"];
+const SECRET_PIECE_FIELDS = ["hollow", "quantumReal"];
 
 /** Is this fx event or log line addressed to a seat other than `seat`? */
 const forOtherSeat = (e, seat) => e && e.only != null && e.only !== seat;
@@ -3237,6 +3410,7 @@ if (typeof module !== "undefined" && module.exports) {
     evasiveTargets, evasiveDests, mirrorTargets, veilTargets, mindControlTargets,
     eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
     hollowTargets, revealHollow,
+    quantumTargets, quantumSpots, quantumPair, collapseQuantum,
     juggernautArmorPool, enchanterSacrificeOptions,
     juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
     cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,

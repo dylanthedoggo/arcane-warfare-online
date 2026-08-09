@@ -193,6 +193,11 @@ button:disabled{cursor:not-allowed}
    over somebody's shoulder. */
 .piece.hollow{opacity:.72;box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(255,255,255,.22) inset}
 .piece.hollow .glyph{opacity:.5}
+/* Both halves of a superposition, drawn for everybody. */
+.piece.quantum{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(150,190,255,.55) inset}
+/* And which half is which, drawn only for the player entitled to know. */
+.piece.qreal{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(150,220,255,.95) inset}
+.piece.qghost{opacity:.6}
 .piece .glyph{line-height:1;pointer-events:none}
 .piece .fpdot{
   position:absolute;top:-3px;right:-3px;
@@ -771,6 +776,13 @@ function renderBoard() {
       // the machine the field is only ever set on pieces the player owns or
       // the machine does — which is why this asks whose seat is looking.
       if (p.hollow && p.owner === viewSeat()) d.classList.add("hollow");
+      // A superposition is public — both players can see the two bodies. Which
+      // one is the pawn is not, so the second class is owner-only and rests on
+      // a field viewFor has already deleted from the other seat's copy.
+      if (p.quantum) {
+        d.classList.add("quantum");
+        if (p.owner === viewSeat()) d.classList.add(p.quantumReal ? "qreal" : "qghost");
+      }
       // A penalty that has been paid but has not landed yet is otherwise
       // invisible, which reads as "the penalty never happened". Show it.
       const pend = (p.p_frozen || 0) + (p.p_noCapture || 0);
@@ -848,6 +860,10 @@ function describePiece(p, i) {
   if (p.noCapture > 0) bits.push(`Static Veil — cannot capture for ${p.noCapture} more turn(s).`);
   if (p.p_frozen > 0) bits.push(`PENALTY PENDING — will be frozen for ${p.p_frozen} turn(s) starting next turn.`);
   if (p.p_noCapture > 0) bits.push(`PENALTY PENDING — will be unable to capture for ${p.p_noCapture} turn(s).`);
+  if (p.quantum)
+    bits.push(p.quantumReal === true ? "SUPERPOSED — and this is the real pawn. Neither square can capture."
+      : p.quantumReal === false ? "SUPERPOSED — this square is the empty half. Neither can capture."
+      : "SUPERPOSED — one of these two squares holds the pawn. Neither can capture.");
   if (p.hollow) bits.push("HOLLOW — a decoy. It cannot capture, and your opponent sees an ordinary pawn.");
   if (p.eyeMark > 0) bits.push(`Eye For An Eye — marked for ${p.eyeMark} more enemy turn(s).`);
   if (p.veilBy != null && p.noCapture > 0)
@@ -1512,6 +1528,13 @@ function beginCast(id, caster) {
       confirmFirst(`${S.text}<br><br>The engine has found <b>${sq(at)}</b>.`, () => finish({}));
       return;
     }
+
+    case "quantum":
+      target("Choose a pawn that has never stood beside an enemy", quantumTargets(caster), (from) => {
+        target("Choose the second square it will also stand on",
+          quantumSpots(from), (spot) => finish({ target: from, spot }));
+      });
+      return;
 
     case "hollow":
       target("Choose a pawn to hollow out — your opponent will not be told which",
@@ -2507,6 +2530,11 @@ function sideScore(side) {
     s += p.rank === "queen" ? VAL_QUEEN : VAL_PAWN;
     if (p.armor) s += VAL_ARMOR;
     if (p.form) s += VAL_FORM[p.form] || 0;
+    // Half of a superposition is worth half a pawn, because half of it is not
+    // there. Reading `quantum` is fair — the link is public, and both players
+    // can count the bodies — but `quantumReal` is never touched, here or
+    // anywhere else the machine looks. That is the blindness contract.
+    if (p.quantum) s -= VAL_PAWN / 2;
     if (p.rank === "pawn") {
       // Closer to the crown is worth more; the last two rows sharply so.
       // Weighted heavily enough that developing beats sitting still.
@@ -2886,6 +2914,12 @@ function aiSpellCandidates(phaseName) {
       .slice(0, aiWide(3)))
       out.push({ id: "hollow", payload: { target: i.i }, bonus: HOLLOW_BLUFF + 12 * i.near });
 
+  if (have("quantum"))
+    for (const i of quantumTargets(AI.side).slice(0, aiWide(3))) {
+      const spot = quantumSpots(i)[0];
+      if (spot != null) out.push({ id: "quantum", payload: { target: i, spot }, bonus: QUANTUM_GAMBIT });
+    }
+
   if (have("stutter") && !G.stutter) {
     const gap = aiStutterGap();
     // sideScore prices STUTTER_DENIAL of this flatly, because that much is
@@ -2957,6 +2991,19 @@ const STUTTER_DENIAL = 90;
  * a decoy nobody has to walk past is not deceiving anyone.
  */
 const HOLLOW_BLUFF = 62;
+
+/**
+ * And a Quantum Pawn's, on the same footing and for the same reason.
+ *
+ * The board after the cast is worth roughly what it was before it — an extra
+ * body, discounted by half in sideScore because half of it is not there — so
+ * the evaluator sees the 5 Focus and the card go out and nothing come back.
+ * What comes back is a jump the opponent may spend on empty air, which is a
+ * coin flip on a whole tempo plus whatever they gave up to reach it. Set to
+ * cover the cast so the machine will make the gamble in a quiet position and
+ * will not pay a real positional price for it.
+ */
+const QUANTUM_GAMBIT = 92;
 
 function aiStutterGap() {
   // Measured on the position as it stands, which is a turn early: the real
@@ -3784,7 +3831,7 @@ function runTests() {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
     tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
-    stutter: 4, pressure: 3, hollow: 3,
+    stutter: 4, pressure: 3, hollow: 3, quantum: 5,
   };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));
@@ -4155,6 +4202,56 @@ function runTests() {
       hCands.every((c) => c.bonus >= HOLLOW_BLUFF));
     ok("...and it pays for one", aiCastOnce("declare") && countHollow(0) === 1, countHollow(0));
     AI.on = hWas.on; AI.side = hWas.side; AI.fast = hWas.fast; AI.level = hWas.level;
+  }
+
+  group("Quantum Pawn");
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 0); put(rc(1, 6), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 9; G.players[0].hand = ["quantum"];
+  ok("an untouched pawn with an empty square beside it can be split",
+    quantumTargets(0).includes(rc(5, 4)));
+  const qSpot = quantumSpots(rc(5, 4))[0];
+  castSpell("quantum", 0, { target: rc(5, 4), spot: qSpot });
+  const qPair = quantumPair(G.board[rc(5, 4)].quantum);
+  ok("...leaving two bodies linked by one id", qPair.length === 2, qPair.length);
+  ok("...exactly one of which is real",
+    qPair.filter((i) => G.board[i].quantumReal).length === 1);
+  ok("...neither able to capture", qPair.every((i) => !canCapture(G.board[i])));
+  ok("...with the square named privately to its owner",
+    G.log.filter((l) => /real pawn is/.test(l.text)).every((l) => l.only === 0));
+  ok("...while the split itself is public",
+    G.log.some((l) => /stands on both/.test(l.text) && l.only == null));
+
+  /* The blindness contract for this card is NOT "a pair scores like a pawn" —
+     the pair is plainly visible and the machine is entitled to count it. It is
+     that the machine cannot tell WHICH half is the real one. */
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 0); put(rc(4, 3), 0); put(rc(1, 6), 1); put(rc(1, 8), 1);
+  G.board[rc(5, 4)].quantum = 9; G.board[rc(4, 3)].quantum = 9;
+  G.board[rc(5, 4)].quantumReal = true; G.board[rc(4, 3)].quantumReal = false;
+  const qA = [sideScore(0), sideScore(1)];
+  G.board[rc(5, 4)].quantumReal = false; G.board[rc(4, 3)].quantumReal = true;
+  const qB = [sideScore(0), sideScore(1)];
+  ok("the evaluator cannot tell which half of a superposition is real",
+    qA[0] === qB[0] && qA[1] === qB[1], `${qA} vs ${qB}`);
+  G.board[rc(5, 4)].quantum = 0; G.board[rc(4, 3)].quantum = 0;
+  ok("...but it does discount the pair, which is public and fair to read",
+    sideScore(0) > qA[0], `${sideScore(0)} vs ${qA[0]}`);
+
+  {
+    const qWas = { on: AI.on, side: AI.side, fast: AI.fast, level: AI.level };
+    blank(0, { mode: "ai" });
+    put(rc(5, 4), 0); put(rc(9, 0), 0); put(rc(1, 6), 1); put(rc(0, 1), 1);
+    G.turn = 0; G.phase = "declare";
+    G.players[0].fp = 10; G.players[0].hand = ["quantum"];
+    AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+    const qC = aiSpellCandidates("declare").filter((c) => c.id === "quantum");
+    ok("the machine is offered the gamble, carrying its own worth",
+      qC.length > 0 && qC.every((c) => c.bonus === QUANTUM_GAMBIT), qC.length);
+    ok("...and takes it", aiCastOnce("declare")
+      && G.board.filter((p) => p && p.quantum).length === 2);
+    AI.on = qWas.on; AI.side = qWas.side; AI.fast = qWas.fast; AI.level = qWas.level;
   }
 
   group("Chronos's Gaze");
