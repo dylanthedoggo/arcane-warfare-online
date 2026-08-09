@@ -220,9 +220,32 @@ FX.pump = function () {
   if (FX.until < now) FX.until = now;
   for (const e of fresh) {
     FX.queue.push(e);
+    // Some effects land a piece on a square several events after the board
+    // already put it there. Masking when the effect STARTS is too late: the
+    // piece is on show for the whole of everything queued ahead of it, then
+    // vanishes and returns, so one move reads as two. Claim those squares now,
+    // while the batch is still being queued — see FX_PREMASK.
+    if (FX_PREMASK[e.type]) FX_PREMASK[e.type](e);
     FX.until += FX.holdOf(e);
   }
   if (!FX.playing) FX.run();
+};
+
+/**
+ * Squares to hide the moment an event is QUEUED rather than when it plays.
+ *
+ * Only for effects that deliver a piece to a square the board has already
+ * updated, AND that are preceded in the same batch by another event — a rift
+ * carry follows the move that walked into it, an Echo follows its own spell
+ * banner. Everything else masks on its own frame and is fine.
+ *
+ * Each of these still passes its travel through FX.landing, so the unmask is
+ * unchanged; this only moves the mask earlier. FX.hidden is a Set, so the
+ * second mask inside the recipe is a harmless no-op.
+ */
+const FX_PREMASK = {
+  riftCarry: (e) => FX.mask(e.to),
+  echo:      (e) => FX.mask(e.to),
 };
 
 /** Roughly how long until the board stops moving. Used to pace the machine. */
@@ -1908,18 +1931,26 @@ FX_PLAY.rift = function (e) {
   ]);
 };
 
-/** The carry itself: swallowed at one end, spat out at the other. */
+/**
+ * The carry itself: swallowed at one mouth, spat out of the other.
+ *
+ * The unmask hangs off the 300ms wait ALONE, not off the burst that follows
+ * it. Passing the decoration through FX.landing would hold the square empty
+ * for the whole second the shockwave takes to finish, which is the hole in the
+ * board that function exists to prevent.
+ */
 FX_PLAY.riftCarry = function (e) {
   const a = fxCtr(e.from), b = fxCtr(e.to);
   FX.mask(e.to);
   return Promise.all([
     fxCollapse(a, FX_C.arcane, 420, { count: 2, reach: .8 }),
     fxRing(a, FX_C.arcane, .4, 2.2, 460, { cls: "dashed" }),
-    FX.landing(e.to, sleepFX(300).then(() => Promise.all([
+    FX.landing(e.to, sleepFX(300)),
+    sleepFX(300).then(() => Promise.all([
       fxGlow(b, FX_C.arcane, 2.2, 420, { peak: .95 }),
       fxShockwave(b, FX_C.arcane, 780, { count: 2 }),
       fxSparks(b, FX_C.arcane, 8, 620),
-    ]))),
+    ])),
     fxAfterglow(e.to, FX_C.arcane, 900, { peak: .5 }),
   ]);
 };
@@ -1949,23 +1980,30 @@ FX_PLAY.anchor = function (e) {
   ]);
 };
 
-/** A piece is pulled back to where it stood: the ghost arrives before it does. */
+/**
+ * A piece is pulled back to where it stood three turns ago.
+ *
+ * The travel is a real ghost gliding backwards, so the eye can follow WHERE it
+ * went — a piece that merely blinks out and in reads as two separate moves,
+ * which is exactly what this used to look like. The square it lands on is
+ * premasked (see FX_PREMASK) so the real piece is not sitting there in plain
+ * sight while the spell banner ahead of it is still playing.
+ */
 FX_PLAY.echo = function (e) {
-  const a = fxCtr(e.from), b = fxCtr(e.to);
+  const b = fxCtr(e.to);
   FX.mask(e.to);
-  const ghost = e.piece ? fxGhost(e.to, e.piece) : null;
+  const g = e.piece ? fxGhost(e.from, e.piece) : null;
+  const travel = g
+    ? fxGlide(g, e.from, e.to, 560, { lift: .2, peak: 1.1, pd: e.piece })
+    : sleepFX(360);
   return Promise.all([
-    ghost ? fxPlay(ghost, [
-      { opacity: .28, transform: "scale(1.04)" },
-      { opacity: .55, transform: "scale(1)" },
-    ], 460, { easing: "ease-out" }) : Promise.resolve(),
-    fxCollapse(a, FX_C.time, 460, { count: 2, reach: .75 }),
-    fxRing(a, FX_C.time, .4, 2.1, 480, { cls: "dashed" }),
-    FX.landing(e.to, sleepFX(360).then(() => Promise.all([
+    fxRing(fxCtr(e.from), FX_C.time, .4, 2.1, 480, { cls: "dashed" }),
+    FX.landing(e.to, travel),
+    sleepFX(520).then(() => Promise.all([
       fxGlow(b, FX_C.time, 2.1, 440, { peak: .85 }),
       fxShockwave(b, FX_C.time, 760, { count: 2 }),
       fxGlyph(b, "⟲", FX_C.time, 560, { size: .55 }),
-    ]))),
+    ])),
     fxAfterglow(e.to, FX_C.time, 950, { peak: .45 }),
   ]);
 };
