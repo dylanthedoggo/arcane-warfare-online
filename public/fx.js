@@ -220,9 +220,32 @@ FX.pump = function () {
   if (FX.until < now) FX.until = now;
   for (const e of fresh) {
     FX.queue.push(e);
+    // Some effects land a piece on a square several events after the board
+    // already put it there. Masking when the effect STARTS is too late: the
+    // piece is on show for the whole of everything queued ahead of it, then
+    // vanishes and returns, so one move reads as two. Claim those squares now,
+    // while the batch is still being queued — see FX_PREMASK.
+    if (FX_PREMASK[e.type]) FX_PREMASK[e.type](e);
     FX.until += FX.holdOf(e);
   }
   if (!FX.playing) FX.run();
+};
+
+/**
+ * Squares to hide the moment an event is QUEUED rather than when it plays.
+ *
+ * Only for effects that deliver a piece to a square the board has already
+ * updated, AND that are preceded in the same batch by another event — a rift
+ * carry follows the move that walked into it, an Echo follows its own spell
+ * banner. Everything else masks on its own frame and is fine.
+ *
+ * Each of these still passes its travel through FX.landing, so the unmask is
+ * unchanged; this only moves the mask earlier. FX.hidden is a Set, so the
+ * second mask inside the recipe is a harmless no-op.
+ */
+const FX_PREMASK = {
+  riftCarry: (e) => FX.mask(e.to),
+  echo:      (e) => FX.mask(e.to),
 };
 
 /** Roughly how long until the board stops moving. Used to pace the machine. */
@@ -845,6 +868,15 @@ const FX_HOLD = {
   chronos:     () => 1500,
   cascade:     () => 1600,
   martyr:      () => 1550,
+  // The board-altering four. A rift being carved and a square being sealed
+  // are permanent changes, so they get a beat closer to a transformation than
+  // to a step; the carry itself is a travel and paces like one.
+  rift:        () => 700,
+  riftCarry:   () => 520,
+  wraparound:  () => 900,
+  anchor:      () => 700,
+  echo:        () => 620,
+  chokepoint:  () => 780,
 };
 
 FX.holdOf = function (e) {
@@ -1871,6 +1903,123 @@ FX_PLAY.martyr = function (e) {
       fxShake(9, 340),
       fxAfterglow(e.at, own, 1300, { peak: .6, spread: 2.6 }),
     ])),
+  ]);
+};
+
+/* ══════════════════════════════════════════════════════════════════════════
+   THE BOARD ITSELF
+
+   These change the terms of play rather than any one piece, and they outlast
+   the turn that paid for them. So each one ends by leaving a mark the board
+   keeps — the .riftend and .barrier auras in fx.css — and the effect here is
+   only the moment of carving it.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** Two mouths open and reach for each other. */
+FX_PLAY.rift = function (e) {
+  const a = fxCtr(e.a), b = fxCtr(e.b);
+  const pair = (c, delay) => sleepFX(delay).then(() => Promise.all([
+    fxRing(c, FX_C.arcane, 2.4, .3, 480, { cls: "thick", easing: "cubic-bezier(.3,1.2,.4,1)" }),
+    fxGlow(c, FX_C.arcane, 2.0, 460, { peak: .9 }),
+    fxSparks(c, FX_C.arcane, 7, 620),
+    fxAfterglow(c === a ? e.a : e.b, FX_C.arcane, 1000, { peak: .5, spread: 2.2 }),
+  ]));
+  return Promise.all([
+    pair(a, 0),
+    pair(b, 140),
+    sleepFX(420).then(() => fxSweep(Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI, 620)),
+  ]);
+};
+
+/**
+ * The carry itself: swallowed at one mouth, spat out of the other.
+ *
+ * The unmask hangs off the 300ms wait ALONE, not off the burst that follows
+ * it. Passing the decoration through FX.landing would hold the square empty
+ * for the whole second the shockwave takes to finish, which is the hole in the
+ * board that function exists to prevent.
+ */
+FX_PLAY.riftCarry = function (e) {
+  const a = fxCtr(e.from), b = fxCtr(e.to);
+  FX.mask(e.to);
+  return Promise.all([
+    fxCollapse(a, FX_C.arcane, 420, { count: 2, reach: .8 }),
+    fxRing(a, FX_C.arcane, .4, 2.2, 460, { cls: "dashed" }),
+    FX.landing(e.to, sleepFX(300)),
+    sleepFX(300).then(() => Promise.all([
+      fxGlow(b, FX_C.arcane, 2.2, 420, { peak: .95 }),
+      fxShockwave(b, FX_C.arcane, 780, { count: 2 }),
+      fxSparks(b, FX_C.arcane, 8, 620),
+    ])),
+    fxAfterglow(e.to, FX_C.arcane, 900, { peak: .5 }),
+  ]);
+};
+
+/** The edges join: a wave runs off one side of the board and back on the other. */
+FX_PLAY.wraparound = function (e) {
+  const own = FX_OWNER(e.caster);
+  const out = [fxBanner(SPELLS.wraparound.name, SPELLS.wraparound.flavor, own, 1400), fxShake(6, 420)];
+  // Light the whole of both edge columns, so it is obvious WHICH edges joined.
+  for (let r = 0; r < N; r++) {
+    for (const c of [0, N - 1]) {
+      const i = rc(r, c);
+      if (!isDark(i)) continue;
+      out.push(sleepFX(r * 26).then(() => fxRing(fxCtr(i), FX_C.arcane, .4, 1.9, 520, { cls: "dashed" })));
+    }
+  }
+  return Promise.all(out);
+};
+
+/** Time is pinned. One heavy ring, and the board stops shivering. */
+FX_PLAY.anchor = function (e) {
+  const own = FX_OWNER(e.caster);
+  return Promise.all([
+    fxBanner(SPELLS.anchor.name, SPELLS.anchor.flavor, own, 1300),
+    fxSweep(0, 520),
+    fxShake(7, 300),
+  ]);
+};
+
+/**
+ * A piece is pulled back to where it stood three turns ago.
+ *
+ * The travel is a real ghost gliding backwards, so the eye can follow WHERE it
+ * went — a piece that merely blinks out and in reads as two separate moves,
+ * which is exactly what this used to look like. The square it lands on is
+ * premasked (see FX_PREMASK) so the real piece is not sitting there in plain
+ * sight while the spell banner ahead of it is still playing.
+ */
+FX_PLAY.echo = function (e) {
+  const b = fxCtr(e.to);
+  FX.mask(e.to);
+  const g = e.piece ? fxGhost(e.from, e.piece) : null;
+  const travel = g
+    ? fxGlide(g, e.from, e.to, 560, { lift: .2, peak: 1.1, pd: e.piece })
+    : sleepFX(360);
+  return Promise.all([
+    fxRing(fxCtr(e.from), FX_C.time, .4, 2.1, 480, { cls: "dashed" }),
+    FX.landing(e.to, travel),
+    sleepFX(520).then(() => Promise.all([
+      fxGlow(b, FX_C.time, 2.1, 440, { peak: .85 }),
+      fxShockwave(b, FX_C.time, 760, { count: 2 }),
+      fxGlyph(b, "⟲", FX_C.time, 560, { size: .55 }),
+    ])),
+    fxAfterglow(e.to, FX_C.time, 950, { peak: .45 }),
+  ]);
+};
+
+/** A square is sealed. Stone, and it lands hard. */
+FX_PLAY.chokepoint = function (e) {
+  const c = fxCtr(e.at);
+  return Promise.all([
+    fxRing(c, FX_C.stone, 2.6, .35, 460, { cls: "thick", easing: "cubic-bezier(.3,1.25,.4,1)" }),
+    sleepFX(400).then(() => Promise.all([
+      fxGlow(c, FX_C.stone, 2.2, 460, { peak: .95 }),
+      fxShockwave(c, FX_C.stone, 900, { count: 3 }),
+      fxGlyph(c, "▩", FX_C.stone, 620, { size: .6 }),
+      fxShake(8, 320),
+    ])),
+    fxAfterglow(e.at, FX_C.stone, 1200, { peak: .55, spread: 2.2 }),
   ]);
 };
 

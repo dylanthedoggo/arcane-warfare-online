@@ -41,7 +41,9 @@ const CELLS = N * N;
 const rc = (r, c) => r * N + c;
 const rowOf = i => (i / N) | 0;
 const colOf = i => i % N;
-const onBoard = (r, c) => r >= 0 && r < N && c >= 0 && c < N;
+/* Where the edges are is decided by cellAt(), further down — it has to be a
+   function of game state now that Wraparound can join the left and right
+   edges, so there is deliberately no bare onBoard() predicate to reach for. */
 const isDark = i => (rowOf(i) + colOf(i)) % 2 === 1;
 const DIAG = [[-1,-1],[-1,1],[1,-1],[1,1]];
 const ORTHO = [[-2,0],[2,0],[0,-2],[0,2]];   // Phaser: 2 squares, stays on dark
@@ -142,53 +144,71 @@ const FORMS = {
 
    `when`: "declare" | "end" | "any"  (which phase it may be cast in)
    `anyTurn`: castable on the opponent's turn as well
+   `rarity`: what a card is worth being dealt — see RARITY below
    ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * RARITY — the authored knob. `weight` is derived from it just below, and the
+ * draw itself never reads anything else.
+ *
+ * These are RELATIVE, not odds. A Common is 8x likelier to come up than a
+ * Legendary; what that means as a percentage depends on how many cards are
+ * eligible at the time, which changes as scarce cards run out and the Phaser
+ * card parks itself. The rules screen therefore prints the real number rather
+ * than a printed-on-the-card fiction.
+ *
+ * The scale is the one the pool was already using by hand — Evasive Maneuver
+ * sat at 8, Temporal Cascade at 1 — so naming the tiers cost almost no
+ * balance. Only Static Veil (5) and Eye For An Eye (3) moved, both to 4.
+ */
+const RARITY = { common: 8, uncommon: 4, rare: 2, legendary: 1 };
+
 const SPELLS = {
   hopscotch: {
-    name: "Hopscotch", cost: 3, weight: 4, when: "end", group: "Movement",
+    name: "Hopscotch", cost: 3, rarity: "uncommon", when: "end", group: "Movement",
     text: "Return the piece that just captured to the square it jumped from. If the victim survived on armor, it is destroyed anyway.",
     penalty: "No spells next turn.",
     timing: "After a capture, before your opponent acts.",
   },
   evasive: {
-    name: "Evasive Maneuver", cost: 3, weight: 8, when: "declare", group: "Movement",
+    name: "Evasive Maneuver", cost: 3, rarity: "common", when: "declare", group: "Movement",
     text: "One of your pawns steps one square diagonally backward into an empty square. Cannot capture.",
     penalty: "That pawn cannot move next turn.",
     timing: "Declare Action phase only.",
   },
   mirror: {
-    name: "Mirror Step", cost: 2, weight: 4, when: "any", group: "Movement",
+    name: "Mirror Step", cost: 2, rarity: "uncommon", when: "any", group: "Movement",
     text: "A queen teleports to the mirrored square across the centreline — row r column c becomes row 11−r column 11−c. Wasted if the destination is occupied.",
     penalty: "Distortion Field — every friendly pawn adjacent to the queen after the jump skips its next move.",
     timing: "Before or after moving.",
   },
   veil: {
-    name: "Static Veil", cost: 2, weight: 5, group: "Combat", when: "declare",
+    name: "Static Veil", cost: 2, rarity: "uncommon", group: "Combat", when: "declare",
     text: "One enemy piece cannot capture for its next two turns. It may still move.",
     penalty: "Friendly fire — when the stun ends, your nearest free pawn to that piece falls sick and cannot move for a turn.",
     timing: "Declare Action phase only.",
   },
   mindcontrol: {
-    name: "Mind Control", cost: 3, weight: 4, group: "Combat", when: "declare",
+    name: "Mind Control", cost: 3, rarity: "uncommon", group: "Combat", when: "declare",
     text: "Take one movement with an enemy piece that has a legal move.",
     penalty: "Exhaustion — no more spells this turn or next, and discard a card.",
     timing: "Your turn only.",
   },
   eye: {
-    name: "Eye For An Eye", cost: 3, weight: 3, group: "Combat", when: "declare",
+    name: "Eye For An Eye", cost: 3, rarity: "uncommon", group: "Combat", when: "declare",
     text: "Mark an untransformed friendly pawn. For your opponent's next 3 turns, anything that captures it dies with it.",
     penalty: "The marked pawn is Static next turn · no other spells next turn.",
     timing: "Declare Action phase only.",
   },
   chronos: {
-    name: "Chronos's Gaze", cost: 4, weight: 2, maxDraws: 2, group: "Game Altering", when: "declare",
+    name: "Chronos's Gaze", cost: 4, rarity: "rare", maxDraws: 2, group: "Game Altering", when: "declare",
     flavor: "The past is flexible. Unmake your last mistake.",
     text: "Rewind the board, both Focus Point pools, and both hands to the start of one of your last 2 turns.",
     penalty: "Chronal Backlash — discard your hand down to a single card.",
     timing: "Start of your turn, right after your opponent finishes theirs.",
   },
   cascade: {
-    name: "Temporal Cascade", cost: 5, weight: 1, maxDraws: 1, group: "Game Altering", when: "declare",
+    name: "Temporal Cascade", cost: 5, rarity: "legendary", maxDraws: 1, group: "Game Altering", when: "declare",
     flavor: "The world holds its breath. Only you may move.",
     text: "Take 2 additional consecutive turns — 3 in a row in total.",
     penalty: "Discard your entire hand, sacrifice a pawn, and neither draw nor transform for 4 turns.",
@@ -196,7 +216,7 @@ const SPELLS = {
     oncePerGame: true,
   },
   martyr: {
-    name: "The Martyr's Pledge", cost: 3, weight: 2, maxDraws: 2, group: "Game Altering", when: "any",
+    name: "The Martyr's Pledge", cost: 3, rarity: "rare", maxDraws: 2, group: "Game Altering", when: "any",
     flavor: "Long live the queen.",
     text: "Revive one of your captured queens. Playable at any time, even on your opponent's turn.",
     penalty: "Your rearmost pawn is sacrificed and the queen takes its square. Consumes your turn.",
@@ -204,43 +224,96 @@ const SPELLS = {
     anyTurn: true,
   },
   phaserSpell: {
-    name: "Phaser", cost: 3, weight: 4, group: "Transformation", when: "declare",
+    name: "Phaser", cost: 3, rarity: "uncommon", group: "Transformation", when: "declare",
     text: "Transform one of your pawns that has captured at least once into a Phaser.",
     penalty: "The pawn is disoriented and skips its next movement.",
     timing: "Declare Action phase. Set aside while a Phaser lives; returns to the pool when one dies.",
   },
   juggernautSpell: {
-    name: "Juggernaut", cost: 3, weight: 4, group: "Transformation", when: "any",
+    name: "Juggernaut", cost: 3, rarity: "uncommon", group: "Transformation", when: "any",
     text: "Transform one of your pieces into a Juggernaut, sacrificing an adjacent friendly pawn as armor. Must be captured twice — the first capture strips the armor.",
     penalty: "Cannot move next turn · consumes your whole turn.",
     timing: "Either phase, on your own turn.",
   },
   sentinelSpell: {
-    name: "Sentinel", cost: 3, weight: 4, group: "Transformation", when: "any",
+    name: "Sentinel", cost: 3, rarity: "uncommon", group: "Transformation", when: "any",
     text: "Transform one of your pawns into a Sentinel — solid terrain that cannot move, capture, or be jumped over. Requires a turn in which you have neither moved nor cast another spell.",
     penalty: "Every friendly piece in the same column behind it is frozen next turn · consumes your whole turn.",
     timing: "Either phase, on your own turn, before any other action.",
   },
   heraldSpell: {
-    name: "Herald", cost: 3, weight: 4, group: "Transformation", when: "any",
+    name: "Herald", cost: 3, rarity: "uncommon", group: "Transformation", when: "any",
     text: "Transform a pawn standing on the opponent's half of the board into a Herald. A friendly pawn landing adjacent to it may advance one extra square (no capture).",
     penalty: "The Herald is frozen next turn.",
     timing: "Either phase, on your own turn.",
   },
   enchanterSpell: {
-    name: "Enchanter", cost: 3, weight: 2, maxDraws: 2, group: "Transformation", when: "any",
+    name: "Enchanter", cost: 3, rarity: "rare", maxDraws: 2, group: "Transformation", when: "any",
     text: "Transform a queen that has captured at least once into an Enchanter, sacrificing an adjacent friendly queen or 3 adjacent friendly pawns. May swap places with any piece, friendly or enemy.",
     penalty: "Frozen 2 turns on transform · frozen 1 turn after a friendly swap · discard a card after an enemy swap.",
     timing: "Either phase, on your own turn.",
   },
   alchemistSpell: {
-    name: "Alchemist", cost: 6, weight: 1, maxDraws: 1, group: "Transformation", when: "any",
+    name: "Alchemist", cost: 6, rarity: "legendary", maxDraws: 1, group: "Transformation", when: "any",
     text: "Transform a queen standing on your own back row into an Alchemist, sacrificing a friendly pawn. Can never move or capture again, but generates 1 FP at the start of each of your turns.",
     penalty: "Resource Contamination — no draw next turn, and no spell above 1 FP for 2 turns.",
     timing: "Either phase, on your own turn.",
   },
+
+  /* ── the board itself ─────────────────────────────────────────────────
+     These four do not touch a piece. They change the terms the game is
+     played on — where the edges are, which squares exist, how far back the
+     past reaches — and they last beyond the turn that paid for them.
+     ─────────────────────────────────────────────────────────────────── */
+  tactician: {
+    name: "Tactician", cost: 1, rarity: "common", group: "Combat", when: "declare",
+    flavor: "Count the throats before you cut one.",
+    text: "Gain 1 FP for every capture currently available to you, whether or not you take it.",
+    penalty: "You must take one of them this turn — the turn cannot be ended until you do.",
+    timing: "Declare Action phase, before you move.",
+  },
+  rift: {
+    name: "Rift", cost: 4, rarity: "uncommon", group: "Movement", when: "declare",
+    text: "Choose two empty dark squares. Any piece, friendly or enemy, that lands on one is immediately carried to the other.",
+    penalty: "The rift is inert for the rest of the turn that opened it.",
+    timing: "Declare Action phase only.",
+  },
+  wraparound: {
+    name: "Wraparound", cost: 4, rarity: "uncommon", group: "Game Altering", when: "declare",
+    flavor: "The board was never flat.",
+    text: "For 2 rounds the left and right edges join. A piece leaving one edge emerges on the other, on the same diagonal.",
+    penalty: "It applies to your opponent exactly as much as to you.",
+    timing: "Declare Action phase only.",
+  },
+  anchor: {
+    name: "Anchor In Time", cost: 3, rarity: "uncommon", group: "Game Altering", when: "declare",
+    flavor: "Some moments refuse to be unmade.",
+    text: "Lock the present. For the rest of the game neither player may rewind past this turn with Chronos's Gaze or Echo.",
+    penalty: "It binds you too — you lose those rewinds just as your opponent does.",
+    timing: "Declare Action phase only.",
+  },
+  echo: {
+    name: "Echo", cost: 4, rarity: "uncommon", group: "Game Altering", when: "declare",
+    flavor: "It remembers standing there.",
+    text: "Send one of your pieces back to the square it stood on 3 turns ago, if that square is empty now.",
+    penalty: "It arrives wearing the freezes it wore then, including ones it has since shaken off. Removed from the game after use.",
+    timing: "Declare Action phase. Once per game.",
+    oncePerGame: true,
+  },
+  chokepoint: {
+    name: "Chokepoint", cost: 4, rarity: "rare", group: "Game Altering", when: "declare",
+    flavor: "Close the door they were all walking through.",
+    text: "The busiest square in your opponent's position — the one most of their moves run through — is sealed permanently. Nothing may land on it or jump over it again.",
+    penalty: "You cannot cast a spell for 2 turns.",
+    timing: "Declare Action phase only.",
+  },
 };
 const SPELL_IDS = Object.keys(SPELLS);
+
+// Rarity is what the cards are authored with; `weight` is what the draw reads.
+// Deriving it here rather than writing both by hand is what stops the two from
+// ever disagreeing.
+for (const id of SPELL_IDS) SPELLS[id].weight = RARITY[SPELLS[id].rarity];
 
 /* ══════════════════════════════════════════════════════════════════════════
    STATE
@@ -336,6 +409,11 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     lastMove: null,         // { from, to } for board highlighting
     drawCounts: {},         // id -> lifetime draw count, for maxDraws scarcity
     drawSeq: 0,              // monotonic; seeds each weighted draw's PRNG
+    rift: null,             // Rift — { a, b, madeOn } linking two squares
+    wrap: 0,                // Wraparound — rounds left with the edges joined
+    anchor: null,           // Anchor In Time — { turnNo } no rewind may pass
+    barriers: [],           // Chokepoint — permanently sealed square indices
+    mustCapture: null,      // Tactician — { player } owes a capture this turn
     setAside: [],           // Phaser cards parked while a Phaser lives
     removed: [],            // Temporal Cascade after use
     log: [],
@@ -535,18 +613,61 @@ function captureDirs(p) {
   return moveDirs(p);
 }
 
+/* ── where the edges are ──────────────────────────────────────────────────
+   Every question of the form "is there a square that way?" goes through
+   cellAt. It used to be nine separate `onBoard` guards, which was fine while
+   the answer was always the same one; Wraparound makes the answer depend on
+   game state, and nine copies of a rule that changes is eight too many.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The index of the square at (r, c), or -1 if there is no such square.
+ *
+ * Rows never wrap. The far row is where pawns are crowned and where an
+ * advance runs out of board; a vertically wrapping board has neither, so the
+ * spell only ever joins the left and right edges.
+ *
+ * Columns wrap only while Wraparound is running. Because N is even, wrapping
+ * preserves square colour on its own — a diagonal step across the seam has
+ * Δc = ∓11 and a Phaser's shift Δc = ∓10, and both leave (r + c) % 2 alone.
+ * So pieces stay on dark squares with no special handling anywhere.
+ */
+function cellAt(r, c) {
+  if (r < 0 || r >= N) return -1;
+  if (c < 0 || c >= N) {
+    if (!G || !G.wrap) return -1;
+    c = ((c % N) + N) % N;
+  }
+  return rc(r, c);
+}
+
 /** Is index `i` diagonally adjacent to a piece matching `pred`? */
 function adjacentTo(i, pred) {
   const r = rowOf(i), c = colOf(i);
   const out = [];
   for (const [dr, dc] of DIAG) {
-    const nr = r + dr, nc = c + dc;
-    if (!onBoard(nr, nc)) continue;
-    const j = rc(nr, nc);
+    const j = cellAt(r + dr, c + dc);
+    if (j < 0) continue;
     if (pred(G.board[j], j)) out.push(j);
   }
   return out;
 }
+
+/** Squares a pawn at `i` may step diagonally BACKWARD into — Evasive Maneuver's
+ *  retreat. One definition, read by the targeting, the validator and the AI. */
+function backStepsFrom(i, owner) {
+  const r = rowOf(i), c = colOf(i), b = -fwd(owner);
+  const out = [];
+  for (const dc of [-1, 1]) {
+    const j = cellAt(r + b, c + dc);
+    if (j >= 0 && !G.board[j] && !isBarrier(j)) out.push(j);
+  }
+  return out;
+}
+
+/** Is this square sealed by a Chokepoint? Barriers are not pieces — see the
+ *  `barriers` note in newGame — so every path has to ask separately. */
+const isBarrier = (i) => G.barriers.includes(i);
 
 /* ── movement ───────────────────────────────────────────────────────────── */
 
@@ -558,18 +679,17 @@ function simpleMoves(i) {
   const out = [];
 
   for (const [dr, dc] of moveDirs(p)) {
-    const nr = r + dr, nc = c + dc;
-    if (onBoard(nr, nc) && !G.board[rc(nr, nc)]) out.push({ to: rc(nr, nc), kind: "step" });
+    const j = cellAt(r + dr, c + dc);
+    if (j >= 0 && !G.board[j] && !isBarrier(j)) out.push({ to: j, kind: "step" });
   }
 
   // Phaser: 2 squares orthogonally, may pass through an occupied square but
   // never land on one. The 2-square distance keeps it on dark squares.
   if (p.form === "phaser") {
     for (const [dr, dc] of ORTHO) {
-      const nr = r + dr, nc = c + dc;
-      if (!onBoard(nr, nc)) continue;
-      const j = rc(nr, nc);
-      if (!G.board[j]) out.push({ to: j, kind: "phase" });
+      const j = cellAt(r + dr, c + dc);
+      if (j < 0) continue;
+      if (!G.board[j] && !isBarrier(j)) out.push({ to: j, kind: "phase" });
     }
   }
 
@@ -588,14 +708,18 @@ function captureMoves(i) {
   const r = rowOf(i), c = colOf(i);
   const out = [];
   for (const [dr, dc] of captureDirs(p)) {
-    const mr = r + dr, mc = c + dc;             // the victim's square
-    const lr = r + dr * 2, lc = c + dc * 2;     // the landing square
-    if (!onBoard(lr, lc)) continue;
-    const mid = rc(mr, mc), land = rc(lr, lc);
+    // Both squares are resolved through cellAt. The victim's used to be
+    // computed unguarded, which was safe only because a landing square off
+    // the board always failed first — under Wraparound the landing wraps
+    // back on, so an unwrapped victim index would read the wrong square.
+    const mid = cellAt(r + dr, c + dc);          // the victim's square
+    const land = cellAt(r + dr * 2, c + dc * 2); // the landing square
+    if (mid < 0 || land < 0) continue;
     const victim = G.board[mid];
     if (!isEnemy(victim, p.owner)) continue;
     if (isSentinel(victim)) continue;           // Sentinels cannot be jumped
-    if (G.board[land]) continue;                // landing square must be empty
+    if (isBarrier(mid)) continue;               // nor may a sealed square be crossed
+    if (G.board[land] || isBarrier(land)) continue;   // landing must be empty
     out.push({ to: land, kind: "capture", victim: mid });
   }
   return out;
@@ -618,16 +742,7 @@ function legalMovesFor(i) {
   // Mid-chain: only the chaining piece may act, and only by capturing.
   if (G.chain != null) return i === G.chain ? captureMoves(i) : [];
   // Owed a Herald bonus step: only that piece, only a plain forward step.
-  if (G.heraldBonus != null) {
-    if (i !== G.heraldBonus) return [];
-    const r = rowOf(i), c = colOf(i), f = fwd(p.owner);
-    const out = [];
-    for (const dc of [-1, 1]) {
-      const nr = r + f, nc = c + dc;
-      if (onBoard(nr, nc) && !G.board[rc(nr, nc)]) out.push({ to: rc(nr, nc), kind: "herald" });
-    }
-    return out;
-  }
+  if (G.heraldBonus != null) return i === G.heraldBonus ? legalHeraldSteps(i) : [];
   return [...captureMoves(i), ...simpleMoves(i)];
 }
 
@@ -857,6 +972,28 @@ function spellBlocker(id, caster = G.turn) {
       if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
       if (!alchemistTargets(caster).length) return "No queen can become an Alchemist.";
       break;
+
+    case "tactician":
+      if (G.hasActed) return "Count them before you move, not after.";
+      if (!availableCaptures(caster)) return "You have no capture to count.";
+      break;
+    case "rift":
+      if (G.rift) return "A rift is already open.";
+      if (openSquares().length < 2) return "The board has no two empty squares to join.";
+      break;
+    case "wraparound":
+      if (G.wrap > 0) return "The edges are already joined.";
+      break;
+    case "anchor":
+      if (G.anchor) return "Time is already anchored.";
+      break;
+    case "echo":
+      if (G.anchor) return "Time is anchored — nothing may reach back past it.";
+      if (!echoTargets(caster).length) return "No piece of yours can return to where it stood.";
+      break;
+    case "chokepoint":
+      if (chokepointTarget(caster) < 0) return "Your opponent has no move to seal off.";
+      break;
   }
   return null;
 }
@@ -867,9 +1004,7 @@ function evasiveTargets(owner) {
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
     if (!isAlly(p, owner) || p.rank !== "pawn" || isImmobile(p)) continue;
-    const r = rowOf(i), c = colOf(i), b = -fwd(owner);
-    for (const dc of [-1, 1])
-      if (onBoard(r + b, c + dc) && !G.board[rc(r + b, c + dc)]) { out.push(i); break; }
+    if (backStepsFrom(i, owner).length) out.push(i);
   }
   return out;
 }
@@ -943,9 +1078,95 @@ function chronosTargets(caster) {
   const out = [];
   for (let k = G.history.length - 1; k >= 0 && out.length < 2; k--) {
     const h = G.history[k];
-    if (h.turn === caster && h.turnNo < G.turnNo) out.push(h.turnNo);
+    if (h.turn === caster && h.turnNo < G.turnNo && !anchoredAgainst(h.turnNo)) out.push(h.turnNo);
   }
   return out;
+}
+
+/* ── the board-altering four ────────────────────────────────────────────── */
+
+/** Anchor In Time: is `turnNo` on the far side of the anchor, out of reach? */
+const anchoredAgainst = (turnNo) => !!G.anchor && turnNo < G.anchor.turnNo;
+
+/** Every capture `owner` could make right now, counted one per jump rather
+ *  than one per piece — a pawn with two victims is two chances taken. */
+function availableCaptures(owner) {
+  let n = 0;
+  for (const i of capturersFor(owner)) n += captureMoves(i).length;
+  return n;
+}
+
+/** Empty dark squares, the pool Rift and Chokepoint both draw from. */
+function openSquares() {
+  const out = [];
+  for (let i = 0; i < CELLS; i++)
+    if (isDark(i) && !G.board[i] && !isBarrier(i)) out.push(i);
+  return out;
+}
+
+/**
+ * Echo: where the piece at `i` stood 3 of its owner's turns ago, or -1.
+ *
+ * History is one entry per turn taken by either player, so "3 turns ago" is
+ * counted in the caster's OWN turns — otherwise the reach would halve every
+ * time Temporal Cascade handed someone consecutive turns. Anchored turns are
+ * out of reach, and the piece is found by id: a square is not an identity,
+ * and the piece may well have moved since.
+ */
+function echoTarget(i, caster) {
+  const p = G.board[i];
+  if (!p || p.owner !== caster) return -1;
+  let seen = 0;
+  for (let k = G.history.length - 1; k >= 0; k--) {
+    const h = G.history[k];
+    if (h.turn !== caster || h.turnNo >= G.turnNo) continue;
+    if (anchoredAgainst(h.turnNo)) return -1;
+    if (++seen < 3) continue;
+    const was = h.snap.board.findIndex((q) => q && q.id === p.id);
+    if (was < 0 || was === i) return -1;
+    if (G.board[was] || isBarrier(was)) return -1;    // the past is occupied
+    return was;
+  }
+  return -1;
+}
+
+/** Pieces of `caster`'s that Echo could send back. */
+function echoTargets(caster) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) if (echoTarget(i, caster) >= 0) out.push(i);
+  return out;
+}
+
+/**
+ * Chokepoint: the enemy square carrying the most traffic.
+ *
+ * "The most legal paths run through it" is not a quantity the doc defines, so
+ * it is pinned down here: every enemy move that would LAND on a square or JUMP
+ * OVER it counts as one path through it. Ties break toward the enemy's own
+ * back row — sealing deep in their territory is worth more than sealing a
+ * square they are about to leave — and then by index, so client and server
+ * always name the same square.
+ */
+function chokepointTarget(caster) {
+  const foe = 1 - caster;
+  const traffic = new Map();
+  const bump = (j) => traffic.set(j, (traffic.get(j) || 0) + 1);
+  for (let i = 0; i < CELLS; i++) {
+    if (!isAlly(G.board[i], foe)) continue;
+    for (const m of simpleMoves(i)) bump(m.to);
+    for (const m of captureMoves(i)) { bump(m.to); bump(m.victim); }
+  }
+  let best = -1, bestN = 0;
+  for (const j of openSquares()) {
+    const n = traffic.get(j) || 0;
+    if (n === 0) continue;
+    if (n > bestN
+        || (n === bestN && best >= 0
+            && Math.abs(rowOf(j) - homeRow(foe)) < Math.abs(rowOf(best) - homeRow(foe)))) {
+      best = j; bestN = n;
+    }
+  }
+  return best;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1238,6 +1459,11 @@ function performMove(from, mv, opts = {}) {
 function finishAction(landedAt = null, skipHerald = false) {
   G.hasActed = true;
   G.chain = null;
+  // A rift swallows whatever finished its move on one end. Resolved here, at
+  // the close of the movement, rather than mid-chain: a piece yanked across
+  // the board halfway through a jump sequence has no sequence left to finish.
+  const carried = riftCarry(landedAt);
+  if (carried >= 0) landedAt = carried;
   if (!skipHerald && landedAt != null && heraldAdjacent(landedAt) && !G.heraldBonus) {
     const opts = legalHeraldSteps(landedAt);
     if (opts.length) {
@@ -1249,14 +1475,38 @@ function finishAction(landedAt = null, skipHerald = false) {
   G.heraldBonus = null;
   G.phase = "end";
 }
+
+/**
+ * If a piece just finished its move on one end of the rift, carry it to the
+ * other and return the square it arrived on. Returns -1 when nothing happens.
+ *
+ * The far end has to be empty — a rift is a door, not a weapon, and letting it
+ * deliver a piece on top of another would need a capture rule nobody wrote.
+ */
+function riftCarry(landedAt) {
+  if (landedAt == null || !G.rift) return -1;
+  if (G.rift.madeOn === G.turnNo) return -1;        // inert on the turn it opened
+  const { a, b } = G.rift;
+  const to = landedAt === a ? b : landedAt === b ? a : -1;
+  if (to < 0) return -1;
+  const p = G.board[landedAt];
+  if (!p || G.board[to]) return -1;
+  G.board[landedAt] = null;
+  G.board[to] = p;
+  fx("riftCarry", { from: landedAt, to, piece: fxPiece(p) });
+  log(`The rift takes ${PLAYERS[p.owner].name}'s ${pieceLabel(p)} from ${sq(landedAt)} to ${sq(to)}.`, "big");
+  promoteIfDue(to);
+  return to;
+}
+
 function legalHeraldSteps(i) {
   const p = G.board[i];
   if (!p) return [];
   const r = rowOf(i), c = colOf(i), f = fwd(p.owner);
   const out = [];
   for (const dc of [-1, 1]) {
-    const nr = r + f, nc = c + dc;
-    if (onBoard(nr, nc) && !G.board[rc(nr, nc)]) out.push({ to: rc(nr, nc), kind: "herald" });
+    const j = cellAt(r + f, c + dc);
+    if (j >= 0 && !G.board[j] && !isBarrier(j)) out.push({ to: j, kind: "herald" });
   }
   return out;
 }
@@ -1364,6 +1614,11 @@ function beginTurn(player) {
   G.heraldBonus = null;
   G.lastCapture = null;
   G.mindControl = null;
+  G.mustCapture = null;      // Tactician's debt dies with the turn that took it
+  // Wraparound is measured in rounds and ticked here, so it costs both players
+  // the same number of turns however the turn order is bent.
+  if (G.wrap > 0 && --G.wrap === 0)
+    log("Wraparound fades — the board has edges again.", "big");
   // Backstop: the action layer will not let a turn end while either of these is
   // outstanding, but a rewind or a resigned game can leave one behind.
   G.owedDiscard = null;
@@ -1463,10 +1718,26 @@ function endTurn() {
  *
  * Returns endTurn()'s result, or null if the turn stands.
  */
+/**
+ * Does `seat` still owe Tactician a capture?
+ *
+ * The debt only binds while a capture is actually there to take. Clearing it
+ * the moment the board runs out of them is what stops the card from wedging a
+ * turn shut — the opponent can remove the last target between the payment and
+ * the taking, and being paid for a capture that no longer exists is not a
+ * reason to lose the game.
+ */
+function tacticianDebt(seat) {
+  if (!G.mustCapture || G.mustCapture.player !== seat) return false;
+  if (!capturersFor(seat).length) { G.mustCapture = null; return false; }
+  return true;
+}
+
 function autoPassIfStuck() {
   if (G.over) return null;
   if (G.chain != null || G.heraldBonus != null || G.mindControl) return null;
   if (G.owedDiscard || G.owedSacrifice) return null;
+  if (tacticianDebt(G.turn)) return null;
   const who = G.turn;
   if (hasTurnOption(who)) return null;
   log(`${PLAYERS[who].name} has nothing left to do — the turn passes automatically.`, "rule");
@@ -1776,9 +2047,97 @@ function castSpell(id, caster, payload = {}) {
     case "alchemistSpell":
       applyTransform(payload.target, "alchemist", { sacrifice: payload.sacrifice });
       break;
+
+    /* ── The board itself ─────────────────────────────────────────────── */
+    case "tactician": {
+      const n = availableCaptures(caster);
+      awardFP(caster, n, `Tactician — ${n} capture(s) counted`);
+      // The mandatory-capture rule already forfeits a piece for walking past a
+      // jump. Tactician removes that escape: you were paid for these, so the
+      // turn will not close until one is taken.
+      G.mustCapture = { player: caster };
+      log("You have been paid for those captures — one of them must be taken this turn.", "rule");
+      break;
+    }
+
+    case "rift": {
+      G.rift = { a: payload.a, b: payload.b, madeOn: G.turnNo };
+      fx("rift", { a: payload.a, b: payload.b, caster });
+      log(`Rift — ${sq(payload.a)} and ${sq(payload.b)} are joined. Anything landing on one is carried to the other.`, "big");
+      log("It stays inert for the rest of this turn.", "rule");
+      break;
+    }
+
+    case "wraparound": {
+      // Two ROUNDS, and a round is both players — so four turns, ticked down
+      // in beginTurn. Set to 5 here because the caster's own beginTurn has
+      // already run for this turn and will not tick it again.
+      G.wrap = 5;
+      fx("wraparound", { caster });
+      log("Wraparound — the left and right edges are joined for 2 rounds. It cuts both ways.", "big");
+      break;
+    }
+
+    case "anchor": {
+      G.anchor = { turnNo: G.turnNo };
+      fx("anchor", { caster });
+      log(`Anchor In Time — the game is pinned at turn ${G.turnNo}. Neither player may rewind past it again.`, "big");
+      break;
+    }
+
+    case "echo": {
+      const from = payload.target, to = echoTarget(from, caster);
+      if (to < 0) { log("Echo finds no square to return to — it fizzles.", "rule"); break; }
+      const p = G.board[from];
+      const past = echoPastPiece(from, caster);
+      G.board[from] = null;
+      G.board[to] = p;
+      fx("echo", { from, to, piece: fxPiece(p) });
+      log(`Echo — the ${pieceLabel(p)} returns to ${sq(to)}, where it stood 3 turns ago.`, "big");
+      // It arrives wearing the freezes it wore then, cleared ones included.
+      if (past) {
+        p.frozen = Math.max(p.frozen, past.frozen || 0);
+        p.noCapture = Math.max(p.noCapture, past.noCapture || 0);
+        if (past.frozen > 0 || past.noCapture > 0)
+          log("It brought its old wounds back with it.", "rule");
+      }
+      promoteIfDue(to);
+      break;
+    }
+
+    case "chokepoint": {
+      // Derived here, not read from the payload. The square is the ENGINE's
+      // choice by definition, and this is the one path both the referee and
+      // the machine's own casts go through — the machine calls castSpell
+      // directly, so a target that only dispatchAction supplied would arrive
+      // undefined and seal square `undefined`.
+      const at = chokepointTarget(caster);
+      if (at < 0) { log("Chokepoint finds nothing to seal — it fizzles.", "rule"); break; }
+      G.barriers.push(at);
+      fx("chokepoint", { at, caster });
+      log(`Chokepoint — ${sq(at)} is sealed for good. Nothing may land on it or cross it again.`, "big");
+      effNow(P, "noSpells", 2);
+      effNext(P, "noSpells", 2);
+      log("Sealing it costs you every spell for 2 turns.", "rule");
+      break;
+    }
   }
 
   checkGameOver();
+}
+
+/** The Echo snapshot's copy of the piece at `i` — what it was 3 turns ago. */
+function echoPastPiece(i, caster) {
+  const p = G.board[i];
+  if (!p) return null;
+  let seen = 0;
+  for (let k = G.history.length - 1; k >= 0; k--) {
+    const h = G.history[k];
+    if (h.turn !== caster || h.turnNo >= G.turnNo) continue;
+    if (++seen < 3) continue;
+    return h.snap.board.find((q) => q && q.id === p.id) || null;
+  }
+  return null;
 }
 
 /**
@@ -1909,13 +2268,7 @@ function martyrSacrificePool(caster) {
 }
 
 /** Empty squares an Evasive Maneuver could retreat the pawn at `from` into. */
-function evasiveDests(from, owner) {
-  const r = rowOf(from), c = colOf(from), b = -fwd(owner);
-  const out = [];
-  for (const dc of [-1, 1])
-    if (onBoard(r + b, c + dc) && !G.board[rc(r + b, c + dc)]) out.push(rc(r + b, c + dc));
-  return out;
-}
+const evasiveDests = (from, owner) => backStepsFrom(from, owner);
 
 /* ── mind control ───────────────────────────────────────────────────────── */
 
@@ -2198,6 +2551,24 @@ function dispatchAction(seat, a) {
             return fail("The Alchemist must be paid with one of your pawns.");
           payload.target = want.target; payload.sacrifice = want.sacrifice;
           break;
+
+        case "rift": {
+          const open = openSquares();
+          if (!open.includes(want.a) || !open.includes(want.b))
+            return fail("A rift joins two empty dark squares.");
+          if (want.a === want.b) return fail("A rift needs two different squares.");
+          payload.a = want.a; payload.b = want.b;
+          break;
+        }
+        case "echo":
+          if (!echoTargets(seat).includes(want.target))
+            return fail("That piece cannot return to where it stood.");
+          payload.target = want.target;
+          break;
+        // chokepoint takes no payload either — castSpell derives the square, so
+        // there is nothing here for an edited client to choose.
+        // tactician, wraparound and anchor take no target: spellBlocker has
+        // already proved there is something to count, join or pin.
       }
 
       castSpell(a.id, seat, payload);
@@ -2240,6 +2611,8 @@ function dispatchAction(seat, a) {
       if (g) return fail(g);
       if (G.chain != null) return fail("You must continue the chain-jump.");
       if (G.heraldBonus != null) return fail("Resolve the Herald's bonus step first.");
+      if (tacticianDebt(seat))
+        return fail("Tactician paid you for those captures — take one before you end the turn.");
       if (G.phase === "declare" && !G.hasActed && pendingSacrifice(seat).length)
         log("Turn ended without moving — no sacrifice is owed.", "rule");
       return { ok: true, sameSeat: endTurn().sameSeat };
@@ -2307,7 +2680,7 @@ function viewFor(g, seat, extra = {}) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     // constants
-    N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP,
+    N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY,
     // geometry
     rc, rowOf, colOf, isDark, sq, mirrorOf,
     // lifecycle
@@ -2324,5 +2697,7 @@ if (typeof module !== "undefined" && module.exports) {
     eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
     juggernautArmorPool, enchanterSacrificeOptions,
     juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
+    cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,
+    echoTarget, echoTargets, chokepointTarget, tacticianDebt, anchoredAgainst,
   };
 }

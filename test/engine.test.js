@@ -387,6 +387,47 @@ it("refuses a transformation whose sacrifice was not paid", () => {
   refused(applyAction(0, { t: "cast", id: "juggernautSpell", payload: { target: mine, sacrifice: emptySquare(g) } }));
 });
 
+/* The board-altering cards validate squares rather than pieces, which is a
+   different shape of lie: not "that is not yours" but "that is not a square you
+   may name". Chokepoint is the interesting one — the engine picks its own
+   target, so there is deliberately nothing on the wire to tamper with. */
+
+it("refuses a rift that is not two distinct empty dark squares", () => {
+  const g = solventGame();
+  g.players[0].hand = ["rift"];
+  load(g);
+  const occupied = anyPieceOf(g, 0);
+  const empty = emptySquare(g);
+  refused(applyAction(0, { t: "cast", id: "rift", payload: { a: occupied, b: empty } }));
+  refused(applyAction(0, { t: "cast", id: "rift", payload: { a: empty, b: empty } }),
+    "two different squares");
+  refused(applyAction(0, { t: "cast", id: "rift", payload: { a: empty, b: 9999 } }));
+});
+
+it("refuses an Echo on a piece with nowhere to return to", () => {
+  const g = solventGame();
+  g.players[0].hand = ["echo"];
+  load(g);
+  // A brand-new game has no 3-turns-ago for anything.
+  refused(applyAction(0, { t: "cast", id: "echo", payload: { target: anyPieceOf(g, 0) } }));
+});
+
+it("does not let a client choose Chokepoint's square", () => {
+  const g = solventGame();
+  g.players[0].hand = ["chokepoint"];
+  load(g);
+  const before = getG().barriers.slice();
+  const mine = anyPieceOf(g, 0);
+  // Name a square of our own choosing; the engine must ignore it entirely.
+  const res = applyAction(0, { t: "cast", id: "chokepoint", payload: { target: mine } });
+  if (res.ok) {
+    const now = getG().barriers;
+    equal(now.length, before.length + 1, "exactly one square is sealed");
+    assert(now[now.length - 1] !== mine, "the client's square must not be the one sealed");
+    assert(!getG().board[now[now.length - 1]], "a barrier never lands on an occupied square");
+  }
+});
+
 it("refuses a transformation spell that is not in your hand", () => {
   const g = solventGame();
   g.players[0].hand = [];
