@@ -188,6 +188,11 @@ button:disabled{cursor:not-allowed}
 .piece.sentinel{border-radius:14%;width:84%;height:84%}
 .piece.marked{outline:2.5px solid var(--bad);outline-offset:2.5px}
 .piece.veiled{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(120,255,220,.75) inset}
+/* Only ever drawn on your own decoys — see renderBoard. Deliberately quiet:
+   it has to be legible to the player holding it without turning into a tell
+   over somebody's shoulder. */
+.piece.hollow{opacity:.72;box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(255,255,255,.22) inset}
+.piece.hollow .glyph{opacity:.5}
 .piece .glyph{line-height:1;pointer-events:none}
 .piece .fpdot{
   position:absolute;top:-3px;right:-3px;
@@ -761,6 +766,11 @@ function renderBoard() {
       if (p.form === "alchemist") d.classList.add("alchemist");
       if (p.eyeMark > 0) d.classList.add("marked");
       if (p.noCapture > 0) d.classList.add("veiled");
+      // Only ever true on a piece this device is entitled to know about:
+      // viewFor deletes the field outright from every enemy piece, and against
+      // the machine the field is only ever set on pieces the player owns or
+      // the machine does — which is why this asks whose seat is looking.
+      if (p.hollow && p.owner === viewSeat()) d.classList.add("hollow");
       // A penalty that has been paid but has not landed yet is otherwise
       // invisible, which reads as "the penalty never happened". Show it.
       const pend = (p.p_frozen || 0) + (p.p_noCapture || 0);
@@ -838,6 +848,7 @@ function describePiece(p, i) {
   if (p.noCapture > 0) bits.push(`Static Veil — cannot capture for ${p.noCapture} more turn(s).`);
   if (p.p_frozen > 0) bits.push(`PENALTY PENDING — will be frozen for ${p.p_frozen} turn(s) starting next turn.`);
   if (p.p_noCapture > 0) bits.push(`PENALTY PENDING — will be unable to capture for ${p.p_noCapture} turn(s).`);
+  if (p.hollow) bits.push("HOLLOW — a decoy. It cannot capture, and your opponent sees an ordinary pawn.");
   if (p.eyeMark > 0) bits.push(`Eye For An Eye — marked for ${p.eyeMark} more enemy turn(s).`);
   if (p.veilBy != null && p.noCapture > 0)
     bits.push(`${PLAYERS[p.veilBy].name} owes friendly fire when this stun expires.`);
@@ -1501,6 +1512,11 @@ function beginCast(id, caster) {
       confirmFirst(`${S.text}<br><br>The engine has found <b>${sq(at)}</b>.`, () => finish({}));
       return;
     }
+
+    case "hollow":
+      target("Choose a pawn to hollow out — your opponent will not be told which",
+        hollowTargets(caster), (t) => finish({ target: t }));
+      return;
 
     case "pressure":
       confirmFirst(`${S.text}<br><br>Your own next turn is timed too — this is a card you have to be ready for.`,
@@ -2852,6 +2868,24 @@ function aiSpellCandidates(phaseName) {
     out.push({ id: "tactician", payload: {} });
   if (have("chokepoint") && chokepointTarget(AI.side) >= 0)
     out.push({ id: "chokepoint", payload: {} });
+  // Hollow is a bluff, and a bluff has no value the position evaluator can
+  // see — the board after casting it is a board with one pawn that can no
+  // longer capture, which scores strictly WORSE. Its worth is entirely in
+  // what the opponent does not know, so it rides in on `bonus` the same way
+  // Stutter's does, rather than being smuggled into sideScore where it would
+  // also tell the machine about the OPPONENT's decoys. See STUTTER_DENIAL.
+  //
+  // What can be judged is which pawn to spend: one that has no capture to
+  // give up, and that stands where the enemy has to keep respecting it.
+  if (have("hollow"))
+    for (const i of hollowTargets(AI.side)
+      .filter((i) => !captureMoves(i).length)
+      .map((i) => ({ i, near: adjacentTo(i, (q) => isEnemy(q, AI.side)).length }))
+      .filter((c) => c.near > 0)
+      .sort((a, b) => b.near - a.near)
+      .slice(0, aiWide(3)))
+      out.push({ id: "hollow", payload: { target: i.i }, bonus: HOLLOW_BLUFF + 12 * i.near });
+
   if (have("stutter") && !G.stutter) {
     const gap = aiStutterGap();
     // sideScore prices STUTTER_DENIAL of this flatly, because that much is
@@ -2909,6 +2943,20 @@ function aiSpellCandidates(phaseName) {
  * cast has to be clearly, not marginally, worth it.
  */
 const STUTTER_DENIAL = 90;
+
+/**
+ * And what a Hollow is worth, on the same terms.
+ *
+ * This one is frankly unmeasurable: the card's whole value is a belief in
+ * somebody else's head, and there is no position after the cast that is worth
+ * more than the position before it. So rather than invent a number, this is
+ * set to roughly what the cast COSTS — 3 Focus and a card, a little over 60
+ * points of resourceValue — which makes the machine willing to play it in a
+ * quiet position and unwilling to pay a real tempo price for it. The per-enemy
+ * premium at the call site is the only part with an actual argument behind it:
+ * a decoy nobody has to walk past is not deceiving anyone.
+ */
+const HOLLOW_BLUFF = 62;
 
 function aiStutterGap() {
   // Measured on the position as it stands, which is a turn early: the real
@@ -3377,6 +3425,7 @@ function runTests() {
     G.board = new Array(CELLS).fill(null);
     return G;
   };
+  const countHollow = (owner) => G.board.filter((p) => p && p.owner === owner && p.hollow).length;
   const put = (i, owner, rank = "pawn", extra = {}) => {
     const p = mkPiece(owner, rank);
     Object.assign(p, extra);
@@ -3735,7 +3784,7 @@ function runTests() {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
     tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
-    stutter: 4, pressure: 3,
+    stutter: 4, pressure: 3, hollow: 3,
   };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));
@@ -4050,6 +4099,63 @@ function runTests() {
 
   AI.on = stAIWas.on; AI.side = stAIWas.side; AI.level = stAIWas.level;
   AI.fast = stAIWas.fast; AI.thinking = stAIWas.thinking;
+
+  group("Hollow");
+  blank(0, { mode: "ai" });
+  put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(0, 1), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 9; G.players[0].hand = ["hollow"];
+  ok("a pawn with a jump available is still a legal target",
+    hollowTargets(0).includes(rc(7, 4)));
+  castSpell("hollow", 0, { target: rc(7, 4) });
+  ok("the pawn is marked", G.board[rc(7, 4)].hollow === true);
+  ok("...and can no longer capture", captureMoves(rc(7, 4)).length === 0);
+  ok("...so the mandatory-capture rule stops billing it", capturersFor(0).length === 0);
+  ok("...but it can still move", simpleMoves(rc(7, 4)).length > 0);
+  ok("...and the line naming it is private to its owner",
+    G.log.filter((l) => /decoy/i.test(l.text)).every((l) => l.only === 0));
+  ok("...while the cast itself is public",
+    G.log.some((l) => /casts Hollow/.test(l.text) && l.only == null));
+
+  /* §3c. The machine's contract, and the one that matters: it must not be
+     able to price a board with a decoy differently from a board without one.
+     A term in sideScore would break this, because evaluate() calls sideScore
+     for BOTH sides — so pricing your own decoy prices your opponent's too. */
+  blank(0, { mode: "ai" });
+  put(rc(7, 4), 0); put(rc(3, 2), 0); put(rc(6, 5), 1); put(rc(2, 3), 1);
+  const hPlain = [sideScore(0), sideScore(1)];
+  G.board[rc(7, 4)].hollow = true;
+  const hDecoy = [sideScore(0), sideScore(1)];
+  ok("the evaluator cannot tell a decoy from a pawn — its own side",
+    hPlain[0] === hDecoy[0], `${hPlain[0]} vs ${hDecoy[0]}`);
+  ok("...nor the other one, which is the half that would leak",
+    hPlain[1] === hDecoy[1], `${hPlain[1]} vs ${hDecoy[1]}`);
+  G.board[rc(6, 5)].hollow = true;
+  ok("...and an ENEMY decoy is invisible to it too",
+    sideScore(0) === hPlain[0] && sideScore(1) === hPlain[1]);
+
+  // The machine still has to be able to CAST it, which is why the value rides
+  // on the candidate rather than on the evaluator.
+  {
+    const hWas = { on: AI.on, side: AI.side, fast: AI.fast, level: AI.level };
+    blank(0, { mode: "ai" });
+    // A pawn standing next to an enemy but with its jump blocked: exactly the
+    // pawn the finder is supposed to pick, since hollowing out a real threat
+    // would throw the threat away.
+    put(rc(7, 4), 0); put(rc(9, 0), 0);
+    put(rc(6, 5), 1); put(rc(5, 6), 1); put(rc(0, 1), 1);
+    G.turn = 0; G.phase = "declare";
+    G.players[0].fp = 9; G.players[0].hand = ["hollow"];
+    AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+    const hCands = aiSpellCandidates("declare").filter((c) => c.id === "hollow");
+    ok("the machine is offered a decoy, and prefers a pawn with no jump to give up",
+      hCands.length > 0 && hCands.every((c) => captureMoves(c.payload.target).length === 0),
+      hCands.map((c) => sq(c.payload.target)).join(","));
+    ok("...carrying the worth the evaluator cannot see",
+      hCands.every((c) => c.bonus >= HOLLOW_BLUFF));
+    ok("...and it pays for one", aiCastOnce("declare") && countHollow(0) === 1, countHollow(0));
+    AI.on = hWas.on; AI.side = hWas.side; AI.fast = hWas.fast; AI.level = hWas.level;
+  }
 
   group("Chronos's Gaze");
   blank(0);

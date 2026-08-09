@@ -330,6 +330,14 @@ const SPELLS = {
     penalty: "The strain costs you 3 more Focus on top of the card, and you may not draw next turn.",
     timing: "Either phase, on your own turn.",
   },
+  hollow: {
+    name: "Hollow", cost: 3, rarity: "rare", group: "Transformation", when: "declare",
+    hidden: true,
+    flavor: "It stands like the others. It cannot do what the others can.",
+    text: "One of your pawns becomes a decoy. On your opponent's screen it is an ordinary pawn — but it can never capture, and an enemy spell aimed at it is wasted.",
+    penalty: "It reveals itself the moment a spell touches it, when it is crowned, and on the capture that kills it.",
+    timing: "Declare Action phase only.",
+  },
   pressure: {
     name: "Pressure", cost: 3, rarity: "uncommon", group: "Game Altering", when: "any",
     onlineOnly: true,
@@ -368,6 +376,7 @@ function mkPiece(owner, rank, g = G) {
     captures: 0,          // lifetime captures, gates Phaser + Enchanter
     frozen: 0,            // turns this piece cannot move or capture
     noCapture: 0,         // Static Veil — may move, may not capture
+    hollow: false,        // Hollow — a decoy. SECRET: see SECRET_PIECE_FIELDS
     veilBy: null,         // who cast the veil (owed the friendly-fire penalty)
     eyeMark: 0,           // Eye For An Eye — opponent turns remaining
   };
@@ -705,9 +714,17 @@ const isImmobile = p => p && (p.form === "sentinel" || p.form === "alchemist");
 function canAct(p) {
   return !!p && !isImmobile(p) && p.frozen <= 0;
 }
-/** Can this piece perform a capture right now? */
+/**
+ * Can this piece perform a capture right now?
+ *
+ * A Hollow never can, and that is the one place its secret is visible to a
+ * rule rather than to a player. The machine's search reads captureMoves and so
+ * can tell an enemy Hollow from a real pawn by what it threatens — a leak the
+ * plan for this card accepted rather than pay for a projected board. Against a
+ * person, who only sees viewFor's output, the bluff is intact.
+ */
 function canCapture(p) {
-  return canAct(p) && p.noCapture <= 0;
+  return canAct(p) && p.noCapture <= 0 && !p.hollow;
 }
 
 /** Diagonal directions this piece may travel. Pawns advance only. */
@@ -1108,6 +1125,10 @@ function spellBlocker(id, caster = G.turn) {
     case "pressure":
       if (G.players[1 - caster].timed > 0) return "Your opponent is already on the clock.";
       break;
+    case "hollow":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!hollowTargets(caster).length) return "No untransformed pawn of yours is left to hollow out.";
+      break;
   }
   return null;
 }
@@ -1158,6 +1179,16 @@ function mindControlTargets(owner) {
   }
   return out;
 }
+/** Your own untransformed pawns that are not already decoys. */
+function hollowTargets(owner) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (isAlly(p, owner) && p.rank === "pawn" && !p.form && !p.hollow) out.push(i);
+  }
+  return out;
+}
+
 function eyeTargets(owner) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
@@ -1389,6 +1420,9 @@ function awardFP(owner, n, why) {
 function removePiece(i, why = "captured", kind = "capture") {
   const p = G.board[i];
   if (!p) return null;
+  // Before the death event, so the transcript reads in the order it happened:
+  // the disguise comes off, and then the piece goes.
+  if (p.hollow) revealHollow(i, "it is gone now, and it never could have taken anything");
   fx("death", { at: i, kind, piece: fxPiece(p) });
   G.board[i] = null;
   const P = G.players[p.owner];
@@ -1416,6 +1450,9 @@ function removePiece(i, why = "captured", kind = "capture") {
 function promoteIfDue(i) {
   const p = G.board[i];
   if (!p || p.rank !== "pawn" || rowOf(i) !== promoRow(p.owner)) return false;
+  // A crowning happens in front of both players, and nothing below carries a
+  // secret queen, so the disguise cannot survive it.
+  revealHollow(i, "the crown gives it away");
   p.rank = "queen";
   fx("promote", { at: i, owner: p.owner, form: p.form });
   awardFP(p.owner, 2, `a pawn was crowned at ${sq(i)}`);
@@ -1461,6 +1498,48 @@ function resolveCapture(fromIdx, mv) {
     log("Eye For An Eye — the capturer dies with its prey.", "big");
   }
   return { destroyed, retaliated };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   HOLLOW
+
+   A decoy pawn. Everything about it that matters is what the OPPONENT cannot
+   see: `hollow` is stripped from their view by SECRET_PIECE_FIELDS, the cast
+   is logged to the caster alone, and the effect that marks it carries `only`.
+   All they are told — because castSpell announces every card — is that one of
+   those pawns is now a fake. Which one is the whole card.
+
+   The reveal is the opposite, and deliberately so: it is loud, public, and
+   goes to both seats. There are three ways to trigger it, and each is a moment
+   the fiction could not have survived anyway.
+
+     · A SPELL AIMED AT IT. Note what this is NOT: the enemy's target finders
+       are left alone, so a Hollow still appears in every list the opponent can
+       build. Quietly filtering it out would have leaked it — an option that
+       vanishes for no visible reason is an answer — and it would have made the
+       client and the server disagree about what is castable. Instead the spell
+       is allowed, and it is WASTED, which is what the card promises.
+
+     · THE CROWN. A pawn that reaches the far rank becomes a queen in plain
+       sight; a secret queen is not a thing the rest of this file could carry.
+
+     · THE CAPTURE THAT KILLS IT. It was a real pawn and it really died — the
+       reveal here is not mechanical, it is the opponent finding out what they
+       spent the jump on.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Drop the disguise on the piece at `i`, if it was wearing one. Returns true
+ * if something was actually revealed, so callers can decide whether to spend
+ * the spell that did it.
+ */
+function revealHollow(i, why) {
+  const p = G.board[i];
+  if (!p || !p.hollow) return false;
+  p.hollow = false;
+  fx("hollowReveal", { at: i, owner: p.owner });
+  log(`The pawn at ${sq(i)} was a Hollow — ${why}.`, "big");
+  return true;
 }
 
 /** Does a capturing piece that landed on `i` have to stop because of a Sentinel? */
@@ -2178,6 +2257,7 @@ function castSpell(id, caster, payload = {}) {
 
     /* ── Combat ───────────────────────────────────────────────────────── */
     case "veil": {
+      if (revealHollow(payload.target, "Static Veil finds nothing in it to stun")) break;
       const t = G.board[payload.target];
       fx("veil", { at: payload.target });
       effNow(t, "noCapture", 2);
@@ -2190,6 +2270,14 @@ function castSpell(id, caster, payload = {}) {
     }
 
     case "mindcontrol": {
+      if (revealHollow(payload.target, "there is no will in it to seize")) {
+        // The exhaustion still lands. The card was spent either way, and a
+        // penalty that only applies when the spell worked would make aiming at
+        // a suspected decoy free.
+        effNow(P, "noSpells", 1);
+        effNext(P, "noSpells", 1);
+        break;
+      }
       G.mindControl = { piece: payload.target };
       fx("mind", { at: payload.target, caster });
       log(`Mind Control — ${PLAYERS[caster].name} seizes the enemy ${pieceLabel(G.board[payload.target])} at ${sq(payload.target)} for one movement.`, "rule");
@@ -2392,6 +2480,19 @@ function castSpell(id, caster, payload = {}) {
       log(`The strain costs ${PLAYERS[caster].name} ${strain} more Focus.`, "rule");
       effNext(P, "noDraw", 1);
       log("And you may not draw next turn.", "rule");
+      break;
+    }
+
+    case "hollow": {
+      const at = payload.target;
+      const p = G.board[at];
+      p.hollow = true;
+      // Both of these carry an audience. The public half of this card is the
+      // "casts Hollow" line castSpell already wrote — the opponent learns that
+      // one of those pawns is a fake, and nothing more.
+      fx("hollow", { at, owner: caster, only: caster });
+      log(`Hollow — your pawn at ${sq(at)} is a decoy now. It cannot capture, and only you can tell.`,
+        "rule", caster);
       break;
     }
 
@@ -2892,6 +2993,11 @@ function dispatchAction(seat, a) {
           if (!eyeTargets(seat).includes(want.target)) return fail("That is not an untransformed pawn of yours.");
           payload.target = want.target;
           break;
+        case "hollow":
+          if (!hollowTargets(seat).includes(want.target))
+            return fail("That is not an untransformed pawn of yours to hollow out.");
+          payload.target = want.target;
+          break;
         case "cascade":
           if (!friendlyPawns(seat).includes(want.sacrifice)) return fail("Temporal Cascade must be paid with one of your pawns.");
           payload.sacrifice = want.sacrifice;
@@ -3052,7 +3158,7 @@ const VIEW_LOG_TAIL = 80;
  * on the foe's copy, so a client that tests for the field cannot tell a
  * concealed piece from an ordinary one by the shape of the object.
  */
-const SECRET_PIECE_FIELDS = [];
+const SECRET_PIECE_FIELDS = ["hollow"];
 
 /** Is this fx event or log line addressed to a seat other than `seat`? */
 const forOtherSeat = (e, seat) => e && e.only != null && e.only !== seat;
@@ -3130,6 +3236,7 @@ if (typeof module !== "undefined" && module.exports) {
     countPieces, countForm, spellBlocker, transformBlocker, eligibleSpellIds, modeSpellIds,
     evasiveTargets, evasiveDests, mirrorTargets, veilTargets, mindControlTargets,
     eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
+    hollowTargets, revealHollow,
     juggernautArmorPool, enchanterSacrificeOptions,
     juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
     cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,

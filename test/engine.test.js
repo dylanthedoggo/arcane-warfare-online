@@ -28,7 +28,7 @@ const {
   FORMS, SPELLS, SPELL_IDS, SECRET_PIECE_FIELDS,
   rc, isDark,
   newGame, beginTurn, log, applyAction, viewFor, setG, getG,
-  legalMovesFor,
+  legalMovesFor, captureMoves, capturersFor,
 } = engine;
 
 /* ── a very small harness ─────────────────────────────────────────────────
@@ -858,7 +858,12 @@ it("strips a secret piece field from every piece that is not yours", () => {
   // Stand in for a real concealment card. Registering the field is the whole
   // opt-in — a card whose field is missing from this list leaks silently, and
   // this test is the reason that failure is loud instead.
-  SECRET_PIECE_FIELDS.push("hollow");
+  //
+  // Restored by splicing out what was added, NOT by emptying the array: this
+  // is the game's real list, and truncating it would quietly switch off the
+  // redaction every later test depends on.
+  const had = SECRET_PIECE_FIELDS.includes("hollow");
+  if (!had) SECRET_PIECE_FIELDS.push("hollow");
   try {
     const mine = anyPieceOf(g, 0), theirs = anyPieceOf(g, 1);
     g.board[mine].hollow = true;
@@ -870,7 +875,7 @@ it("strips a secret piece field from every piece that is not yours", () => {
       "the field must be DELETED, not blanked — a client testing for the key must not tell the two apart");
     assert(g.board[theirs].hollow === true, "and the real game keeps it");
   } finally {
-    SECRET_PIECE_FIELDS.length = 0;
+    if (!had) SECRET_PIECE_FIELDS.splice(SECRET_PIECE_FIELDS.indexOf("hollow"), 1);
   }
 });
 
@@ -919,7 +924,8 @@ it("keeps a secret out of all three channels at once", () => {
   // What a real concealment card does on the turn it is cast: mark a piece,
   // announce it to one seat, and animate it for that seat only.
   const g = freshGame();
-  SECRET_PIECE_FIELDS.push("hollow");
+  const had = SECRET_PIECE_FIELDS.includes("hollow");
+  if (!had) SECRET_PIECE_FIELDS.push("hollow");
   try {
     load(g);
     const decoy = anyPieceOf(g, 1);
@@ -937,8 +943,114 @@ it("keeps a secret out of all three channels at once", () => {
     assert(owner.fx.some((e) => e.type === "hollow"));
     assert(owner.log.some((l) => l.text.includes("hollow")));
   } finally {
-    SECRET_PIECE_FIELDS.length = 0;
+    if (!had) SECRET_PIECE_FIELDS.splice(SECRET_PIECE_FIELDS.indexOf("hollow"), 1);
   }
+});
+
+/* ── Hollow, the first card that actually depends on all this ───────────── */
+
+describe("a Hollow is hidden from the seat it is hidden from");
+
+/** An online game with `seat` holding Hollow and able to pay for it. */
+function hollowReady(seat = 0) {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.turn = seat;
+  live.phase = "declare";
+  live.hasActed = false;
+  live.players[seat].hand = ["hollow"];
+  live.players[seat].fp = 9;
+  return live;
+}
+
+it("keeps the decoy out of the board, the transcript and the log at once", () => {
+  const g = hollowReady(0);
+  const at = engine.hollowTargets(0)[0];
+  allowed(applyAction(0, { t: "cast", id: "hollow", payload: { target: at } }));
+  const live = getG();
+  equal(live.board[at].hollow, true, "the game itself knows");
+
+  const foe = viewFor(live, 1, {});
+  assert(!("hollow" in foe.board[at]),
+    "the field must not merely be false on their copy — it must be absent");
+  assert(foe.fx.every((e) => e.type !== "hollow"), "nor may the effect reach them");
+  assert(foe.log.every((l) => !/decoy/i.test(l.text)), "nor a log line naming it");
+
+  const mine = viewFor(live, 0, {});
+  equal(mine.board[at].hollow, true, "while the owner sees all three");
+  assert(mine.fx.some((e) => e.type === "hollow"));
+  assert(mine.log.some((l) => /decoy/i.test(l.text)));
+});
+
+it("still tells the opponent that SOME pawn is now a decoy", () => {
+  // The bluff only works if they know there is one. What is hidden is which.
+  const g = hollowReady(0);
+  const at = engine.hollowTargets(0)[0];
+  applyAction(0, { t: "cast", id: "hollow", payload: { target: at } });
+  const foe = viewFor(getG(), 1, {});
+  assert(foe.log.some((l) => /casts Hollow/.test(l.text)),
+    "casting a card is public — it is the target that is not");
+});
+
+it("cannot be cast on somebody else's pawn, or on a piece already disguised", () => {
+  const g = hollowReady(0);
+  const theirs = anyPieceOf(getG(), 1);
+  refused(applyAction(0, { t: "cast", id: "hollow", payload: { target: theirs } }), "pawn of yours");
+
+  const mine = engine.hollowTargets(0)[0];
+  getG().board[mine].hollow = true;
+  refused(applyAction(0, { t: "cast", id: "hollow", payload: { target: mine } }), "pawn of yours");
+});
+
+it("can never capture", () => {
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(0, 1), 1]]);
+  const live = getG();
+  assert(engine.captureMoves(rc(7, 4)).length > 0, "the fixture really does offer a jump");
+  live.board[rc(7, 4)].hollow = true;
+  equal(engine.captureMoves(rc(7, 4)).length, 0, "and a decoy cannot take it");
+  equal(engine.capturersFor(0).length, 0,
+    "so the mandatory-capture rule does not bill it for walking away either");
+});
+
+it("is revealed, and the spell wasted, when an enemy spell picks it out", () => {
+  // Deliberately NOT filtered out of the target list: an option that silently
+  // vanishes is itself an answer, and the client could not compute the same
+  // list without knowing the secret.
+  const g = staged([[rc(7, 4), 0], [rc(2, 3), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(7, 4)].hollow = true;
+  live.players[1].hand = ["veil"];
+  live.players[1].fp = 9;
+  assert(engine.veilTargets(1).includes(rc(7, 4)),
+    "the decoy must still appear in the enemy's target list");
+
+  allowed(applyAction(1, { t: "cast", id: "veil", payload: { target: rc(7, 4) } }));
+  const after = getG();
+  equal(after.board[rc(7, 4)].hollow, false, "the disguise came off");
+  equal(after.board[rc(7, 4)].noCapture, 0, "and the stun never landed");
+  assert(after.log.some((l) => /was a Hollow/.test(l.text)), "the reveal is announced");
+  assert(after.log.filter((l) => /was a Hollow/.test(l.text)).every((l) => l.only == null),
+    "and announced to BOTH seats — the reveal is the payoff, not another secret");
+});
+
+it("is revealed by the crown", () => {
+  const g = staged([[rc(1, 2), 0], [rc(9, 4), 1]]);
+  getG().board[rc(1, 2)].hollow = true;
+  allowed(applyAction(0, { t: "move", from: rc(1, 2), to: rc(0, 1), kind: "step" }));
+  const p = getG().board[rc(0, 1)];
+  equal(p.rank, "queen");
+  equal(p.hollow, false, "nothing below carries a secret queen");
+});
+
+it("is revealed by the capture that kills it", () => {
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 1);
+  getG().board[rc(7, 4)].hollow = true;
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  assert(getG().log.some((l) => /was a Hollow/.test(l.text)),
+    "the opponent finds out what they spent the jump on");
 });
 
 /* ══════════════════════════════════════════════════════════════════════════

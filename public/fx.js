@@ -888,7 +888,9 @@ const FX_HOLD = {
   // Arming a Stutter is a promise; the rewind is the board being taken back.
   // The second beat is the long one for the same reason Chronos's is.
   stutter:     (e) => (e.phase === "rewind" ? 1100 : 620),
-  pressure:    () => 800,
+  pressure:     () => 800,
+  hollow:       () => 620,
+  hollowReveal: () => 700,
 };
 
 FX.holdOf = function (e) {
@@ -2110,6 +2112,32 @@ FX_PLAY.pressure = function (e) {
     ], 760));
   }
   return Promise.all(out);
+};
+
+/**
+ * A pawn is hollowed out. Only its owner ever sees this — viewFor drops the
+ * event for the other seat — so it can afford to be plain: a quiet inward
+ * collapse and the piece settling a shade fainter than it was.
+ */
+FX_PLAY.hollow = function (e) {
+  const c = fxCtr(e.at);
+  return Promise.all([
+    fxCollapse(c, FX_OWNER(e.owner), 560, { count: 2, reach: .7 }),
+    sleepFX(300).then(() => fxRing(c, FX_OWNER(e.owner), 1.5, .35, 420, { cls: "dashed" })),
+    fxAfterglow(e.at, FX_OWNER(e.owner), 700, { peak: .35 }),
+  ]);
+};
+
+/** And the moment it stops being a secret. This one both players see. */
+FX_PLAY.hollowReveal = function (e) {
+  const c = fxCtr(e.at);
+  return Promise.all([
+    fxRing(c, FX_C.dead, .3, 2.4, 620, { cls: "thick" }),
+    fxGlow(c, FX_C.dead, 1.9, 420, { peak: .9 }),
+    fxGlyph(c, "◌", FX_C.dead, 640, { size: .6 }),
+    fxShake(6, 260),
+    fxAfterglow(e.at, FX_C.dead, 820, { peak: .5 }),
+  ]);
 };
 
 /* ══════════════════════════════════════════════════════════════════════════
