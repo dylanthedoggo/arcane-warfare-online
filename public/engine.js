@@ -309,6 +309,19 @@ const SPELLS = {
     penalty: "You cannot cast a spell for 2 turns.",
     timing: "Declare Action phase only.",
   },
+
+  /* ── the turn model ───────────────────────────────────────────────────
+     These do not touch a piece either, and they do not change the terms of
+     the board. They change what a TURN is — whether it stands once taken,
+     and how long you get to think about it.
+     ─────────────────────────────────────────────────────────────────── */
+  stutter: {
+    name: "Stutter", cost: 4, rarity: "rare", group: "Game Altering", when: "any",
+    flavor: "They will remember doing it. It will not have happened.",
+    text: "Your opponent's next turn is played out in full, then unmade — and they must then take a different one.",
+    penalty: "The strain costs you 3 more Focus on top of the card, and you may not draw next turn.",
+    timing: "Either phase, on your own turn.",
+  },
 };
 const SPELL_IDS = Object.keys(SPELLS);
 
@@ -457,6 +470,8 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     anchor: null,           // Anchor In Time — { turnNo } no rewind may pass
     barriers: [],           // Chokepoint — permanently sealed square indices
     mustCapture: null,      // Tactician — { player } owes a capture this turn
+    stutter: null,          // Stutter — { player, banned } a turn owed a second attempt
+    turnAction: null,       // what this turn has been spent on — see noteTurnAction
     setAside: [],           // Phaser cards parked while a Phaser lives
     removed: [],            // Temporal Cascade after use
     log: [],
@@ -1069,6 +1084,9 @@ function spellBlocker(id, caster = G.turn) {
     case "chokepoint":
       if (chokepointTarget(caster) < 0) return "Your opponent has no move to seal off.";
       break;
+    case "stutter":
+      if (G.stutter) return "A turn is already waiting to be unmade.";
+      break;
   }
   return null;
 }
@@ -1242,6 +1260,39 @@ function chokepointTarget(caster) {
     }
   }
   return best;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WHAT THIS TURN WAS SPENT ON
+
+   Stutter has to be able to say "not that again", which means something has to
+   remember what "that" was. `G.turnAction` is the FIRST turn-consuming thing
+   the active player did — a movement, a draw, or a cast — and nothing else
+   reads it.
+
+   It is recorded down here, in the three functions that actually DO those
+   things, rather than up in dispatchAction where the equivalent bookkeeping
+   for other cards lives. That is deliberate: the machine never goes through
+   the dispatcher. It calls performMove and castSpell directly, so a record
+   kept at the doorway would be blank for every turn the machine takes, and
+   Stutter would silently do nothing to it.
+
+   Only the first is kept. A chain-jump's later hops, a Herald's bonus step and
+   a second spell are all continuations of the turn that has already been
+   identified, and banning "the same third hop" is not a thing a player can act
+   on anyway.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function noteTurnAction(a) {
+  if (!G.turnAction) G.turnAction = a;
+}
+
+/** Are these two records of a turn's opening action the same action? */
+function sameTurnAction(a, b) {
+  if (!a || !b || a.t !== b.t) return false;
+  if (a.t === "move") return a.from === b.from && a.to === b.to && a.kind === b.kind;
+  if (a.t === "cast") return a.id === b.id;
+  return true;                                   // a draw is a draw
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1438,6 +1489,7 @@ function performMove(from, mv, opts = {}) {
   if (!p) return;
   const owner = p.owner;
   G.lastMove = { from, to: mv.to };
+  if (owner === G.turn) noteTurnAction({ t: "move", from, to: mv.to, kind: mv.kind });
 
   // Recorded before anything moves, while the squares still hold the pieces the
   // animation needs to draw. `chained` marks a hop that continues a sequence
@@ -1690,6 +1742,10 @@ function beginTurn(player) {
   G.lastCapture = null;
   G.mindControl = null;
   G.mustCapture = null;      // Tactician's debt dies with the turn that took it
+  G.turnAction = null;
+  // G.stutter deliberately survives: it is armed on the caster's turn and
+  // fires on the NEXT one, so clearing it here would disarm every cast.
+  // endTurn is what spends it.
   // Wraparound is measured in rounds and ticked here, so it costs both players
   // the same number of turns however the turn order is bent.
   if (G.wrap > 0 && --G.wrap === 0)
@@ -1756,6 +1812,100 @@ function hasTurnOption(player) {
   return false;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   STUTTER
+
+   The turn is played out in full and then unmade, and the player has to find
+   another one. Three pieces:
+
+     · the REWIND, below, which fires once, at the moment the stuttered turn
+       would have been handed over;
+     · the BAN, which refuses a repeat of what was just unmade; and
+     · the ESCAPE, because "take a different turn" cannot mean "lose the
+       game" — the ban stops binding the moment there is nothing else to do.
+
+   The rewind reuses beginTurn's own snapshot, the same entry Chronos's Gaze
+   returns to, so the state it lands on is the decision point exactly: income
+   already paid, counters already ticked, nothing double-counted when the turn
+   is taken again.
+
+   Note what the player SEES, which is the point of the card. Online, state is
+   pushed after every accepted action, so their move has already crossed the
+   wire and animated on both screens by the time this runs. The rewind arrives
+   after it. The move happens, and then it unhappens.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Unmake the stuttered turn, if this is the moment for it. Returns true when
+ * the turn was rewound and the same seat must take it again.
+ */
+function stutterRewind(who) {
+  const st = G.stutter;
+  if (!st || st.player !== who || st.banned) return false;
+
+  // A turn that did nothing has nothing to unmake, and banning "do nothing"
+  // would rewind for ever. The card is simply spent. Passing to dodge a
+  // Stutter costs the whole turn, which is a worse trade than taking your
+  // second-best move, so this is not an escape worth closing.
+  if (!G.turnAction) {
+    G.stutter = null;
+    log("Stutter finds nothing to unmake — that turn did nothing.", "rule");
+    return false;
+  }
+
+  // beginTurn wrote this at the start of the turn now being unmade. If it is
+  // not there — Chronos's Gaze truncates history in place, and could have been
+  // cast during the very turn we are trying to rewind — the card fizzles
+  // rather than rewinding to somebody else's position.
+  const h = G.history[G.history.length - 1];
+  if (!h || h.turn !== who || h.turnNo !== G.turnNo) {
+    G.stutter = null;
+    log("Stutter loses its grip on the moment — it fizzles.", "rule");
+    return false;
+  }
+
+  const banned = G.turnAction;
+  const keptLog = G.log.slice();
+  G.history.length = G.history.length - 1;
+  restore(h.snap);
+  G.log = keptLog;
+  // The snapshot was taken while the stutter was armed and unfired, so it came
+  // back with it. All that is added is what may not be done again.
+  G.stutter = { player: who, banned };
+  fx("stutter", { player: who, phase: "rewind" });
+  log(`Stutter — ${PLAYERS[who].name}'s turn is unmade. It must be taken differently.`, "big");
+  G.history.push({ turn: who, turnNo: G.turnNo, snap: snapshot(G) });
+  return true;
+}
+
+/**
+ * Is there any turn open to the stuttered seat other than the one that was
+ * unmade? Mirrors hasTurnOption clause for clause, minus the banned action —
+ * so the ban can never claim an alternative the referee would then refuse.
+ */
+function stutterHasAlternative(seat) {
+  const b = G.stutter.banned;
+  const P = G.players[seat];
+  for (let i = 0; i < CELLS; i++) {
+    if (!isAlly(G.board[i], seat)) continue;
+    for (const m of legalMovesFor(i))
+      if (!sameTurnAction(b, { t: "move", from: i, to: m.to, kind: m.kind })) return true;
+  }
+  if (b.t !== "draw" && G.phase === "declare" && !G.hasActed && G.castThisTurn === 0
+      && !G.drewThisTurn && P.noDraw <= 0 && eligibleSpellIds().length > 0) return true;
+  if (P.hand.some((id) => !sameTurnAction(b, { t: "cast", id }) && !spellBlocker(id, seat)))
+    return true;
+  return false;
+}
+
+/** Would `act` simply repeat the turn Stutter already unmade? */
+function stutterBans(seat, act) {
+  const st = G.stutter;
+  if (!st || st.player !== seat || !st.banned) return false;
+  if (!sameTurnAction(st.banned, act)) return false;
+  return stutterHasAlternative(seat);
+}
+
 /**
  * Finish the active player's turn and hand play over (or take an extra turn).
  * Returns { sameSeat } — true when Temporal Cascade kept the turn with the same
@@ -1765,6 +1915,11 @@ function hasTurnOption(player) {
 function endTurn() {
   if (G.over) return { sameSeat: false };
   const who = G.turn;
+  // Before anything is ticked down: the whole turn is about to be unmade, and
+  // ticking a counter down twice for one turn would be a real rules bug.
+  if (stutterRewind(who)) return { sameSeat: true };
+  // The second attempt stands. The card is spent either way.
+  if (G.stutter && G.stutter.player === who) G.stutter = null;
   tickDownFor(who);
   if (checkGameOver()) return { sameSeat: false };
 
@@ -1932,7 +2087,9 @@ function castSpell(id, caster, payload = {}) {
   const P = G.players[caster];
   P.fp -= S.cost;
   consumeCard(id, caster);
-  if (caster === G.turn) G.castThisTurn++;
+  // An anyTurn card cast on the OPPONENT's turn is not what their turn was
+  // spent on, so it never becomes the thing Stutter refuses.
+  if (caster === G.turn) { G.castThisTurn++; noteTurnAction({ t: "cast", id }); }
   fx("spell", { id, caster });
   log(`${PLAYERS[caster].name} casts ${S.name}. (−${S.cost} FP)`, "p" + caster);
 
@@ -2196,6 +2353,22 @@ function castSpell(id, caster, payload = {}) {
       log("Sealing it costs you every spell for 2 turns.", "rule");
       break;
     }
+
+    case "stutter": {
+      const victim = 1 - caster;
+      G.stutter = { player: victim, banned: null };
+      fx("stutter", { player: victim, caster, phase: "arm" });
+      log(`Stutter — ${PLAYERS[victim].name}'s next turn will be played out, unmade, and taken again differently.`, "big");
+      // On top of the card's own price. Taken with min() rather than refused
+      // up front: the cost of the CARD is 4, and a penalty that cannot be paid
+      // in full is still a penalty, the same way every other one here works.
+      const strain = Math.min(3, P.fp);
+      P.fp -= strain;
+      log(`The strain costs ${PLAYERS[caster].name} ${strain} more Focus.`, "rule");
+      effNext(P, "noDraw", 1);
+      log("And you may not draw next turn.", "rule");
+      break;
+    }
   }
 
   checkGameOver();
@@ -2240,6 +2413,7 @@ function drawSpell(player) {
   G.drawCounts[id] = (G.drawCounts[id] || 0) + 1;
   P.hand.push(id);
   G.drewThisTurn = true;
+  noteTurnAction({ t: "draw" });
   log(`${PLAYERS[player].name} draws a spell — this ends the turn.`, "p" + player);
   return true;
 }
@@ -2470,6 +2644,10 @@ function dispatchAction(seat, a) {
 
       const mv = findLegalMove(a.from, a.to, a.kind);
       if (!mv) return fail("That is not a legal move for that piece.");
+      // Checked against the ENGINE's move rather than the client's claimed
+      // kind, which findLegalMove treats as optional.
+      if (stutterBans(seat, { t: "move", from: a.from, to: mv.to, kind: mv.kind }))
+        return fail("Stutter — you have already taken that turn. Take a different one.");
 
       // Captures are mandatory. Moving elsewhere is allowed but forfeits one of
       // the pieces that could have jumped — recorded before the move, since the
@@ -2545,6 +2723,8 @@ function dispatchAction(seat, a) {
       // (including the anyTurn exception), and every per-spell precondition.
       const blocker = spellBlocker(a.id, seat);
       if (blocker) return fail(blocker);
+      if (stutterBans(seat, { t: "cast", id: a.id }))
+        return fail("Stutter — you have already taken that turn. Take a different one.");
 
       const want = a.payload || {};
       const payload = {};
@@ -2673,6 +2853,8 @@ function dispatchAction(seat, a) {
       const P = G.players[seat];
       if (P.noDraw > 0) return fail(`Drawing is barred for ${P.noDraw} more turn(s).`);
       if (!eligibleSpellIds().length) return fail("No spell can be drawn right now.");
+      if (stutterBans(seat, { t: "draw" }))
+        return fail("Stutter — you have already taken that turn. Take a different one.");
       drawSpell(seat);
       // Sandbox: the card was the cost of the turn, and the sandbox does not
       // charge. Returning plain OK leaves the turn open — and leaves the result
@@ -2811,5 +2993,6 @@ if (typeof module !== "undefined" && module.exports) {
     juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
     cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,
     echoTarget, echoTargets, chokepointTarget, tacticianDebt, anchoredAgainst,
+    stutterBans, stutterHasAlternative, sameTurnAction,
   };
 }

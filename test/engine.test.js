@@ -544,6 +544,89 @@ it("does not consume the turn when an action is refused", () => {
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
+   8b. A STUTTERED TURN CANNOT SIMPLY BE TAKEN AGAIN
+
+   Stutter's whole effect is a refusal, which puts it squarely in this file.
+   The rewind itself is a rule and is tested in the browser; what matters here
+   is that a client which has just watched its turn evaporate cannot send the
+   identical action back down the wire and have it stand.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("a stuttered turn cannot simply be taken again");
+
+/** A piece of `seat`'s with at least two legal moves, and both of them. */
+function twoMovesFor(g, seat) {
+  load(g);
+  for (let i = 0; i < g.board.length; i++) {
+    const p = g.board[i];
+    if (!p || p.owner !== seat) continue;
+    const ms = legalMovesFor(i);
+    if (ms.length >= 2) return { from: i, a: ms[0], b: ms[1] };
+  }
+  throw new Error(`seat ${seat} should have a piece with two opening moves`);
+}
+
+it("refuses the exact move that was unmade", () => {
+  const g = freshGame();
+  const { from, move } = movablePieceOf(g, 0);
+  getG().stutter = { player: 0, banned: { t: "move", from, to: move.to, kind: move.kind } };
+  const before = fingerprint(getG());
+  refused(applyAction(0, { t: "move", from, to: move.to, kind: move.kind }), "Stutter");
+  equal(fingerprint(getG()), before, "a refusal must not move the piece");
+});
+
+it("...and refuses it however the client labels the move", () => {
+  // findLegalMove treats a missing `kind` as "any", so the ban is compared
+  // against the ENGINE's resolved move rather than the client's claim.
+  const g = freshGame();
+  const { from, move } = movablePieceOf(g, 0);
+  getG().stutter = { player: 0, banned: { t: "move", from, to: move.to, kind: move.kind } };
+  refused(applyAction(0, { t: "move", from, to: move.to }), "Stutter");
+  refused(applyAction(0, { t: "move", from, to: move.to, kind: undefined }), "Stutter");
+});
+
+it("...but accepts a different one", () => {
+  const g = freshGame();
+  const { from, a, b } = twoMovesFor(g, 0);
+  getG().stutter = { player: 0, banned: { t: "move", from, to: a.to, kind: a.kind } };
+  allowed(applyAction(0, { t: "move", from, to: b.to, kind: b.kind }));
+});
+
+it("refuses a repeated draw as readily as a repeated move", () => {
+  const g = freshGame();
+  load(g);
+  getG().stutter = { player: 0, banned: { t: "draw" } };
+  refused(applyAction(0, { t: "draw" }), "Stutter");
+});
+
+it("refuses a repeated cast", () => {
+  const g = freshGame();
+  load(g);
+  getG().players[0].hand = ["wraparound"];
+  getG().players[0].fp = 9;
+  getG().stutter = { player: 0, banned: { t: "cast", id: "wraparound" } };
+  refused(applyAction(0, { t: "cast", id: "wraparound", payload: {} }), "Stutter");
+  equal(getG().wrap, 0, "and the spell did not resolve on the way to being refused");
+});
+
+it("binds only the seat that was stuttered", () => {
+  const g = freshGame();
+  const { from, move } = movablePieceOf(g, 0);
+  // The same move, banned against the OTHER seat. Seat 0 is untouched by it.
+  getG().stutter = { player: 1, banned: { t: "move", from, to: move.to, kind: move.kind } };
+  allowed(applyAction(0, { t: "move", from, to: move.to, kind: move.kind }));
+});
+
+it("will not stack a second Stutter on a pending one", () => {
+  const g = freshGame();
+  load(g);
+  getG().players[0].hand = ["stutter"];
+  getG().players[0].fp = 9;
+  getG().stutter = { player: 1, banned: null };
+  refused(applyAction(0, { t: "cast", id: "stutter", payload: {} }), "already waiting");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
    9. WHAT CROSSES THE WIRE
 
    Refusing illegal actions is only half the referee's job. The other half is

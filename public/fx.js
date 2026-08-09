@@ -885,6 +885,9 @@ const FX_HOLD = {
   anchor:      () => 700,
   echo:        () => 620,
   chokepoint:  () => 780,
+  // Arming a Stutter is a promise; the rewind is the board being taken back.
+  // The second beat is the long one for the same reason Chronos's is.
+  stutter:     (e) => (e.phase === "rewind" ? 1100 : 620),
 };
 
 FX.holdOf = function (e) {
@@ -2029,6 +2032,56 @@ FX_PLAY.chokepoint = function (e) {
     ])),
     fxAfterglow(e.at, FX_C.stone, 1200, { peak: .55, spread: 2.2 }),
   ]);
+};
+
+/**
+ * Stutter, in two beats that look deliberately alike.
+ *
+ * Arming is a promise about a turn that has not happened yet, so it plays as a
+ * banner and a single skipped beat — the board twitches and settles.
+ *
+ * The rewind is the board being taken back, and it borrows Chronos's language
+ * on purpose: same colour, same inward collapse, because it IS the same thing
+ * happening, only to one turn instead of two. What tells them apart is the
+ * stagger. Time here does not run smoothly backwards; it catches, and the
+ * shudder repeats before the position comes back.
+ */
+FX_PLAY.stutter = function (e) {
+  const mid = fxMid();
+  const board = document.getElementById("board");
+  const out = [];
+
+  if (e.phase !== "rewind") {
+    out.push(fxBanner(SPELLS.stutter.name, SPELLS.stutter.flavor, FX_OWNER(e.caster), 1100));
+    out.push(fxShake(5, 200));
+    out.push(sleepFX(200).then(() => fxShake(5, 200)));
+    return Promise.all(out);
+  }
+
+  // Three catches, tightening. Each is a collapse inward that does not quite
+  // finish before the next one starts on top of it.
+  for (let k = 0; k < 3; k++)
+    out.push(sleepFX(k * 190).then(() => Promise.all([
+      fxCollapse(mid, FX_C.time, 520, { count: 1, reach: .8 }),
+      fxShake(9 - k * 2, 150),
+    ])));
+
+  // Then the board drops out and returns on the position it started from. The
+  // hard cut in the middle is the whole point: nothing glides back, it simply
+  // was not so.
+  if (board)
+    board.animate([
+      { filter: "saturate(1)", opacity: 1 },
+      { filter: "saturate(.15) hue-rotate(-20deg)", opacity: .3, offset: .5 },
+      { filter: "saturate(.15) hue-rotate(-20deg)", opacity: .3, offset: .62 },
+      { filter: "saturate(1)", opacity: 1 },
+    ], { duration: 1100 * FX.rate, easing: "steps(9, end)" });
+
+  out.push(sleepFX(620).then(() => Promise.all([
+    fxShockwave(mid, FX_C.time, 800, { count: 2 }),
+    fxGlyph(mid, "⟲", FX_C.time, 620, { size: .7 }),
+  ])));
+  return Promise.all(out);
 };
 
 /* ══════════════════════════════════════════════════════════════════════════

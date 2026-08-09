@@ -1487,6 +1487,14 @@ function beginCast(id, caster) {
       confirmFirst(`${S.text}<br><br>The engine has found <b>${sq(at)}</b>.`, () => finish({}));
       return;
     }
+
+    case "stutter":
+      // No target: it is aimed at a turn, not at a square. The real price is
+      // worth naming out loud, because 4 FP on the card and 3 more in strain
+      // is most of a full pool.
+      confirmFirst(`${S.text}<br><br>Costs <b>${S.cost} FP</b> now and <b>3 more</b> in strain — ${
+        Math.max(0, G.players[caster].fp - S.cost - 3)} FP would be left.`, () => finish({}));
+      return;
   }
 }
 
@@ -2380,6 +2388,30 @@ function turnMoves(owner) {
   return out;
 }
 
+/**
+ * The same list, minus anything Stutter has forbidden — what the machine may
+ * actually choose from at the ROOT of its search.
+ *
+ * Only at the root. Deeper plies are later turns, where the ban has long since
+ * been spent, so filtering inside turnMoves would quietly delete legal replies
+ * from every branch of the tree.
+ *
+ * The machine does not end its turn through the referee, so the refusal in
+ * dispatchAction never binds it. Without this it would replay the very move
+ * that was unmade, be refused online, and offline simply take it — getting
+ * away with what a player cannot.
+ */
+function rootMoves(owner) {
+  const moves = turnMoves(owner);
+  if (!G.stutter || G.stutter.player !== owner || !G.stutter.banned) return moves;
+  const legal = moves.filter((m) =>
+    !stutterBans(owner, { t: "move", from: m.from, to: m.to, kind: m.kind }));
+  // If the banned move was the only one, the ban has already stopped binding
+  // and stutterBans says so — but be explicit rather than returning an empty
+  // list and leaving the machine with nothing to play.
+  return legal.length ? legal : moves;
+}
+
 /* ── evaluation ─────────────────────────────────────────────────────────────
    Public information only. Reading the opponent's hand would be cheating, so
    only hand SIZE is ever consulted.
@@ -2449,6 +2481,15 @@ function sideScore(side) {
   // Wraparound, since both change what simpleMoves returns; these are the
   // things it CANNOT see.
   if (G.mustCapture && G.mustCapture.player === side) s -= 12;   // an obligation, not an option
+  // Stutter, priced as a cost to its VICTIM — which evaluate() turns into the
+  // caster's gain for free. This is only half the judgement, and deliberately
+  // the flat half: what a stutter is worth depends almost entirely on the
+  // position, and that part is measured once per turn by aiStutterGap() rather
+  // than guessed at again on every leaf. See STUTTER_DENIAL for the numbers.
+  // Constant across a search once it is set, so it moves the decision to cast
+  // and nothing else.
+  if (G.stutter && G.stutter.player === side)
+    s -= G.stutter.banned ? STUTTER_DENIAL + 20 : STUTTER_DENIAL;
   if (G.rift) {
     // A rift is worth most to whoever has a piece near a mouth, and it is
     // open to both sides — so price proximity, not ownership.
@@ -2574,7 +2615,7 @@ function searchBestMove(owner) {
   AI_DEADLINE = performance.now() + aiBudget(cfg.timeMs);
   clearOrderingMemory();
 
-  let moves = turnMoves(owner);
+  let moves = rootMoves(owner);
   if (!moves.length) return null;
   if (moves.length === 1) return { move: moves[0], score: 0, depth: 0, nodes: 0, forced: true };
 
@@ -2766,6 +2807,14 @@ function aiSpellCandidates(phaseName) {
     out.push({ id: "tactician", payload: {} });
   if (have("chokepoint") && chokepointTarget(AI.side) >= 0)
     out.push({ id: "chokepoint", payload: {} });
+  if (have("stutter") && !G.stutter) {
+    const gap = aiStutterGap();
+    // sideScore prices STUTTER_DENIAL of this flatly, because that much is
+    // true of any stutter. The excess is what THIS position is worth, and it
+    // rides along as a bonus rather than being guessed at on every leaf.
+    if (gap >= STUTTER_DENIAL)
+      out.push({ id: "stutter", payload: {}, bonus: gap - STUTTER_DENIAL });
+  }
   if (have("echo"))
     for (const i of echoTargets(AI.side).slice(0, aiWide(3)))
       out.push({ id: "echo", payload: { target: i } });
@@ -2784,6 +2833,64 @@ function aiSpellCandidates(phaseName) {
         if (a !== b) out.push({ id: "rift", payload: { a, b } });
   }
   return out;
+}
+
+/* ── Stutter's worth ────────────────────────────────────────────────────────
+   Every other card here is priced by a flat term in sideScore. Stutter cannot
+   be, and measuring it is what shows why.
+
+   Sampling best-minus-second-best over a real game, in this evaluator's own
+   units: the MEDIAN gap is 0, the 75th percentile is 3, the 90th is 10 — and
+   the maximum is 490. Three quarters of the time, denying somebody their best
+   turn costs them nothing at all, because their second-best is just as good. A
+   flat term would therefore be wrong in both directions at once: far too
+   generous in the ordinary position, and nowhere near generous enough in the
+   one position out of ten where their reply is close to forced and taking it
+   away is worth two pieces.
+
+   So the position-dependent half of the judgement lives here, in the gate,
+   where it is computed ONCE per turn rather than at every leaf of the search;
+   and the flat half lives in sideScore, priced at this same constant, so that
+   a candidate which clears the gate is one the search will also agree to pay
+   for. Tactician's `availableCaptures >= 2` gate is the same idea with cheaper
+   arithmetic.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * What denying the opponent their best turn is worth right now.
+ *
+ * Roughly 7 Focus — the card plus its strain — is what the machine gives up,
+ * which comes to a little under 80 points of resourceValue. Set at 90 so a
+ * cast has to be clearly, not marginally, worth it.
+ */
+const STUTTER_DENIAL = 90;
+
+function aiStutterGap() {
+  // Measured on the position as it stands, which is a turn early: the real
+  // stutter lands after this turn finishes. Close enough to tell a forced
+  // reply from a free choice, and far cheaper than simulating our own turn
+  // first only to measure theirs.
+  const foe = 1 - AI.side;
+  const moves = orderMoves(turnMoves(foe), 0).slice(0, aiWide(14));
+  if (moves.length < 2) return 0;      // nothing to deny, or nothing to deny it with
+  // Its own clock. Every alphabeta call reads the shared AI_DEADLINE, so
+  // without this the measurement inherits whatever the last search left
+  // behind — usually a deadline already in the past, which makes every reply
+  // score the same and quietly reports a gap of zero from every position.
+  AI_TIMEUP = false;
+  AI_DEADLINE = performance.now() + aiBudget(aiCfg().policyMs);
+  let best = -Infinity, second = -Infinity;
+  for (const m of moves) {
+    const recs = applySeq(m.steps);
+    const v = -alphabeta(1 - foe, 1, -Infinity, Infinity, 1);
+    undoSeq(recs);
+    if (v > best) { second = best; best = v; }
+    else if (v > second) { second = v; }
+  }
+  // A measurement that ran out of time part-way compared an arbitrary subset,
+  // so it is not a reason to spend 7 Focus.
+  if (AI_TIMEUP) return 0;
+  return second === -Infinity ? 0 : best - second;
 }
 
 function aiRearmostPawn(owner) {
@@ -2895,7 +3002,14 @@ function aiCastOnce(phaseName) {
   let best = null, bestV = base + cfg.castEdge;          // demand a real improvement
   const stop = performance.now() + aiPolicyBudget();
   for (const c of cands) {
-    const v = aiSimValue(() => aiExecuteSpell(c), movesNext, d);
+    // `bonus` is what a candidate is worth BEYOND anything the evaluator can
+    // see from the resulting position. Almost nothing needs it — a Veil's
+    // value shows up as a stunned piece, a transformation's as a form — but
+    // Stutter's does not: the whole effect is a turn that will not be taken,
+    // and no static term can tell a position where that is free from one where
+    // it is worth a queen. So the finder measures it and hands the number over
+    // rather than teaching sideScore to guess. See STUTTER_DENIAL.
+    const v = aiSimValue(() => aiExecuteSpell(c), movesNext, d) + (c.bonus || 0);
     if (v > bestV) { bestV = v; best = c; }
     if (performance.now() > stop) break;
   }
@@ -3576,6 +3690,7 @@ function runTests() {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
     tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
+    stutter: 4,
   };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));
@@ -3736,6 +3851,161 @@ function runTests() {
     captureMoves(rc(7, 4)).length === 0);
 
   /* ── Chronos's Gaze ────────────────────────────────────────────────── */
+  /* ── the turn model ────────────────────────────────────────────────── */
+  group("Stutter");
+  blank();
+  put(rc(9, 4), 0); put(rc(9, 6), 0);
+  put(rc(2, 3), 1); put(rc(2, 5), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 10; G.players[0].hand = ["stutter"];
+  G.players[1].fp = 0; G.players[1].hand = [];
+  castSpell("stutter", 0, {});
+  ok("it arms against the opponent, not the caster",
+    G.stutter && G.stutter.player === 1, JSON.stringify(G.stutter));
+  ok("...and nothing is banned until a turn has actually been taken",
+    G.stutter.banned === null);
+  ok("...and it costs 4 for the card plus 3 in strain",
+    G.players[0].fp === 3, G.players[0].fp);
+  ok("...and bars the caster's next draw",
+    G.players[0].p_noDraw === 1 || G.players[0].noDraw === 1);
+
+  endTurnLocal();
+  ok("arming survives the handover — beginTurn must not clear it",
+    !!G.stutter && G.turn === 1, `${G.turn} / ${JSON.stringify(G.stutter)}`);
+
+  const stFrom = rc(2, 3), stTaken = rc(3, 2), stOther = rc(3, 4);
+  const stRes = applyAction(1, { t: "move", from: stFrom, to: stTaken, kind: "step" });
+  ok("the stuttered turn is played out and then unmade",
+    stRes.ok && !!G.board[stFrom] && !G.board[stTaken],
+    `${stRes.ok} / ${!!G.board[stFrom]} / ${!!G.board[stTaken]}`);
+  ok("...and the seat keeps the turn rather than handing over",
+    G.turn === 1 && G.phase === "declare" && !G.hasActed,
+    `${G.turn} / ${G.phase} / ${G.hasActed}`);
+  ok("...with the move it just made now named as the one it may not repeat",
+    G.stutter && G.stutter.banned && G.stutter.banned.to === stTaken,
+    JSON.stringify(G.stutter && G.stutter.banned));
+  ok("...and the turn counter did not advance for a turn that was unmade",
+    G.history[G.history.length - 1].turnNo === G.turnNo);
+
+  ok("repeating it is refused",
+    !applyAction(1, { t: "move", from: stFrom, to: stTaken, kind: "step" }).ok);
+  ok("...and refusing it leaves the piece where it was",
+    !!G.board[stFrom] && !G.board[stTaken]);
+  ok("any other turn is allowed",
+    applyAction(1, { t: "move", from: stFrom, to: stOther, kind: "step" }).ok);
+  ok("...and the second attempt stands", !G.board[stFrom] && !!G.board[stOther]);
+  ok("...spending the card, so play returns to the opponent",
+    G.stutter === null && G.turn === 0, `${JSON.stringify(G.stutter)} / ${G.turn}`);
+
+  // "Take a different turn" cannot mean "lose the game". Down to a single
+  // legal move, the ban stops binding.
+  blank();
+  put(rc(9, 4), 0);                                   // so the game is not already won
+  put(rc(0, 1), 1);                                   // Violet's one and only piece
+  // Sealed rather than blocked by a piece: an enemy pawn on that square would
+  // hand this pawn a capture, which is a second move and defeats the fixture.
+  G.barriers.push(rc(1, 2));
+  G.turn = 1; G.phase = "declare";
+  G.players[1].fp = 0; G.players[1].hand = [];
+  G.players[1].noDraw = 9;                            // and drawing is off the table
+  G.stutter = { player: 1, banned: { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" } };
+  ok("the position really does leave exactly one move",
+    legalMovesFor(rc(0, 1)).length === 1 && legalMovesFor(rc(0, 1))[0].to === rc(1, 0),
+    JSON.stringify(legalMovesFor(rc(0, 1)).map((m) => m.to)));
+  ok("...so the ban lifts rather than sealing the game shut",
+    !stutterHasAlternative(1) && !stutterBans(1, { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" }));
+  ok("...and the referee lets it through",
+    applyAction(1, { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" }).ok);
+
+  // A turn that did nothing has nothing to unmake, and banning "do nothing"
+  // would rewind for ever.
+  blank();
+  put(rc(9, 4), 0); put(rc(2, 3), 1);
+  G.turn = 1; G.phase = "declare";
+  G.stutter = { player: 1, banned: null };
+  G.turnAction = null;
+  const stNoop = endTurn();
+  ok("a turn that did nothing spends the card instead of rewinding for ever",
+    G.stutter === null && stNoop.sameSeat === false && G.turn === 0,
+    `${JSON.stringify(G.stutter)} / ${stNoop.sameSeat} / ${G.turn}`);
+
+  // Chronos's Gaze truncates history in place and could have been cast during
+  // the very turn Stutter is trying to unmake.
+  blank();
+  put(rc(9, 4), 0); put(rc(2, 3), 1);
+  G.turn = 1; G.phase = "end";
+  G.stutter = { player: 1, banned: null };
+  G.turnAction = { t: "move", from: rc(2, 3), to: rc(3, 2), kind: "step" };
+  G.history = [];                                     // the moment has been unmade already
+  endTurn();
+  ok("with no snapshot to return to it fizzles rather than rewinding somebody else's turn",
+    G.stutter === null && G.turn === 0, `${JSON.stringify(G.stutter)} / ${G.turn}`);
+
+  // The machine does not end its turn through the referee, so the refusal in
+  // dispatchAction never binds it. rootMoves is the one place that does.
+  blank();
+  put(rc(9, 4), 0); put(rc(2, 3), 1); put(rc(2, 5), 1);
+  G.turn = 1; G.phase = "declare";
+  const stAll = turnMoves(1);
+  G.stutter = { player: 1, banned: { t: "move", from: rc(2, 3), to: rc(3, 2), kind: "step" } };
+  const stRoot = rootMoves(1);
+  ok("the machine's own move list drops the banned turn",
+    stRoot.length === stAll.length - 1
+      && !stRoot.some((m) => m.from === rc(2, 3) && m.to === rc(3, 2)),
+    `${stAll.length} → ${stRoot.length}`);
+  ok("...and the evaluator can see being stuttered as a cost",
+    (() => { const withBan = sideScore(1); G.stutter = null; return sideScore(1) > withBan; })());
+
+  /* Whether the machine will PAY for it. Both halves of the judgement are
+     asserted, because either one alone silently does nothing: without the gate
+     it would buy a stutter worth nothing, and without the bonus the flat score
+     term caps its value at STUTTER_DENIAL and it never clears the cast margin
+     however sharp the position. */
+  const stAIWas = { on: AI.on, side: AI.side, level: AI.level, fast: AI.fast, thinking: AI.thinking };
+
+  // A quiet position: several replies, all equally good. Denying one is free
+  // for the victim, so the card must not be bought.
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 1, "queen");
+  put(rc(1, 6), 1); put(rc(1, 8), 1);
+  put(rc(10, 5), 0); put(rc(10, 7), 0);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 10; G.players[0].hand = ["stutter"];
+  G.players[1].fp = 0; G.players[1].hand = [];
+  AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+  ok("nothing worth denying, so the machine is not even offered the card",
+    aiStutterGap() < STUTTER_DENIAL
+      && !aiSpellCandidates("declare").some((c) => c.id === "stutter"),
+    Math.round(aiStutterGap()));
+  ok("...and it keeps its Focus", !aiCastOnce("declare") && G.stutter === null);
+
+  // The same card against a position with exactly ONE turn worth taking: a
+  // hanging queen with a single escape, and other legal turns to fall back on
+  // so the ban still has something to bite.
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 1, "queen");                 // hanging...
+  put(rc(6, 3), 0);                          // ...to this pawn, which lands on f8
+  put(rc(4, 3), 1); put(rc(6, 5), 1);        // her own pawns seal every escape but f8
+  G.barriers.push(rc(7, 2));                 // and her counter-jump has nowhere to land
+  put(rc(1, 6), 1); put(rc(1, 8), 1);        // spare turns, so she is not down to one move
+  put(rc(10, 5), 0); put(rc(10, 7), 0);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 10; G.players[0].hand = ["stutter"];
+  G.players[1].fp = 0; G.players[1].hand = [];
+  AI.side = 0;
+  ok("the fixture really is sharp — one saving turn, and the rest legal",
+    capturersFor(1).length === 0 && turnMoves(1).length > 2 && aiStutterGap() > 200,
+    `${turnMoves(1).length} moves, gap ${Math.round(aiStutterGap())}`);
+  const stCand = aiSpellCandidates("declare").find((c) => c.id === "stutter");
+  ok("...so the card is offered, carrying what the position is worth",
+    !!stCand && stCand.bonus > 100, stCand && Math.round(stCand.bonus));
+  ok("...and the machine pays for it",
+    aiCastOnce("declare") && G.stutter && G.stutter.player === 1,
+    JSON.stringify(G.stutter));
+
+  AI.on = stAIWas.on; AI.side = stAIWas.side; AI.level = stAIWas.level;
+  AI.fast = stAIWas.fast; AI.thinking = stAIWas.thinking;
+
   group("Chronos's Gaze");
   blank(0);
   put(rc(6, 5), 0); put(rc(9, 2), 0); put(rc(2, 5), 1);
