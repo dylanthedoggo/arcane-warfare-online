@@ -207,13 +207,24 @@ FX.pump = function () {
   // it climbing even through a rewind), so a drop means a different game.
   if (top < FX.seen) FX.reset();
 
-  const fresh = G.fx.filter((e) => e.n > FX.seen);
-  if (!fresh.length) return;
-
-  // Advance the mark even when nothing will be drawn. Otherwise a spell cast
-  // while the tab was hidden would queue up and play, out of nowhere, minutes
-  // later when the player came back.
+  // `only` marks an event addressed to one seat — the reveal of a concealed
+  // piece, say. Online it was dropped by viewFor() before it ever arrived;
+  // this is the same guard for the game against the machine, where the browser
+  // holds the real G and would otherwise animate the machine's secret on the
+  // screen of the player it is being kept from. See visibleLog(), which does
+  // the same job for the third channel.
+  // The sandbox shows everything: one person is driving both seats, so an
+  // effect withheld from "the other player" would simply never be seen.
+  const all = G.dev === true;
+  const me = typeof viewSeat === "function" ? viewSeat() : null;
+  const fresh = G.fx.filter((e) => e.n > FX.seen && (all || e.only == null || e.only === me));
+  // The mark advances to the top of the batch whether or not anything in it
+  // will be drawn — including past events this seat is not allowed to see, so
+  // a withheld effect cannot come back later once the mark catches up.
+  // Otherwise a spell cast while the tab was hidden would queue up and play,
+  // out of nowhere, minutes later when the player came back.
   FX.seen = top;
+  if (!fresh.length) return;
   if (!FX.enabled()) return;
 
   const now = performance.now();
@@ -877,6 +888,16 @@ const FX_HOLD = {
   anchor:      () => 700,
   echo:        () => 620,
   chokepoint:  () => 780,
+  // Arming a Stutter is a promise; the rewind is the board being taken back.
+  // The second beat is the long one for the same reason Chronos's is.
+  stutter:     (e) => (e.phase === "rewind" ? 1100 : 620),
+  pressure:     () => 800,
+  hollow:       () => 620,
+  hollowReveal: () => 700,
+  quantum:         () => 900,
+  quantumCollapse: () => 1000,
+  twin:            () => 900,
+  twinSever:       () => 520,
 };
 
 FX.holdOf = function (e) {
@@ -2020,6 +2041,161 @@ FX_PLAY.chokepoint = function (e) {
       fxShake(8, 320),
     ])),
     fxAfterglow(e.at, FX_C.stone, 1200, { peak: .55, spread: 2.2 }),
+  ]);
+};
+
+/**
+ * Stutter, in two beats that look deliberately alike.
+ *
+ * Arming is a promise about a turn that has not happened yet, so it plays as a
+ * banner and a single skipped beat — the board twitches and settles.
+ *
+ * The rewind is the board being taken back, and it borrows Chronos's language
+ * on purpose: same colour, same inward collapse, because it IS the same thing
+ * happening, only to one turn instead of two. What tells them apart is the
+ * stagger. Time here does not run smoothly backwards; it catches, and the
+ * shudder repeats before the position comes back.
+ */
+FX_PLAY.stutter = function (e) {
+  const mid = fxMid();
+  const board = document.getElementById("board");
+  const out = [];
+
+  if (e.phase !== "rewind") {
+    out.push(fxBanner(SPELLS.stutter.name, SPELLS.stutter.flavor, FX_OWNER(e.caster), 1100));
+    out.push(fxShake(5, 200));
+    out.push(sleepFX(200).then(() => fxShake(5, 200)));
+    return Promise.all(out);
+  }
+
+  // Three catches, tightening. Each is a collapse inward that does not quite
+  // finish before the next one starts on top of it.
+  for (let k = 0; k < 3; k++)
+    out.push(sleepFX(k * 190).then(() => Promise.all([
+      fxCollapse(mid, FX_C.time, 520, { count: 1, reach: .8 }),
+      fxShake(9 - k * 2, 150),
+    ])));
+
+  // Then the board drops out and returns on the position it started from. The
+  // hard cut in the middle is the whole point: nothing glides back, it simply
+  // was not so.
+  if (board)
+    board.animate([
+      { filter: "saturate(1)", opacity: 1 },
+      { filter: "saturate(.15) hue-rotate(-20deg)", opacity: .3, offset: .5 },
+      { filter: "saturate(.15) hue-rotate(-20deg)", opacity: .3, offset: .62 },
+      { filter: "saturate(1)", opacity: 1 },
+    ], { duration: 1100 * FX.rate, easing: "steps(9, end)" });
+
+  out.push(sleepFX(620).then(() => Promise.all([
+    fxShockwave(mid, FX_C.time, 800, { count: 2 }),
+    fxGlyph(mid, "⟲", FX_C.time, 620, { size: .7 }),
+  ])));
+  return Promise.all(out);
+};
+
+/**
+ * Pressure. The board closes in from both edges at once.
+ *
+ * Deliberately not a clock face — Chronos already owns that image, and this is
+ * not about time passing but about room running out. The countdown itself is
+ * drawn in the top bar, where a player under pressure is already looking.
+ */
+FX_PLAY.pressure = function (e) {
+  const b = fxBoardRect();
+  const out = [
+    fxBanner(SPELLS.pressure.name, SPELLS.pressure.flavor, FX_OWNER(e.caster), 1200),
+    fxShake(7, 420),
+  ];
+  for (const side of [0, 1]) {
+    const wall = fxNode("fx-beam", {
+      left: (side ? b.width - 4 : 0) + "px", top: "0px",
+      width: "4px", height: b.height + "px", color: FX_C.dead,
+    });
+    out.push(fxPlay(wall, [
+      { transform: "translateX(0) scaleX(1)", opacity: 0 },
+      { transform: `translateX(${side ? -b.width * .12 : b.width * .12}px) scaleX(9)`, opacity: .75, offset: .55 },
+      { transform: `translateX(${side ? -b.width * .12 : b.width * .12}px) scaleX(9)`, opacity: 0 },
+    ], 760));
+  }
+  return Promise.all(out);
+};
+
+/**
+ * A pawn is hollowed out. Only its owner ever sees this — viewFor drops the
+ * event for the other seat — so it can afford to be plain: a quiet inward
+ * collapse and the piece settling a shade fainter than it was.
+ */
+FX_PLAY.hollow = function (e) {
+  const c = fxCtr(e.at);
+  return Promise.all([
+    fxCollapse(c, FX_OWNER(e.owner), 560, { count: 2, reach: .7 }),
+    sleepFX(300).then(() => fxRing(c, FX_OWNER(e.owner), 1.5, .35, 420, { cls: "dashed" })),
+    fxAfterglow(e.at, FX_OWNER(e.owner), 700, { peak: .35 }),
+  ]);
+};
+
+/** And the moment it stops being a secret. This one both players see. */
+FX_PLAY.hollowReveal = function (e) {
+  const c = fxCtr(e.at);
+  return Promise.all([
+    fxRing(c, FX_C.dead, .3, 2.4, 620, { cls: "thick" }),
+    fxGlow(c, FX_C.dead, 1.9, 420, { peak: .9 }),
+    fxGlyph(c, "◌", FX_C.dead, 640, { size: .6 }),
+    fxShake(6, 260),
+    fxAfterglow(e.at, FX_C.dead, 820, { peak: .5 }),
+  ]);
+};
+
+/**
+ * A pawn splits across two squares. Both players see this — the link is
+ * public — so it plays to the middle of the board rather than to one side.
+ */
+FX_PLAY.quantum = function (e) {
+  const a = fxCtr(e.at), b = fxCtr(e.spot), own = FX_OWNER(e.owner);
+  return Promise.all([
+    fxBanner(SPELLS.quantum.name, SPELLS.quantum.flavor, own, 1300),
+    fxRing(a, own, .3, 1.9, 620, { cls: "dashed" }),
+    sleepFX(160).then(() => fxRing(b, own, .3, 1.9, 620, { cls: "dashed" })),
+    fxGlow(b, own, 1.6, 520, { peak: .7 }),
+    fxAfterglow(e.at, own, 900, { peak: .4 }),
+    fxAfterglow(e.spot, own, 900, { peak: .4 }),
+  ]);
+};
+
+/**
+ * And the moment it stops being two things. The struck square gets the hard
+ * beat whichever way the answer fell — that is where the player was looking.
+ */
+FX_PLAY.quantumCollapse = function (e) {
+  const c = fxCtr(e.at);
+  const out = [
+    fxShockwave(c, e.wasReal ? FX_C.dead : FX_C.time, 900, { count: 3 }),
+    fxGlyph(c, e.wasReal ? "◉" : "◌", e.wasReal ? FX_C.dead : FX_C.time, 700, { size: .65 }),
+    fxShake(e.wasReal ? 8 : 4, 300),
+  ];
+  if (e.other != null)
+    out.push(fxCollapse(fxCtr(e.other), FX_C.time, 700, { count: 2, reach: .9 }));
+  return Promise.all(out);
+};
+
+/** A pawn becomes two, with a thread drawn between them. */
+FX_PLAY.twin = function (e) {
+  const a = fxCtr(e.at), b = fxCtr(e.spot), own = FX_OWNER(e.owner);
+  return Promise.all([
+    fxBanner(SPELLS.twin.name, SPELLS.twin.flavor, own, 1300),
+    fxLine(a, b, "fx-tether", own, Math.max(2, fxSize() * .05), 700),
+    fxRing(a, own, .3, 1.7, 560, { cls: "thick" }),
+    sleepFX(140).then(() => fxRing(b, own, .3, 1.7, 560, { cls: "thick" })),
+    fxAfterglow(e.spot, own, 900, { peak: .5 }),
+  ]);
+};
+
+/** And the thread parting. The surviving body is about to stop existing. */
+FX_PLAY.twinSever = function (e) {
+  return Promise.all([
+    fxLine(fxCtr(e.from), fxCtr(e.at), "fx-tether", FX_C.dead, Math.max(2, fxSize() * .05), 380),
+    fxCollapse(fxCtr(e.at), FX_C.dead, 520, { count: 2, reach: .8 }),
   ]);
 };
 

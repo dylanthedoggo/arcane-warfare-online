@@ -145,6 +145,8 @@ const FORMS = {
    `when`: "declare" | "end" | "any"  (which phase it may be cast in)
    `anyTurn`: castable on the opponent's turn as well
    `rarity`: what a card is worth being dealt — see RARITY below
+   `hidden`: its effect is that the opponent cannot see something — see MODE
+   `onlineOnly`: it needs the server, so it is undrawable anywhere else
    ───────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -162,6 +164,14 @@ const FORMS = {
  * balance. Only Static Veil (5) and Eye For An Eye (3) moved, both to 4.
  */
 const RARITY = { common: 8, uncommon: 4, rare: 2, legendary: 1 };
+
+/**
+ * How long a turn under Pressure gets. Named here, in the rules, rather than
+ * in the server that counts it down or the interface that draws it: all three
+ * have to agree, and a card whose printed text and actual clock disagreed
+ * would be the worst kind of bug to find mid-game.
+ */
+const PRESSURE_SECONDS = 15;
 
 const SPELLS = {
   hopscotch: {
@@ -307,6 +317,51 @@ const SPELLS = {
     penalty: "You cannot cast a spell for 2 turns.",
     timing: "Declare Action phase only.",
   },
+
+  /* ── the turn model ───────────────────────────────────────────────────
+     These do not touch a piece either, and they do not change the terms of
+     the board. They change what a TURN is — whether it stands once taken,
+     and how long you get to think about it.
+     ─────────────────────────────────────────────────────────────────── */
+  stutter: {
+    name: "Stutter", cost: 4, rarity: "rare", group: "Game Altering", when: "any",
+    flavor: "They will remember doing it. It will not have happened.",
+    text: "Your opponent's next turn is played out in full, then unmade — and they must then take a different one.",
+    penalty: "The strain costs you 3 more Focus on top of the card, and you may not draw next turn.",
+    timing: "Either phase, on your own turn.",
+  },
+  hollow: {
+    name: "Hollow", cost: 3, rarity: "rare", group: "Transformation", when: "declare",
+    hidden: true,
+    flavor: "It stands like the others. It cannot do what the others can.",
+    text: "One of your pawns becomes a decoy. On your opponent's screen it is an ordinary pawn — but it can never capture, and an enemy spell aimed at it is wasted.",
+    penalty: "It reveals itself the moment a spell touches it, when it is crowned, and on the capture that kills it.",
+    timing: "Declare Action phase only.",
+  },
+  twin: {
+    name: "Temporal Twin", cost: 5, rarity: "legendary", maxDraws: 1,
+    group: "Transformation", when: "declare",
+    flavor: "Two of it, and only one thread holding them.",
+    text: "One of your pawns stands on two squares, and BOTH are real. You move both of them every turn.",
+    penalty: "They share one life. The instant either is captured, transformed or crowned, the other vanishes with it.",
+    timing: "Declare Action phase only.",
+  },
+  quantum: {
+    name: "Quantum Pawn", cost: 5, rarity: "legendary", maxDraws: 1,
+    group: "Transformation", when: "declare", hidden: true,
+    flavor: "Ask which one is real and you have already lost the answer.",
+    text: "One of your pawns comes to stand on two squares at once. Only the engine — and you — know which is the real one. Neither can capture, and a jump at the wrong one takes nothing at all.",
+    penalty: "It must never yet have stood beside an enemy. The first jump at either square collapses it for good.",
+    timing: "Declare Action phase only.",
+  },
+  pressure: {
+    name: "Pressure", cost: 3, rarity: "uncommon", group: "Game Altering", when: "any",
+    onlineOnly: true,
+    flavor: "Decide. Now.",
+    text: `Your opponent's next turn is played against a ${PRESSURE_SECONDS}-second clock. If it runs out, the referee takes a turn for them at random.`,
+    penalty: "Your own following turn is played against the same clock.",
+    timing: "Either phase, on your own turn. Online only — it is the server that holds the clock.",
+  },
 };
 const SPELL_IDS = Object.keys(SPELLS);
 
@@ -337,6 +392,16 @@ function mkPiece(owner, rank, g = G) {
     captures: 0,          // lifetime captures, gates Phaser + Enchanter
     frozen: 0,            // turns this piece cannot move or capture
     noCapture: 0,         // Static Veil — may move, may not capture
+    hollow: false,        // Hollow — a decoy. SECRET: see SECRET_PIECE_FIELDS
+    // Quantum Pawn. `quantum` links the two squares and is PUBLIC — casting
+    // the card is announced, and both bodies are plainly on the board. Which
+    // of them is the real one is the entire secret; see SECRET_PIECE_FIELDS.
+    quantum: 0,           // shared id of a superposition, 0 if none
+    quantumReal: false,   // SECRET
+    everAdjacent: false,  // has it ever stood beside an enemy? gates the cast
+    // Temporal Twin. Public in every direction — both bodies are real and both
+    // players can see the pair. Nothing here is redacted.
+    twin: 0,              // shared id of a twinned pair, 0 if none
     veilBy: null,         // who cast the veil (owed the friendly-fire penalty)
     eyeMark: 0,           // Eye For An Eye — opponent turns remaining
   };
@@ -352,6 +417,7 @@ function newPlayerState() {
     noTransform: 0,     // turns during which no transformation may be made
     costCap: 0,         // turns during which spells above `costCapMax` are barred
     costCapMax: 1,
+    timed: 0,           // Pressure — turns played against the server's clock
     extraTurns: 0,      // Temporal Cascade
     lostQueens: [],     // captured queens, revivable by Martyr's Pledge
     martyrBanned: false,// a revived queen died before a new one was crowned
@@ -359,11 +425,55 @@ function newPlayerState() {
   };
 }
 
-/** Every spell id currently eligible to be drawn — excludes cards removed
- *  (oncePerGame, used), set aside (Phaser, while one lives), or exhausted
- *  (maxDraws hit). */
-function eligibleSpellIds() {
+/* ─────────────────────────────────────────────────────────────────────────
+   MODE — which of the three shapes of game this is.
+
+     "local"    hot-seat. One device, two people, a curtain between turns.
+     "ai"       one person against the machine.
+     "online"   two devices with the server refereeing between them.
+
+   The RULES are identical in all three; `G.mode` exists because two things
+   about a card can depend on the shape of the game rather than on the board.
+
+   CONCEALMENT. A card whose whole effect is that your opponent cannot see
+   something is worth nothing when your opponent is watching you play it. So a
+   `hidden` card is undrawable in hot-seat — not weakened, not house-ruled,
+   simply never dealt. Against the machine it works, because the machine is
+   genuinely blinded (it never reads the marker fields).
+
+   A CLOCK. `onlineOnly` cards need a timer, and only the server has one.
+
+   Both gates live in modeSpellIds(), which is the single list every other
+   part of the draw is filtered from.
+
+   THE SANDBOX IS EXEMPT, and it took shipping the gate to see why. Hot-seat is
+   denied these cards because concealment across a shared screen is not worth
+   anything — but that is an argument about BALANCE, and the workbench is not
+   balanced. Its whole purpose is to put every card within reach and watch what
+   it does, so gating it on a fairness rule made the three newest cards the
+   only ones that could not be tried out at all. The sandbox holds everything,
+   and the interface stops redacting there too: one person is driving both
+   chairs, so there is nobody to keep a secret from.
+   ───────────────────────────────────────────────────────────────────────── */
+
+const MODES = ["local", "ai", "online"];
+
+/** Every spell id this game's MODE permits at all. */
+function modeSpellIds(g = G) {
+  if (g && g.dev) return SPELL_IDS.slice();      // the workbench holds them all
   return SPELL_IDS.filter((id) => {
+    const S = SPELLS[id];
+    if (S.hidden && g.mode === "local") return false;
+    if (S.onlineOnly && g.mode !== "online") return false;
+    return true;
+  });
+}
+
+/** Every spell id currently eligible to be drawn — excludes cards the mode
+ *  bars outright, removed (oncePerGame, used), set aside (Phaser, while one
+ *  lives), or exhausted (maxDraws hit). */
+function eligibleSpellIds() {
+  return modeSpellIds().filter((id) => {
     if (G.removed.includes(id)) return false;
     if (G.setAside.includes(id)) return false;
     const cap = SPELLS[id].maxDraws;
@@ -385,8 +495,14 @@ function mulberry32(a) {
 /**
  * `opts.dev` opens the sandbox — see the DEV SANDBOX section below. It is a
  * third positional argument for one reason: the server builds its games with
- * `newGame(0)` and nothing on the socket path ever reaches this parameter, so
- * an online game cannot be talked into sandbox mode however a client lies.
+ * `newGame(0, null, { mode: "online" })` and nothing on the socket path ever
+ * reaches this parameter, so an online game cannot be talked into sandbox mode
+ * however a client lies.
+ *
+ * `opts.mode` is the other half of that same argument — see MODE above. It
+ * defaults to "local", the most restrictive setting, so a caller that forgets
+ * to pass one gets a game with no concealment cards in it rather than a
+ * hot-seat game quietly dealing secrets onto a shared screen.
  */
 function newGame(firstPlayer = 0, seed = null, opts = {}) {
   const s = seed == null ? (Math.floor(Math.random() * 1e9)) : seed;
@@ -414,6 +530,12 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     anchor: null,           // Anchor In Time — { turnNo } no rewind may pass
     barriers: [],           // Chokepoint — permanently sealed square indices
     mustCapture: null,      // Tactician — { player } owes a capture this turn
+    stutter: null,          // Stutter — { player, banned } a turn owed a second attempt
+    turnAction: null,       // what this turn has been spent on — see noteTurnAction
+    timeoutSeq: 0,          // monotonic; seeds the referee's turn when a clock runs out
+    quantumSeq: 0,          // monotonic; seeds which half of a superposition is real
+    twinStep: null,         // Temporal Twin — the body that still owes its move
+    twinDone: false,        // ...and whether the pair has already had both
     setAside: [],           // Phaser cards parked while a Phaser lives
     removed: [],            // Temporal Cascade after use
     log: [],
@@ -425,6 +547,10 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     owedDiscard: null,      // { player, n, why } — forced discard pending
     owedSacrifice: null,    // { player, candidates } — declined-capture forfeit pending
     dev: opts.dev === true, // the sandbox. Never true on a game the server owns.
+    // "local" unless told otherwise — see MODE. Anything unrecognised is
+    // treated as hot-seat, which is the setting that hides the least and
+    // therefore deals the fewest secrets.
+    mode: MODES.includes(opts.mode) ? opts.mode : "local",
   };
 
   // Violet on rows 0-3, Gold on rows 8-11 — dark squares only, 24 each.
@@ -507,9 +633,15 @@ function devTopUp() {
   }
 }
 
-/** Both hands hold one of everything, always. The deck is left alone. */
+/**
+ * Both hands hold one of everything, always. The deck is left alone.
+ *
+ * Still routed through modeSpellIds rather than SPELL_IDS directly, so there
+ * stays exactly one answer to "which cards exist in this game" — and
+ * modeSpellIds is the thing that knows the sandbox is exempt.
+ */
 function devStockHands() {
-  for (const P of G.players) P.hand = SPELL_IDS.slice();
+  for (const P of G.players) P.hand = modeSpellIds();
 }
 
 /**
@@ -530,9 +662,21 @@ function devUnlock() {
 
 /* ══════════════════════════════════════════════════════════════════════════
    LOGGING
+
+   One shared array, read by both seats. `only` is the exception: a line
+   written with an audience reaches that seat and no other, and viewFor()
+   filters it out for everybody else.
+
+   Use it sparingly and only for something the rules genuinely conceal — a
+   Hollow's identity, which square a Quantum Pawn really stands on. The default
+   is public, because the referee log is how a player who did not act learns
+   what happened, and a game whose log is half-secret is a game nobody can
+   follow.
    ══════════════════════════════════════════════════════════════════════════ */
-function log(text, kind = "sys") {
-  G.log.push({ text, kind });
+function log(text, kind = "sys", only = null) {
+  const entry = { text, kind };
+  if (only === 0 || only === 1) entry.only = only;
+  G.log.push(entry);
   if (G.log.length > 400) G.log.shift();
 }
 const sq = i => String.fromCharCode(97 + colOf(i)) + (N - rowOf(i));
@@ -564,6 +708,14 @@ function pieceLabel(p) {
    Discipline: an event may carry only what the referee log already makes
    public. Casting a spell is announced, so naming one is fine. A discard is
    logged as a COUNT, so a discard event must never name the card.
+
+   `only: seat` is the escape hatch for the concealment cards, and it is the
+   same word the log uses. An event carrying it is delivered to that seat and
+   dropped for the other — because an unredacted event will happily animate a
+   secret onto the screen of the one player who must not see it. The transcript
+   is the SECOND of the three channels a secret leaks through; the state field
+   is the first and the log is the third, and a card is only hidden if all
+   three are covered. See viewFor().
    ══════════════════════════════════════════════════════════════════════════ */
 
 const FX_KEEP = 48;          // a headless self-play game must not grow this forever
@@ -597,9 +749,17 @@ const isImmobile = p => p && (p.form === "sentinel" || p.form === "alchemist");
 function canAct(p) {
   return !!p && !isImmobile(p) && p.frozen <= 0;
 }
-/** Can this piece perform a capture right now? */
+/**
+ * Can this piece perform a capture right now?
+ *
+ * A Hollow never can, and that is the one place its secret is visible to a
+ * rule rather than to a player. The machine's search reads captureMoves and so
+ * can tell an enemy Hollow from a real pawn by what it threatens — a leak the
+ * plan for this card accepted rather than pay for a projected board. Against a
+ * person, who only sees viewFor's output, the bluff is intact.
+ */
 function canCapture(p) {
-  return canAct(p) && p.noCapture <= 0;
+  return canAct(p) && p.noCapture <= 0 && !p.hollow && !p.quantum;
 }
 
 /** Diagonal directions this piece may travel. Pawns advance only. */
@@ -743,6 +903,9 @@ function legalMovesFor(i) {
   if (G.chain != null) return i === G.chain ? captureMoves(i) : [];
   // Owed a Herald bonus step: only that piece, only a plain forward step.
   if (G.heraldBonus != null) return i === G.heraldBonus ? legalHeraldSteps(i) : [];
+  // A twinned pair owes its second movement, and only the body that has not
+  // moved yet may make it.
+  if (G.twinStep != null) return i === G.twinStep ? [...captureMoves(i), ...simpleMoves(i)] : [];
   return [...captureMoves(i), ...simpleMoves(i)];
 }
 
@@ -994,6 +1157,26 @@ function spellBlocker(id, caster = G.turn) {
     case "chokepoint":
       if (chokepointTarget(caster) < 0) return "Your opponent has no move to seal off.";
       break;
+    case "stutter":
+      if (G.stutter) return "A turn is already waiting to be unmade.";
+      break;
+    case "pressure":
+      if (G.players[1 - caster].timed > 0) return "Your opponent is already on the clock.";
+      break;
+    case "hollow":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!hollowTargets(caster).length) return "No untransformed pawn of yours is left to hollow out.";
+      break;
+    case "twin":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (G.hasActed) return "Declare it before you move — both bodies move together.";
+      if (!twinTargets(caster).length) return "No untransformed pawn of yours has an empty square beside it.";
+      break;
+    case "quantum":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (!quantumTargets(caster).length)
+        return "No pawn of yours is untouched enough — it must never yet have stood beside an enemy, and it needs an empty square beside it.";
+      break;
   }
   return null;
 }
@@ -1044,6 +1227,182 @@ function mindControlTargets(owner) {
   }
   return out;
 }
+/** Your own untransformed pawns that are not already decoys. */
+function hollowTargets(owner) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (isAlly(p, owner) && p.rank === "pawn" && !p.form && !p.hollow) out.push(i);
+  }
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   QUANTUM PAWN
+
+   One pawn on two squares. Both bodies are real pieces on the board and the
+   link between them is public — the cast is announced and the opponent can
+   plainly see two pawns appear where one stood. What they cannot see is which
+   of the two is the pawn, and that one field is the whole card.
+
+   THE READING. The doc says "a pawn exists on two squares" and "when either is
+   attacked it collapses: 50% the attacker hits nothing". It does not say the
+   two move together, so they do not: each is an ordinary pawn taking ordinary
+   turns, which leaves the one-action-per-turn model completely untouched. The
+   50% is therefore settled at CAST time rather than at the moment of the jump
+   — the engine flips once, in secret, and both players live with the answer.
+   That is what "the engine knows which is real" has to mean if the caster is
+   ever to make a decision with it.
+
+   THE FLIP is seeded off the game seed and a counter on G, like every other
+   roll here. Math.random() would break snapshot/restore — the machine's search
+   sandboxes speculative casts behind exactly that — and a rewound game would
+   come back with a different pawn being the real one.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** Empty dark squares beside `i` that a second body could stand on. */
+function quantumSpots(i) {
+  return adjacentTo(i, (q, j) => !q && isDark(j) && !isBarrier(j));
+}
+
+/**
+ * Pawns that could still be split. "Never yet stood beside an enemy" is the
+ * doc's own condition and it is what stops the card being used to rescue a
+ * pawn that is already under the axe.
+ */
+function quantumTargets(owner) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.quantum) continue;
+    if (p.everAdjacent) continue;
+    if (adjacentTo(i, (q) => isEnemy(q, owner)).length) continue;   // nor right now
+    if (quantumSpots(i).length) out.push(i);
+  }
+  return out;
+}
+
+/** Both squares of the superposition `id` is part of. */
+function quantumPair(id) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) if (G.board[i] && G.board[i].quantum === id) out.push(i);
+  return out;
+}
+
+/**
+ * A jump has been aimed at one square of a superposition. Settle it.
+ *
+ * Returns true if the struck square held the real pawn — in which case the
+ * caller carries on and captures it like anything else. False means the
+ * attacker has jumped at nothing, and the pawn was somewhere else all along.
+ *
+ * Either way the superposition is over: this is the "collapsing ends it
+ * permanently" half of the card, and it is loudly public, because after this
+ * there is nothing left to keep quiet about.
+ */
+function collapseQuantum(struckIdx) {
+  const hit = G.board[struckIdx];
+  const wasReal = !!hit.quantumReal;
+  const id = hit.quantum;
+  const other = quantumPair(id).find((j) => j !== struckIdx);
+
+  fx("quantumCollapse", { at: struckIdx, other: other != null ? other : null, wasReal });
+  if (wasReal) {
+    // The struck square held the pawn. The far body was never anything.
+    if (other != null) {
+      const ghost = G.board[other];
+      ghost.quantum = 0;
+      G.board[other] = null;
+      fx("death", { at: other, kind: "quantum", piece: fxPiece(ghost) });
+      log(`The superposition collapses — the pawn at ${sq(other)} was never there.`, "big");
+    }
+    hit.quantum = 0;
+    hit.quantumReal = false;
+  } else {
+    // The jump found the empty half. The real pawn stands where it always did.
+    G.board[struckIdx] = null;
+    log(`The jump at ${sq(struckIdx)} passes through nothing — that square was never occupied.`, "big");
+    if (other != null) {
+      const real = G.board[other];
+      real.quantum = 0;
+      real.quantumReal = false;
+      log(`The pawn was at ${sq(other)} all along, and is an ordinary pawn now.`, "big");
+    }
+  }
+  return wasReal;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   TEMPORAL TWIN
+
+   Two bodies, both real, one life between them. Nothing about it is secret —
+   this is the one card in the phase-2 batch with no hidden information at all,
+   so it is drawable hot-seat like anything else.
+
+   What it costs the engine is the TURN MODEL. "You move both each turn" is the
+   first thing in the game to want two movements out of one turn, and rather
+   than loosen `hasActed` — which every other rule leans on — it is expressed
+   as an obligation, the shape already used by chain-jumps and the Herald's
+   bonus step: the first body moves, and the second one now OWES a move that
+   only it can make. Same machinery, same clearing in beginTurn, same
+   suppression in autoPassIfStuck.
+
+   `twinDone` is what stops the two of them handing the obligation back and
+   forth for ever. Without it, the second body's move would look exactly like
+   the first body's did, and finishAction would dutifully owe another one.
+
+   The obligation is only raised when the other body can actually move. An
+   obligation nobody can discharge is a wedged turn, and the second half of a
+   pair is very easy to bury.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** The other square of the twinned pair `id`, or -1. */
+function twinPartner(id, not = -1) {
+  for (let i = 0; i < CELLS; i++)
+    if (i !== not && G.board[i] && G.board[i].twin === id) return i;
+  return -1;
+}
+
+/** Pawns that could be twinned: untransformed, unpaired, with room beside them. */
+function twinTargets(owner) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.twin || p.quantum) continue;
+    if (quantumSpots(i).length) out.push(i);
+  }
+  return out;
+}
+
+/**
+ * Cut the thread: whatever happened to the body at `i`, its partner does not
+ * outlive it.
+ *
+ * Both ends of the link are cleared BEFORE the partner is removed, which is
+ * what keeps removePiece from coming straight back here and trying to sever a
+ * pair that no longer exists.
+ */
+function severTwin(i, why) {
+  const p = G.board[i];
+  if (!p || !p.twin) return;
+  const id = p.twin;
+  p.twin = 0;
+  const j = twinPartner(id, i);
+  if (j < 0) return;
+  G.board[j].twin = 0;
+  if (G.twinStep === j || G.twinStep === i) G.twinStep = null;
+  fx("twinSever", { at: j, from: i });
+  removePiece(j, why, "twin");
+}
+
+/** Does `seat` still owe the second half of a twinned pair its move? */
+function twinDebt(seat) {
+  if (G.twinStep == null || G.turn !== seat) return false;
+  const p = G.board[G.twinStep];
+  if (!p || p.owner !== seat || !legalMovesFor(G.twinStep).length) { G.twinStep = null; return false; }
+  return true;
+}
+
 function eyeTargets(owner) {
   const out = [];
   for (let i = 0; i < CELLS; i++) {
@@ -1170,6 +1529,39 @@ function chokepointTarget(caster) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   WHAT THIS TURN WAS SPENT ON
+
+   Stutter has to be able to say "not that again", which means something has to
+   remember what "that" was. `G.turnAction` is the FIRST turn-consuming thing
+   the active player did — a movement, a draw, or a cast — and nothing else
+   reads it.
+
+   It is recorded down here, in the three functions that actually DO those
+   things, rather than up in dispatchAction where the equivalent bookkeeping
+   for other cards lives. That is deliberate: the machine never goes through
+   the dispatcher. It calls performMove and castSpell directly, so a record
+   kept at the doorway would be blank for every turn the machine takes, and
+   Stutter would silently do nothing to it.
+
+   Only the first is kept. A chain-jump's later hops, a Herald's bonus step and
+   a second spell are all continuations of the turn that has already been
+   identified, and banning "the same third hop" is not a thing a player can act
+   on anyway.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function noteTurnAction(a) {
+  if (!G.turnAction) G.turnAction = a;
+}
+
+/** Are these two records of a turn's opening action the same action? */
+function sameTurnAction(a, b) {
+  if (!a || !b || a.t !== b.t) return false;
+  if (a.t === "move") return a.from === b.from && a.to === b.to && a.kind === b.kind;
+  if (a.t === "cast") return a.id === b.id;
+  return true;                                   // a draw is a draw
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    STATUS ENGINE
 
    Every "frozen", "disoriented", "sick" and "Static" effect in the rules is
@@ -1198,7 +1590,11 @@ function tickEffects(obj, keys) {
 }
 
 const PIECE_EFFECTS  = ["frozen", "noCapture"];
-const PLAYER_EFFECTS = ["noSpells", "noDraw", "noTransform", "costCap"];
+/* `timed` rides the same machinery as every other lockout — it is a counter
+   that ticks down at the end of the affected player's turn, which is exactly
+   what "your next turn is timed" means. The server reads it to decide whether
+   to run a clock; the engine itself never looks at a wall clock. */
+const PLAYER_EFFECTS = ["noSpells", "noDraw", "noTransform", "costCap", "timed"];
 
 /** Freeze a piece for `turns` of its owner's turns, respecting who is acting. */
 function freezePiece(p, turns, note) {
@@ -1238,6 +1634,9 @@ function awardFP(owner, n, why) {
 function removePiece(i, why = "captured", kind = "capture") {
   const p = G.board[i];
   if (!p) return null;
+  // Before the death event, so the transcript reads in the order it happened:
+  // the disguise comes off, and then the piece goes.
+  if (p.hollow) revealHollow(i, "it is gone now, and it never could have taken anything");
   fx("death", { at: i, kind, piece: fxPiece(p) });
   G.board[i] = null;
   const P = G.players[p.owner];
@@ -1258,6 +1657,19 @@ function removePiece(i, why = "captured", kind = "capture") {
     }
   }
   log(`${PLAYERS[p.owner].name}'s ${pieceLabel(p)} at ${sq(i)} ${why}.`, "p" + p.owner);
+  // One life between the two of them. Done last, after this body is off the
+  // board, so the partner's own removal sees a settled position.
+  if (p.twin) {
+    const id = p.twin;
+    p.twin = 0;
+    const j = twinPartner(id, i);
+    if (j >= 0) {
+      G.board[j].twin = 0;
+      if (G.twinStep === j) G.twinStep = null;
+      fx("twinSever", { at: j, from: i });
+      removePiece(j, "vanishes — the other half of it is gone", "twin");
+    }
+  }
   return p;
 }
 
@@ -1265,6 +1677,11 @@ function removePiece(i, why = "captured", kind = "capture") {
 function promoteIfDue(i) {
   const p = G.board[i];
   if (!p || p.rank !== "pawn" || rowOf(i) !== promoRow(p.owner)) return false;
+  // A crowning happens in front of both players, and nothing below carries a
+  // secret queen, so the disguise cannot survive it.
+  revealHollow(i, "the crown gives it away");
+  // And a twin cannot be in two ranks at once. The crown is worth the body.
+  severTwin(i, "vanishes — its twin has been crowned");
   p.rank = "queen";
   fx("promote", { at: i, owner: p.owner, form: p.form });
   awardFP(p.owner, 2, `a pawn was crowned at ${sq(i)}`);
@@ -1282,6 +1699,17 @@ function resolveCapture(fromIdx, mv) {
   const attacker = G.board[fromIdx];
   const victim = G.board[mv.victim];
   let destroyed = false, retaliated = false;
+
+  // A superposition is settled before anything else can look at the victim —
+  // armor, the Eye's mark and the promotion check all assume there is a piece
+  // there to reason about, and half the time there is not.
+  if (victim.quantum && !collapseQuantum(mv.victim)) {
+    // Nothing was there. The attacker completes the jump and is paid for none
+    // of it: no Focus, no lifetime capture, and no chain to continue.
+    G.board[fromIdx] = null;
+    G.board[mv.to] = attacker;
+    return { destroyed: false, retaliated: false, whiffed: true };
+  }
 
   if (victim.armor) {
     victim.armor = false;
@@ -1310,6 +1738,48 @@ function resolveCapture(fromIdx, mv) {
     log("Eye For An Eye — the capturer dies with its prey.", "big");
   }
   return { destroyed, retaliated };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   HOLLOW
+
+   A decoy pawn. Everything about it that matters is what the OPPONENT cannot
+   see: `hollow` is stripped from their view by SECRET_PIECE_FIELDS, the cast
+   is logged to the caster alone, and the effect that marks it carries `only`.
+   All they are told — because castSpell announces every card — is that one of
+   those pawns is now a fake. Which one is the whole card.
+
+   The reveal is the opposite, and deliberately so: it is loud, public, and
+   goes to both seats. There are three ways to trigger it, and each is a moment
+   the fiction could not have survived anyway.
+
+     · A SPELL AIMED AT IT. Note what this is NOT: the enemy's target finders
+       are left alone, so a Hollow still appears in every list the opponent can
+       build. Quietly filtering it out would have leaked it — an option that
+       vanishes for no visible reason is an answer — and it would have made the
+       client and the server disagree about what is castable. Instead the spell
+       is allowed, and it is WASTED, which is what the card promises.
+
+     · THE CROWN. A pawn that reaches the far rank becomes a queen in plain
+       sight; a secret queen is not a thing the rest of this file could carry.
+
+     · THE CAPTURE THAT KILLS IT. It was a real pawn and it really died — the
+       reveal here is not mechanical, it is the opponent finding out what they
+       spent the jump on.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Drop the disguise on the piece at `i`, if it was wearing one. Returns true
+ * if something was actually revealed, so callers can decide whether to spend
+ * the spell that did it.
+ */
+function revealHollow(i, why) {
+  const p = G.board[i];
+  if (!p || !p.hollow) return false;
+  p.hollow = false;
+  fx("hollowReveal", { at: i, owner: p.owner });
+  log(`The pawn at ${sq(i)} was a Hollow — ${why}.`, "big");
+  return true;
 }
 
 /** Does a capturing piece that landed on `i` have to stop because of a Sentinel? */
@@ -1345,7 +1815,7 @@ function heraldShielded(i, caster) {
    ══════════════════════════════════════════════════════════════════════════ */
 
 function pendingSacrifice(owner) {
-  if (G.chain != null || G.heraldBonus != null) return [];
+  if (G.chain != null || G.heraldBonus != null || G.twinStep != null) return [];
   return capturersFor(owner);
 }
 
@@ -1363,6 +1833,11 @@ function performMove(from, mv, opts = {}) {
   if (!p) return;
   const owner = p.owner;
   G.lastMove = { from, to: mv.to };
+  if (owner === G.turn) noteTurnAction({ t: "move", from, to: mv.to, kind: mv.kind });
+  // Discharging the twin obligation, if this is it. Cleared before the move
+  // resolves so finishAction below cannot mistake this for the FIRST body
+  // moving and owe a third movement.
+  if (G.twinStep === from) { G.twinStep = null; G.twinDone = true; }
 
   // Recorded before anything moves, while the squares still hold the pieces the
   // animation needs to draw. `chained` marks a hop that continues a sequence
@@ -1379,6 +1854,16 @@ function performMove(from, mv, opts = {}) {
     const before = G.chain != null;
     const res = resolveCapture(from, mv);
     log(`${PLAYERS[owner].name} jumps ${sq(from)} → ${sq(mv.to)}.`, "p" + owner);
+    if (res.whiffed) {
+      // The jump found an empty half of a superposition. It took nothing, so
+      // there is nothing for Hopscotch to reverse and nothing to chain from —
+      // a sequence of jumps is a sequence of CAPTURES, and this was not one.
+      G.lastCapture = null;
+      G.chain = null;
+      promoteIfDue(mv.to);
+      finishAction(mv.to);
+      return;
+    }
     G.lastCapture = { from, to: mv.to, victim: mv.victim, survived: !res.destroyed };
 
     if (res.retaliated) {           // the capturer is gone; nothing can chain
@@ -1473,6 +1958,20 @@ function finishAction(landedAt = null, skipHerald = false) {
     }
   }
   G.heraldBonus = null;
+  // Temporal Twin's second movement. Raised only once per turn (twinDone), and
+  // only when the other body has somewhere to go — an obligation nobody can
+  // discharge is a turn that cannot be ended.
+  if (!G.twinDone && landedAt != null) {
+    const p = G.board[landedAt];
+    if (p && p.twin) {
+      const other = twinPartner(p.twin, landedAt);
+      if (other >= 0 && (captureMoves(other).length || simpleMoves(other).length)) {
+        G.twinStep = other;
+        log("Temporal Twin — the other body has still to move.", "rule");
+        return;
+      }
+    }
+  }
   G.phase = "end";
 }
 
@@ -1523,6 +2022,10 @@ function tickDownFor(player) {
   for (let i = 0; i < CELLS; i++) {
     const p = G.board[i];
     if (!p) continue;
+    // Quantum Pawn's precondition is a fact about a piece's PAST, not about
+    // where it is standing now, so it has to be recorded as it happens. Once
+    // set it never clears — a pawn that has been looked at has been looked at.
+    if (!p.everAdjacent && adjacentTo(i, (q) => isEnemy(q, p.owner)).length) p.everAdjacent = true;
     if (p.owner === player) {
       const wasVeiled = p.noCapture > 0;
       tickEffects(p, PIECE_EFFECTS);
@@ -1615,6 +2118,12 @@ function beginTurn(player) {
   G.lastCapture = null;
   G.mindControl = null;
   G.mustCapture = null;      // Tactician's debt dies with the turn that took it
+  G.twinStep = null;
+  G.twinDone = false;
+  G.turnAction = null;
+  // G.stutter deliberately survives: it is armed on the caster's turn and
+  // fires on the NEXT one, so clearing it here would disarm every cast.
+  // endTurn is what spends it.
   // Wraparound is measured in rounds and ticked here, so it costs both players
   // the same number of turns however the turn order is bent.
   if (G.wrap > 0 && --G.wrap === 0)
@@ -1681,6 +2190,100 @@ function hasTurnOption(player) {
   return false;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   STUTTER
+
+   The turn is played out in full and then unmade, and the player has to find
+   another one. Three pieces:
+
+     · the REWIND, below, which fires once, at the moment the stuttered turn
+       would have been handed over;
+     · the BAN, which refuses a repeat of what was just unmade; and
+     · the ESCAPE, because "take a different turn" cannot mean "lose the
+       game" — the ban stops binding the moment there is nothing else to do.
+
+   The rewind reuses beginTurn's own snapshot, the same entry Chronos's Gaze
+   returns to, so the state it lands on is the decision point exactly: income
+   already paid, counters already ticked, nothing double-counted when the turn
+   is taken again.
+
+   Note what the player SEES, which is the point of the card. Online, state is
+   pushed after every accepted action, so their move has already crossed the
+   wire and animated on both screens by the time this runs. The rewind arrives
+   after it. The move happens, and then it unhappens.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Unmake the stuttered turn, if this is the moment for it. Returns true when
+ * the turn was rewound and the same seat must take it again.
+ */
+function stutterRewind(who) {
+  const st = G.stutter;
+  if (!st || st.player !== who || st.banned) return false;
+
+  // A turn that did nothing has nothing to unmake, and banning "do nothing"
+  // would rewind for ever. The card is simply spent. Passing to dodge a
+  // Stutter costs the whole turn, which is a worse trade than taking your
+  // second-best move, so this is not an escape worth closing.
+  if (!G.turnAction) {
+    G.stutter = null;
+    log("Stutter finds nothing to unmake — that turn did nothing.", "rule");
+    return false;
+  }
+
+  // beginTurn wrote this at the start of the turn now being unmade. If it is
+  // not there — Chronos's Gaze truncates history in place, and could have been
+  // cast during the very turn we are trying to rewind — the card fizzles
+  // rather than rewinding to somebody else's position.
+  const h = G.history[G.history.length - 1];
+  if (!h || h.turn !== who || h.turnNo !== G.turnNo) {
+    G.stutter = null;
+    log("Stutter loses its grip on the moment — it fizzles.", "rule");
+    return false;
+  }
+
+  const banned = G.turnAction;
+  const keptLog = G.log.slice();
+  G.history.length = G.history.length - 1;
+  restore(h.snap);
+  G.log = keptLog;
+  // The snapshot was taken while the stutter was armed and unfired, so it came
+  // back with it. All that is added is what may not be done again.
+  G.stutter = { player: who, banned };
+  fx("stutter", { player: who, phase: "rewind" });
+  log(`Stutter — ${PLAYERS[who].name}'s turn is unmade. It must be taken differently.`, "big");
+  G.history.push({ turn: who, turnNo: G.turnNo, snap: snapshot(G) });
+  return true;
+}
+
+/**
+ * Is there any turn open to the stuttered seat other than the one that was
+ * unmade? Mirrors hasTurnOption clause for clause, minus the banned action —
+ * so the ban can never claim an alternative the referee would then refuse.
+ */
+function stutterHasAlternative(seat) {
+  const b = G.stutter.banned;
+  const P = G.players[seat];
+  for (let i = 0; i < CELLS; i++) {
+    if (!isAlly(G.board[i], seat)) continue;
+    for (const m of legalMovesFor(i))
+      if (!sameTurnAction(b, { t: "move", from: i, to: m.to, kind: m.kind })) return true;
+  }
+  if (b.t !== "draw" && G.phase === "declare" && !G.hasActed && G.castThisTurn === 0
+      && !G.drewThisTurn && P.noDraw <= 0 && eligibleSpellIds().length > 0) return true;
+  if (P.hand.some((id) => !sameTurnAction(b, { t: "cast", id }) && !spellBlocker(id, seat)))
+    return true;
+  return false;
+}
+
+/** Would `act` simply repeat the turn Stutter already unmade? */
+function stutterBans(seat, act) {
+  const st = G.stutter;
+  if (!st || st.player !== seat || !st.banned) return false;
+  if (!sameTurnAction(st.banned, act)) return false;
+  return stutterHasAlternative(seat);
+}
+
 /**
  * Finish the active player's turn and hand play over (or take an extra turn).
  * Returns { sameSeat } — true when Temporal Cascade kept the turn with the same
@@ -1690,6 +2293,11 @@ function hasTurnOption(player) {
 function endTurn() {
   if (G.over) return { sameSeat: false };
   const who = G.turn;
+  // Before anything is ticked down: the whole turn is about to be unmade, and
+  // ticking a counter down twice for one turn would be a real rules bug.
+  if (stutterRewind(who)) return { sameSeat: true };
+  // The second attempt stands. The card is spent either way.
+  if (G.stutter && G.stutter.player === who) G.stutter = null;
   tickDownFor(who);
   if (checkGameOver()) return { sameSeat: false };
 
@@ -1737,7 +2345,7 @@ function autoPassIfStuck() {
   if (G.over) return null;
   if (G.chain != null || G.heraldBonus != null || G.mindControl) return null;
   if (G.owedDiscard || G.owedSacrifice) return null;
-  if (tacticianDebt(G.turn)) return null;
+  if (tacticianDebt(G.turn) || twinDebt(G.turn)) return null;
   const who = G.turn;
   if (hasTurnOption(who)) return null;
   log(`${PLAYERS[who].name} has nothing left to do — the turn passes automatically.`, "rule");
@@ -1757,6 +2365,9 @@ function applyTransform(i, form, choices = {}) {
   const F = FORMS[form];
   const owner = p.owner;
   const P = G.players[owner];
+  // A transformation is the third thing that ends a twinning — the two bodies
+  // were one pawn, and one of them has just stopped being a pawn.
+  severTwin(i, "vanishes — its twin has been transformed");
 
   // The FP cost is paid once, generically, by castSpell — every form is now
   // reached only through its spell, and F.cost mirrors that spell's cost.
@@ -1857,7 +2468,9 @@ function castSpell(id, caster, payload = {}) {
   const P = G.players[caster];
   P.fp -= S.cost;
   consumeCard(id, caster);
-  if (caster === G.turn) G.castThisTurn++;
+  // An anyTurn card cast on the OPPONENT's turn is not what their turn was
+  // spent on, so it never becomes the thing Stutter refuses.
+  if (caster === G.turn) { G.castThisTurn++; noteTurnAction({ t: "cast", id }); }
   fx("spell", { id, caster });
   log(`${PLAYERS[caster].name} casts ${S.name}. (−${S.cost} FP)`, "p" + caster);
 
@@ -1921,6 +2534,7 @@ function castSpell(id, caster, payload = {}) {
 
     /* ── Combat ───────────────────────────────────────────────────────── */
     case "veil": {
+      if (revealHollow(payload.target, "Static Veil finds nothing in it to stun")) break;
       const t = G.board[payload.target];
       fx("veil", { at: payload.target });
       effNow(t, "noCapture", 2);
@@ -1933,6 +2547,14 @@ function castSpell(id, caster, payload = {}) {
     }
 
     case "mindcontrol": {
+      if (revealHollow(payload.target, "there is no will in it to seize")) {
+        // The exhaustion still lands. The card was spent either way, and a
+        // penalty that only applies when the spell worked would make aiming at
+        // a suspected decoy free.
+        effNow(P, "noSpells", 1);
+        effNext(P, "noSpells", 1);
+        break;
+      }
       G.mindControl = { piece: payload.target };
       fx("mind", { at: payload.target, caster });
       log(`Mind Control — ${PLAYERS[caster].name} seizes the enemy ${pieceLabel(G.board[payload.target])} at ${sq(payload.target)} for one movement.`, "rule");
@@ -2121,6 +2743,90 @@ function castSpell(id, caster, payload = {}) {
       log("Sealing it costs you every spell for 2 turns.", "rule");
       break;
     }
+
+    case "stutter": {
+      const victim = 1 - caster;
+      G.stutter = { player: victim, banned: null };
+      fx("stutter", { player: victim, caster, phase: "arm" });
+      log(`Stutter — ${PLAYERS[victim].name}'s next turn will be played out, unmade, and taken again differently.`, "big");
+      // On top of the card's own price. Taken with min() rather than refused
+      // up front: the cost of the CARD is 4, and a penalty that cannot be paid
+      // in full is still a penalty, the same way every other one here works.
+      const strain = Math.min(3, P.fp);
+      P.fp -= strain;
+      log(`The strain costs ${PLAYERS[caster].name} ${strain} more Focus.`, "rule");
+      effNext(P, "noDraw", 1);
+      log("And you may not draw next turn.", "rule");
+      break;
+    }
+
+    case "hollow": {
+      const at = payload.target;
+      const p = G.board[at];
+      p.hollow = true;
+      // Both of these carry an audience. The public half of this card is the
+      // "casts Hollow" line castSpell already wrote — the opponent learns that
+      // one of those pawns is a fake, and nothing more.
+      fx("hollow", { at, owner: caster, only: caster });
+      log(`Hollow — your pawn at ${sq(at)} is a decoy now. It cannot capture, and only you can tell.`,
+        "rule", caster);
+      break;
+    }
+
+    case "twin": {
+      const from = payload.target, to = payload.spot;
+      const p = G.board[from];
+      const other = mkPiece(caster, "pawn");
+      other.captures = p.captures;
+      other.frozen = p.frozen;
+      other.p_frozen = p.p_frozen || 0;
+      other.everAdjacent = p.everAdjacent;
+      G.board[to] = other;
+      p.twin = p.id; other.twin = p.id;
+      fx("twin", { at: from, spot: to, owner: caster });
+      log(`Temporal Twin — ${PLAYERS[caster].name}'s pawn now stands on both ${sq(from)} and ${sq(to)}, and moves both every turn.`, "big");
+      log("They share one life: whatever ends either of them ends both.", "rule");
+      break;
+    }
+
+    case "quantum": {
+      const from = payload.target, to = payload.spot;
+      const p = G.board[from];
+      const twin = mkPiece(caster, "pawn");
+      // Everything about the far body has to match, or the difference between
+      // them becomes the tell that the secret field was hiding.
+      twin.captures = p.captures;
+      twin.frozen = p.frozen;
+      twin.p_frozen = p.p_frozen || 0;
+      twin.everAdjacent = p.everAdjacent;
+      G.board[to] = twin;
+
+      const id = p.id;                     // the real pawn's id names the pair
+      p.quantum = id; twin.quantum = id;
+      const rng = mulberry32((G.seed + G.turnNo * 104729 + G.quantumSeq++) | 0);
+      const realIsOrigin = rng() < 0.5;
+      p.quantumReal = realIsOrigin;
+      twin.quantumReal = !realIsOrigin;
+
+      fx("quantum", { at: from, spot: to, owner: caster });
+      log(`Quantum Pawn — ${PLAYERS[caster].name}'s pawn stands on both ${sq(from)} and ${sq(to)}. Neither can capture.`, "big");
+      log(`Only you know it: the real pawn is the one at ${sq(realIsOrigin ? from : to)}.`,
+        "rule", caster);
+      break;
+    }
+
+    case "pressure": {
+      const victim = 1 - caster;
+      // Their turn has not started, so it lands now; ours has, so it is parked
+      // and promoted when this turn ends. That is the whole of the off-by-one
+      // the two setters exist to keep honest — see the STATUS ENGINE note.
+      effNow(G.players[victim], "timed", 1);
+      effNext(P, "timed", 1);
+      fx("pressure", { caster, victim });
+      log(`Pressure — ${PLAYERS[victim].name}'s next turn is on a ${PRESSURE_SECONDS}-second clock.`, "big");
+      log(`It cuts both ways: ${PLAYERS[caster].name}'s following turn is timed too.`, "rule");
+      break;
+    }
   }
 
   checkGameOver();
@@ -2165,6 +2871,7 @@ function drawSpell(player) {
   G.drawCounts[id] = (G.drawCounts[id] || 0) + 1;
   P.hand.push(id);
   G.drewThisTurn = true;
+  noteTurnAction({ t: "draw" });
   log(`${PLAYERS[player].name} draws a spell — this ends the turn.`, "p" + player);
   return true;
 }
@@ -2288,6 +2995,117 @@ function performMindControlMove(from, mv) {
   G.lastMove = { from, to: mv.to };
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   WHEN THE CLOCK RUNS OUT
+
+   Pressure's promise is that a turn WILL be taken, so this has to be able to
+   take one from any state a player can walk away from — not just from a clean
+   Declare phase. A half-finished chain-jump, a seized enemy piece, an owed
+   forfeit or discard all block a turn from ending, and a clock that could
+   leave one of them standing would wedge the room rather than pressuring
+   anybody.
+
+   It ends the turn directly rather than through dispatchAction, the same way
+   the machine does. That is deliberate: the referee is not a player taking an
+   action, it is the rules closing a turn nobody closed.
+
+   The roll is seeded off the game seed and a monotonic counter, exactly as
+   drawSpell's is. Math.random() would be tempting here — this only ever runs
+   on the server, outside any search — but a game whose replay diverges from
+   what was played is not worth the two characters saved.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function playRandomTurn(seat) {
+  if (G.over || G.turn !== seat) return false;
+  const rng = mulberry32((G.seed + G.turnNo * 6151 + G.timeoutSeq++) | 0);
+  const pick = (a) => a[Math.min(a.length - 1, (rng() * a.length) | 0)];
+  let guard = 0;
+
+  log(`${PLAYERS[seat].name} ran out of time — the referee takes the turn.`, "big");
+
+  // Obligations first. Each of these refuses to let a turn end, so none of
+  // them may survive this function.
+  if (G.mindControl) {
+    const from = G.mindControl.piece;
+    const steps = simpleMoves(from).filter((m) => m.kind === "step");
+    if (steps.length) performMindControlMove(from, pick(steps));
+    else G.mindControl = null;
+  }
+  if (G.owedSacrifice && G.owedSacrifice.player === seat) {
+    removePiece(pick(G.owedSacrifice.candidates), "is sacrificed for the skipped capture", "sacrifice");
+    G.owedSacrifice = null;
+  }
+  while (G.owedDiscard && G.owedDiscard.player === seat && guard++ < 12) {
+    const hand = G.players[seat].hand;
+    if (!hand.length) { G.owedDiscard = null; break; }
+    discardCards(seat, [pick(hand)], G.owedDiscard.why);
+    if (--G.owedDiscard.n <= 0) G.owedDiscard = null;
+  }
+
+  /** Finish anything a movement left owing — the chain, then the Herald step. */
+  const settle = () => {
+    while (G.chain != null && !G.over && guard++ < 24) {
+      const caps = captureMoves(G.chain);
+      if (!caps.length) { G.chain = null; G.phase = "end"; break; }
+      performMove(G.chain, pick(caps));
+    }
+    if (G.heraldBonus != null && !G.over) {
+      const steps = legalHeraldSteps(G.heraldBonus);
+      if (steps.length) performMove(G.heraldBonus, pick(steps));
+      else { G.heraldBonus = null; G.phase = "end"; }
+    }
+    // A twinned pair owes a second movement, and endTurn below refuses while
+    // it stands — so the clock has to discharge it like every other debt.
+    if (twinDebt(G.turn) && !G.over) {
+      const at = G.twinStep;
+      const opts = legalMovesFor(at);
+      if (opts.length) performMove(at, pick(opts));
+      else G.twinStep = null;
+    }
+  };
+
+  settle();
+
+  // Then a movement of its own, if the turn has not already had one. Captures
+  // are taken from the mandatory pool, so the referee never hands the player a
+  // forfeit they did not choose. A Stutter's ban is honoured for the same
+  // reason rootMoves honours it: this path does not go through the refusal in
+  // dispatchAction, so the rule has to be applied where the choice is made.
+  if (!G.over && !G.hasActed && G.phase === "declare" && G.chain == null && G.heraldBonus == null) {
+    const allowed = (from, mv) => !stutterBans(seat, { t: "move", from, to: mv.to, kind: mv.kind });
+    const capturers = capturersFor(seat);
+    const pool = [];
+    if (capturers.length) {
+      for (const i of capturers)
+        for (const mv of captureMoves(i)) if (allowed(i, mv)) pool.push({ from: i, mv });
+    } else {
+      for (let i = 0; i < CELLS; i++) {
+        if (!isAlly(G.board[i], seat)) continue;
+        for (const mv of simpleMoves(i)) if (allowed(i, mv)) pool.push({ from: i, mv });
+      }
+    }
+    if (pool.length) {
+      const chosen = pick(pool);
+      performMove(chosen.from, chosen.mv);
+      settle();
+    }
+  }
+
+  // A Tactician debt outlives the capture that half-paid it while further
+  // captures remain, and endTurn below does not check it — the same gap
+  // aiPayTacticianDebt exists to close for the machine.
+  while (tacticianDebt(seat) && !G.over && guard++ < 12) {
+    const from = capturersFor(seat)[0];
+    const caps = captureMoves(from);
+    if (!caps.length) break;
+    performMove(from, caps[0]);
+    settle();
+  }
+
+  if (!G.over) endTurn();
+  return true;
+}
+
 /* ── undo ───────────────────────────────────────────────────────────────── */
 
 /** The snapshot an undo from `seat` would rewind to, or null if there is none. */
@@ -2387,7 +3205,7 @@ function dispatchAction(seat, a) {
     case "move": {
       const g = turnGate(seat);
       if (g) return fail(g);
-      if (G.phase !== "declare" && G.chain == null && G.heraldBonus == null)
+      if (G.phase !== "declare" && G.chain == null && G.heraldBonus == null && G.twinStep == null)
         return fail("You have already acted this turn.");
       const p = at(a.from);
       if (!p) return fail("There is no piece on that square.");
@@ -2395,6 +3213,10 @@ function dispatchAction(seat, a) {
 
       const mv = findLegalMove(a.from, a.to, a.kind);
       if (!mv) return fail("That is not a legal move for that piece.");
+      // Checked against the ENGINE's move rather than the client's claimed
+      // kind, which findLegalMove treats as optional.
+      if (stutterBans(seat, { t: "move", from: a.from, to: mv.to, kind: mv.kind }))
+        return fail("Stutter — you have already taken that turn. Take a different one.");
 
       // Captures are mandatory. Moving elsewhere is allowed but forfeits one of
       // the pieces that could have jumped — recorded before the move, since the
@@ -2470,6 +3292,8 @@ function dispatchAction(seat, a) {
       // (including the anyTurn exception), and every per-spell precondition.
       const blocker = spellBlocker(a.id, seat);
       if (blocker) return fail(blocker);
+      if (stutterBans(seat, { t: "cast", id: a.id }))
+        return fail("Stutter — you have already taken that turn. Take a different one.");
 
       const want = a.payload || {};
       const payload = {};
@@ -2495,6 +3319,25 @@ function dispatchAction(seat, a) {
         case "eye":
           if (!eyeTargets(seat).includes(want.target)) return fail("That is not an untransformed pawn of yours.");
           payload.target = want.target;
+          break;
+        case "hollow":
+          if (!hollowTargets(seat).includes(want.target))
+            return fail("That is not an untransformed pawn of yours to hollow out.");
+          payload.target = want.target;
+          break;
+        case "twin":
+          if (!twinTargets(seat).includes(want.target))
+            return fail("That pawn cannot be twinned.");
+          if (!quantumSpots(want.target).includes(want.spot))
+            return fail("The second square must be an empty dark square beside the first.");
+          payload.target = want.target; payload.spot = want.spot;
+          break;
+        case "quantum":
+          if (!quantumTargets(seat).includes(want.target))
+            return fail("That pawn cannot be split — it has stood beside an enemy, or has no empty square beside it.");
+          if (!quantumSpots(want.target).includes(want.spot))
+            return fail("The second square must be an empty dark square beside the first.");
+          payload.target = want.target; payload.spot = want.spot;
           break;
         case "cascade":
           if (!friendlyPawns(seat).includes(want.sacrifice)) return fail("Temporal Cascade must be paid with one of your pawns.");
@@ -2598,6 +3441,8 @@ function dispatchAction(seat, a) {
       const P = G.players[seat];
       if (P.noDraw > 0) return fail(`Drawing is barred for ${P.noDraw} more turn(s).`);
       if (!eligibleSpellIds().length) return fail("No spell can be drawn right now.");
+      if (stutterBans(seat, { t: "draw" }))
+        return fail("Stutter — you have already taken that turn. Take a different one.");
       drawSpell(seat);
       // Sandbox: the card was the cost of the turn, and the sandbox does not
       // charge. Returning plain OK leaves the turn open — and leaves the result
@@ -2611,6 +3456,7 @@ function dispatchAction(seat, a) {
       if (g) return fail(g);
       if (G.chain != null) return fail("You must continue the chain-jump.");
       if (G.heraldBonus != null) return fail("Resolve the Herald's bonus step first.");
+      if (twinDebt(seat)) return fail("Both halves of a Temporal Twin move — the other one has still to go.");
       if (tacticianDebt(seat))
         return fail("Tactician paid you for those captures — take one before you end the turn.");
       if (G.phase === "declare" && !G.hasActed && pendingSacrifice(seat).length)
@@ -2640,6 +3486,25 @@ function dispatchAction(seat, a) {
 const HIDDEN_CARD = "?";
 const VIEW_LOG_TAIL = 80;
 
+/**
+ * Piece fields a seat may not read off an ENEMY piece.
+ *
+ * This list is the whole of the board-state half of concealment, and it is
+ * opt-IN by construction: viewFor() is otherwise a straight clone of G, so
+ * anything a card parks on a piece crosses the wire to both seats unless its
+ * name appears here. A new concealment card that forgets to add its field
+ * leaks silently and the game still works, which is exactly the failure this
+ * list — and the leak tests in test/engine.test.js §9 — exist to catch.
+ *
+ * Deleting rather than blanking is deliberate: `"hollow" in p` is then false
+ * on the foe's copy, so a client that tests for the field cannot tell a
+ * concealed piece from an ordinary one by the shape of the object.
+ */
+const SECRET_PIECE_FIELDS = ["hollow", "quantumReal"];
+
+/** Is this fx event or log line addressed to a seat other than `seat`? */
+const forOtherSeat = (e, seat) => e && e.only != null && e.only !== seat;
+
 function viewFor(g, seat, extra = {}) {
   const v = snapshot(g);                   // deep clone, already strips `history`
   const foe = 1 - seat;
@@ -2654,12 +3519,29 @@ function viewFor(g, seat, extra = {}) {
   // Gaze still answers correctly on the client.
   v.history = g.history.map((h) => ({ turn: h.turn, turnNo: h.turnNo }));
 
-  if (v.log.length > VIEW_LOG_TAIL) v.log = v.log.slice(-VIEW_LOG_TAIL);
+  /* ── the three channels a secret leaks through ─────────────────────────
+     Everything above this point is the same redaction the game has always
+     done. Everything below is the concealment cards' — and all three have to
+     be here, because a card is only hidden if the state, the animation AND
+     the log all agree to keep quiet. Missing one of them is silent. */
 
-  // snapshot() drops the effect transcript; the wire is the one place it is the
-  // whole point. This is how a player who did not act still sees the capture.
-  // It says nothing the referee log has not already announced to both seats.
-  v.fx = structuredClone(g.fx || []);
+  // 1. State. Marker fields come off every piece that is not yours.
+  if (SECRET_PIECE_FIELDS.length)
+    for (const p of v.board) {
+      if (!p || p.owner === seat) continue;
+      for (const f of SECRET_PIECE_FIELDS) delete p[f];
+    }
+
+  // 2. The transcript. snapshot() drops it and the wire is the one place it
+  //    is the whole point — this is how a player who did not act still sees
+  //    the capture. Filtered as it is put back, so an effect addressed to one
+  //    seat never reaches the other to be animated.
+  v.fx = structuredClone(g.fx || []).filter((e) => !forOtherSeat(e, seat));
+
+  // 3. The log. Filtered before the tail is taken — slicing first would let
+  //    a seat's own visible lines be crowded out by lines it cannot read.
+  v.log = v.log.filter((e) => !forOtherSeat(e, seat));
+  if (v.log.length > VIEW_LOG_TAIL) v.log = v.log.slice(-VIEW_LOG_TAIL);
 
   v.youAre = seat;
   return Object.assign(v, extra);
@@ -2680,7 +3562,8 @@ function viewFor(g, seat, extra = {}) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     // constants
-    N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY,
+    N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY, MODES,
+    SECRET_PIECE_FIELDS, PRESSURE_SECONDS,
     // geometry
     rc, rowOf, colOf, isDark, sq, mirrorOf,
     // lifecycle
@@ -2692,12 +3575,16 @@ if (typeof module !== "undefined" && module.exports) {
     // queries, for the test suite
     legalMovesFor, simpleMoves, captureMoves, capturersFor, pendingSacrifice,
     hasAnyMove, hasTurnOption, immobileWipeout, heraldAdjacent, heraldShielded, legalHeraldSteps,
-    countPieces, countForm, spellBlocker, transformBlocker, eligibleSpellIds,
+    countPieces, countForm, spellBlocker, transformBlocker, eligibleSpellIds, modeSpellIds,
     evasiveTargets, evasiveDests, mirrorTargets, veilTargets, mindControlTargets,
     eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
+    hollowTargets, revealHollow,
+    quantumTargets, quantumSpots, quantumPair, collapseQuantum,
+    twinTargets, twinPartner, severTwin, twinDebt,
     juggernautArmorPool, enchanterSacrificeOptions,
     juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
     cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,
     echoTarget, echoTargets, chokepointTarget, tacticianDebt, anchoredAgainst,
+    stutterBans, stutterHasAlternative, sameTurnAction, playRandomTurn,
   };
 }

@@ -25,10 +25,10 @@
 
 const engine = require("../public/engine.js");
 const {
-  FORMS, SPELL_IDS,
+  FORMS, SPELLS, SPELL_IDS, SECRET_PIECE_FIELDS,
   rc, isDark,
   newGame, beginTurn, log, applyAction, viewFor, setG, getG,
-  legalMovesFor,
+  legalMovesFor, captureMoves, capturersFor,
 } = engine;
 
 /* ── a very small harness ─────────────────────────────────────────────────
@@ -544,6 +544,244 @@ it("does not consume the turn when an action is refused", () => {
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
+   8b. A STUTTERED TURN CANNOT SIMPLY BE TAKEN AGAIN
+
+   Stutter's whole effect is a refusal, which puts it squarely in this file.
+   The rewind itself is a rule and is tested in the browser; what matters here
+   is that a client which has just watched its turn evaporate cannot send the
+   identical action back down the wire and have it stand.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("a stuttered turn cannot simply be taken again");
+
+/** A piece of `seat`'s with at least two legal moves, and both of them. */
+function twoMovesFor(g, seat) {
+  load(g);
+  for (let i = 0; i < g.board.length; i++) {
+    const p = g.board[i];
+    if (!p || p.owner !== seat) continue;
+    const ms = legalMovesFor(i);
+    if (ms.length >= 2) return { from: i, a: ms[0], b: ms[1] };
+  }
+  throw new Error(`seat ${seat} should have a piece with two opening moves`);
+}
+
+it("refuses the exact move that was unmade", () => {
+  const g = freshGame();
+  const { from, move } = movablePieceOf(g, 0);
+  getG().stutter = { player: 0, banned: { t: "move", from, to: move.to, kind: move.kind } };
+  const before = fingerprint(getG());
+  refused(applyAction(0, { t: "move", from, to: move.to, kind: move.kind }), "Stutter");
+  equal(fingerprint(getG()), before, "a refusal must not move the piece");
+});
+
+it("...and refuses it however the client labels the move", () => {
+  // findLegalMove treats a missing `kind` as "any", so the ban is compared
+  // against the ENGINE's resolved move rather than the client's claim.
+  const g = freshGame();
+  const { from, move } = movablePieceOf(g, 0);
+  getG().stutter = { player: 0, banned: { t: "move", from, to: move.to, kind: move.kind } };
+  refused(applyAction(0, { t: "move", from, to: move.to }), "Stutter");
+  refused(applyAction(0, { t: "move", from, to: move.to, kind: undefined }), "Stutter");
+});
+
+it("...but accepts a different one", () => {
+  const g = freshGame();
+  const { from, a, b } = twoMovesFor(g, 0);
+  getG().stutter = { player: 0, banned: { t: "move", from, to: a.to, kind: a.kind } };
+  allowed(applyAction(0, { t: "move", from, to: b.to, kind: b.kind }));
+});
+
+it("refuses a repeated draw as readily as a repeated move", () => {
+  const g = freshGame();
+  load(g);
+  getG().stutter = { player: 0, banned: { t: "draw" } };
+  refused(applyAction(0, { t: "draw" }), "Stutter");
+});
+
+it("refuses a repeated cast", () => {
+  const g = freshGame();
+  load(g);
+  getG().players[0].hand = ["wraparound"];
+  getG().players[0].fp = 9;
+  getG().stutter = { player: 0, banned: { t: "cast", id: "wraparound" } };
+  refused(applyAction(0, { t: "cast", id: "wraparound", payload: {} }), "Stutter");
+  equal(getG().wrap, 0, "and the spell did not resolve on the way to being refused");
+});
+
+it("binds only the seat that was stuttered", () => {
+  const g = freshGame();
+  const { from, move } = movablePieceOf(g, 0);
+  // The same move, banned against the OTHER seat. Seat 0 is untouched by it.
+  getG().stutter = { player: 1, banned: { t: "move", from, to: move.to, kind: move.kind } };
+  allowed(applyAction(0, { t: "move", from, to: move.to, kind: move.kind }));
+});
+
+it("will not stack a second Stutter on a pending one", () => {
+  const g = freshGame();
+  load(g);
+  getG().players[0].hand = ["stutter"];
+  getG().players[0].fp = 9;
+  getG().stutter = { player: 1, banned: null };
+  refused(applyAction(0, { t: "cast", id: "stutter", payload: {} }), "already waiting");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   8c. THE CLOCK CANNOT WEDGE A ROOM
+
+   Pressure is the only card that makes the server act on its own, and
+   playRandomTurn is what it calls. Its contract is narrow and absolute: from
+   ANY state a player can walk away from, it takes a turn and hands over.
+
+   That matters more than which move it picks. A player can abandon a turn
+   mid-chain-jump, holding a seized enemy piece, or owing a forfeit — and every
+   one of those refuses to let a turn end. If the clock could leave one
+   standing, the room would be stuck for good with no player able to fix it.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("the clock always finds a turn to take");
+
+const { playRandomTurn } = engine;
+
+/** Build a board from scratch with `pieces` = [index, owner, rank?] triples. */
+function staged(pieces, first = 0) {
+  const g = newGame(first, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(first);
+  const live = getG();
+  // Cloned from a piece the engine itself made, rather than written out here:
+  // a literal goes stale the moment a card adds a field, and it goes stale
+  // silently — the field reads `undefined` and every test still passes until
+  // one of them happens to look at it.
+  const shape = live.board.find(Boolean);
+  live.board = new Array(live.board.length).fill(null);
+  for (const [i, owner, rank] of pieces) {
+    live.board[i] = Object.assign({}, shape,
+      { id: live.seq++, owner, rank: rank || "pawn", everAdjacent: false });
+  }
+  live.turn = first;
+  live.phase = "declare";
+  live.hasActed = false;
+  return live;
+}
+
+it("takes an ordinary turn and hands over", () => {
+  const g = staged([[rc(9, 4), 0], [rc(2, 3), 1]]);
+  equal(playRandomTurn(0), true, "it reports that it acted");
+  equal(getG().turn, 1, "and play moved on");
+});
+
+it("takes a capture rather than forfeiting a piece to the mandatory-capture rule", () => {
+  // Walking past an available jump costs you the piece that could have taken
+  // it. The referee must never hand a player that bill.
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(9, 0), 0], [rc(0, 1), 1]]);
+  playRandomTurn(0);
+  const after = getG();
+  assert(!after.board[rc(6, 5)], "the jump was taken");
+  equal(after.board[rc(9, 0)] ? 1 : 0, 1, "and no piece of ours was forfeited");
+});
+
+it("finishes a chain-jump somebody walked away from", () => {
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(4, 7), 1], [rc(0, 1), 1]]);
+  load(g);
+  // Take the first hop by hand, leaving the chain lock set — exactly the state
+  // a player who closed the tab mid-jump leaves behind.
+  applyAction(0, { t: "move", from: rc(7, 4), to: rc(5, 6), kind: "capture" });
+  assert(getG().chain != null, "the fixture really does leave a chain outstanding");
+  playRandomTurn(0);
+  equal(getG().chain, null, "the chain was finished, not abandoned");
+  equal(getG().turn, 1, "and the turn ended");
+});
+
+it("discharges an owed discard instead of leaving the turn unclosable", () => {
+  const g = staged([[rc(9, 4), 0], [rc(2, 3), 1]]);
+  getG().players[0].hand = ["evasive", "mirror"];
+  getG().owedDiscard = { player: 0, n: 1, why: "test" };
+  playRandomTurn(0);
+  equal(getG().owedDiscard, null, "the debt is gone");
+  equal(getG().players[0].hand.length, 1, "and a card actually left the hand");
+  equal(getG().turn, 1);
+});
+
+it("moves a seized piece rather than holding it for ever", () => {
+  const g = staged([[rc(9, 4), 0], [rc(2, 3), 1], [rc(0, 5), 1]]);
+  getG().mindControl = { piece: rc(2, 3) };
+  playRandomTurn(0);
+  equal(getG().mindControl, null, "Mind Control was resolved");
+  equal(getG().turn, 1);
+});
+
+it("hands over even from a position with nothing to do at all", () => {
+  // Both pawns sealed in by barriers: no move, no card, no draw.
+  const g = staged([[rc(0, 1), 1], [rc(9, 4), 0]], 1);
+  const live = getG();
+  live.barriers.push(rc(1, 0), rc(1, 2));
+  live.players[1].hand = [];
+  live.players[1].noDraw = 9;
+  playRandomTurn(1);
+  assert(getG().turn === 0 || getG().over, "the turn passed, or the game ended");
+});
+
+it("gives the same turn from the same state, so a replay does not diverge", () => {
+  const a = staged([[rc(9, 4), 0], [rc(9, 6), 0], [rc(9, 8), 0], [rc(2, 3), 1]]);
+  playRandomTurn(0);
+  const first = getG().board.map((p) => (p ? p.owner : ".")).join("");
+  const b = staged([[rc(9, 4), 0], [rc(9, 6), 0], [rc(9, 8), 0], [rc(2, 3), 1]]);
+  playRandomTurn(0);
+  equal(getG().board.map((p) => (p ? p.owner : ".")).join(""), first,
+    "a seeded roll, not Math.random() — the same game must replay the same way");
+});
+
+it("respects a Stutter's ban rather than replaying the unmade turn", () => {
+  const g = staged([[rc(9, 4), 0], [rc(9, 6), 0], [rc(2, 3), 1]]);
+  const live = getG();
+  live.stutter = { player: 0, banned: { t: "move", from: rc(9, 4), to: rc(8, 3), kind: "step" } };
+  playRandomTurn(0);
+  const after = getG();
+  assert(!(after.board[rc(8, 3)] && !after.board[rc(9, 4)]),
+    "the referee must not take the one turn the rules just forbade");
+});
+
+/* ── the card itself ──────────────────────────────────────────────────── */
+
+describe("Pressure is online-only and puts both players on the clock");
+
+it("is undrawable anywhere the server is not holding the clock", () => {
+  for (const mode of ["local", "ai"])
+    assert(!engine.modeSpellIds(newGame(0, SEED, { mode })).includes("pressure"),
+      `a card that needs a server clock cannot be dealt in ${mode}`);
+  assert(engine.modeSpellIds(newGame(0, SEED, { mode: "online" })).includes("pressure"));
+});
+
+it("times the opponent's next turn and the caster's turn after it", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.players[0].hand = ["pressure"];
+  live.players[0].fp = 9;
+  allowed(applyAction(0, { t: "cast", id: "pressure", payload: {} }));
+
+  const after = getG();
+  equal(after.players[1].timed, 1, "their turn starts on the clock immediately");
+  equal(after.players[0].p_timed, 1, "and ours is parked until this turn ends");
+  equal(after.players[0].timed, 0, "the turn being played now is not retroactively timed");
+});
+
+it("will not stack a second clock on a player already under one", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  getG().players[0].hand = ["pressure"];
+  getG().players[0].fp = 9;
+  getG().players[1].timed = 1;
+  refused(applyAction(0, { t: "cast", id: "pressure", payload: {} }), "already on the clock");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
    9. WHAT CROSSES THE WIRE
 
    Refusing illegal actions is only half the referee's job. The other half is
@@ -606,6 +844,594 @@ it("does not hand back the live state object", () => {
   assert(view.board !== g.board, "editing a view must not edit the game");
   view.players[0].fp = 99;
   assert(g.players[0].fp !== 99, "the view is not a window onto the real state");
+});
+
+/* ── the three channels ───────────────────────────────────────────────────
+   A concealment card is hidden only if the board field, the effect transcript
+   and the referee log all agree to keep quiet. Two out of three is not a
+   partial success, it is a leak — so each channel is asserted on its own, and
+   then all three together the way a real card would use them.
+
+   These are deliberately written against the MACHINERY rather than against any
+   one card: they are what a future card gets for free by using `only` and
+   SECRET_PIECE_FIELDS, and what catches the card that forgets to.
+   ─────────────────────────────────────────────────────────────────────── */
+
+it("strips a secret piece field from every piece that is not yours", () => {
+  const g = freshGame();
+  // Stand in for a real concealment card. Registering the field is the whole
+  // opt-in — a card whose field is missing from this list leaks silently, and
+  // this test is the reason that failure is loud instead.
+  //
+  // Restored by splicing out what was added, NOT by emptying the array: this
+  // is the game's real list, and truncating it would quietly switch off the
+  // redaction every later test depends on.
+  const had = SECRET_PIECE_FIELDS.includes("hollow");
+  if (!had) SECRET_PIECE_FIELDS.push("hollow");
+  try {
+    const mine = anyPieceOf(g, 0), theirs = anyPieceOf(g, 1);
+    g.board[mine].hollow = true;
+    g.board[theirs].hollow = true;
+
+    const view = viewFor(g, 0, {});
+    equal(view.board[mine].hollow, true, "you may read your own concealed piece");
+    assert(!("hollow" in view.board[theirs]),
+      "the field must be DELETED, not blanked — a client testing for the key must not tell the two apart");
+    assert(g.board[theirs].hollow === true, "and the real game keeps it");
+  } finally {
+    if (!had) SECRET_PIECE_FIELDS.splice(SECRET_PIECE_FIELDS.indexOf("hollow"), 1);
+  }
+});
+
+it("drops an fx event addressed to the other seat", () => {
+  const g = freshGame();
+  g.fx = [
+    { n: 1, type: "spell", id: "veil", caster: 0 },
+    { n: 2, type: "reveal", at: 5, only: 0 },
+  ];
+  const mine = viewFor(g, 0, {}).fx, theirs = viewFor(g, 1, {}).fx;
+  equal(mine.length, 2, "seat 0 sees the public event and its own private one");
+  equal(theirs.length, 1, "seat 1 sees only the public event");
+  assert(theirs.every((e) => e.type !== "reveal"),
+    "an unredacted event would animate the secret on the wrong screen");
+});
+
+it("drops a log line addressed to the other seat", () => {
+  const g = freshGame();
+  load(g);
+  log("something everybody may read", "sys");
+  log("the pawn at e5 is a decoy", "rule", 0);
+
+  const mine = viewFor(g, 0, {}).log.map((l) => l.text).join("|");
+  const theirs = viewFor(g, 1, {}).log.map((l) => l.text).join("|");
+  assert(mine.includes("decoy"), "the seat it was written for reads it");
+  assert(!theirs.includes("decoy"), "and nobody else does");
+  assert(theirs.includes("something everybody may read"),
+    "filtering must not swallow the public lines around it");
+});
+
+it("filters the log before taking the tail, not after", () => {
+  // Slicing first would let another seat's unreadable lines take up room in
+  // the window and push this seat's own history off the end of it.
+  const g = freshGame();
+  load(g);
+  for (let k = 0; k < 200; k++) log(`private ${k}`, "sys", 1);
+  log("the line seat 0 is waiting for", "big");
+
+  const mine = viewFor(g, 0, {}).log;
+  assert(mine.some((l) => l.text === "the line seat 0 is waiting for"),
+    "seat 0's own line survived a flood of lines it cannot read");
+  assert(mine.every((l) => !l.text.startsWith("private ")), "and none of theirs came through");
+});
+
+it("keeps a secret out of all three channels at once", () => {
+  // What a real concealment card does on the turn it is cast: mark a piece,
+  // announce it to one seat, and animate it for that seat only.
+  const g = freshGame();
+  const had = SECRET_PIECE_FIELDS.includes("hollow");
+  if (!had) SECRET_PIECE_FIELDS.push("hollow");
+  try {
+    load(g);
+    const decoy = anyPieceOf(g, 1);
+    g.board[decoy].hollow = true;
+    log(`the pawn at ${engine.sq(decoy)} is hollow`, "rule", 1);
+    g.fx.push({ n: 999, type: "hollow", at: decoy, only: 1 });
+
+    const foe = viewFor(g, 0, {});
+    assert(!("hollow" in foe.board[decoy]), "channel 1: the board says nothing");
+    assert(foe.fx.every((e) => e.type !== "hollow"), "channel 2: the transcript says nothing");
+    assert(foe.log.every((l) => !l.text.includes("hollow")), "channel 3: the log says nothing");
+
+    const owner = viewFor(g, 1, {});
+    equal(owner.board[decoy].hollow, true, "and the owner still knows all three");
+    assert(owner.fx.some((e) => e.type === "hollow"));
+    assert(owner.log.some((l) => l.text.includes("hollow")));
+  } finally {
+    if (!had) SECRET_PIECE_FIELDS.splice(SECRET_PIECE_FIELDS.indexOf("hollow"), 1);
+  }
+});
+
+/* ── Hollow, the first card that actually depends on all this ───────────── */
+
+describe("a Hollow is hidden from the seat it is hidden from");
+
+/** An online game with `seat` holding Hollow and able to pay for it. */
+function hollowReady(seat = 0) {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.turn = seat;
+  live.phase = "declare";
+  live.hasActed = false;
+  live.players[seat].hand = ["hollow"];
+  live.players[seat].fp = 9;
+  return live;
+}
+
+it("keeps the decoy out of the board, the transcript and the log at once", () => {
+  const g = hollowReady(0);
+  const at = engine.hollowTargets(0)[0];
+  allowed(applyAction(0, { t: "cast", id: "hollow", payload: { target: at } }));
+  const live = getG();
+  equal(live.board[at].hollow, true, "the game itself knows");
+
+  const foe = viewFor(live, 1, {});
+  assert(!("hollow" in foe.board[at]),
+    "the field must not merely be false on their copy — it must be absent");
+  assert(foe.fx.every((e) => e.type !== "hollow"), "nor may the effect reach them");
+  assert(foe.log.every((l) => !/decoy/i.test(l.text)), "nor a log line naming it");
+
+  const mine = viewFor(live, 0, {});
+  equal(mine.board[at].hollow, true, "while the owner sees all three");
+  assert(mine.fx.some((e) => e.type === "hollow"));
+  assert(mine.log.some((l) => /decoy/i.test(l.text)));
+});
+
+it("still tells the opponent that SOME pawn is now a decoy", () => {
+  // The bluff only works if they know there is one. What is hidden is which.
+  const g = hollowReady(0);
+  const at = engine.hollowTargets(0)[0];
+  applyAction(0, { t: "cast", id: "hollow", payload: { target: at } });
+  const foe = viewFor(getG(), 1, {});
+  assert(foe.log.some((l) => /casts Hollow/.test(l.text)),
+    "casting a card is public — it is the target that is not");
+});
+
+it("cannot be cast on somebody else's pawn, or on a piece already disguised", () => {
+  const g = hollowReady(0);
+  const theirs = anyPieceOf(getG(), 1);
+  refused(applyAction(0, { t: "cast", id: "hollow", payload: { target: theirs } }), "pawn of yours");
+
+  const mine = engine.hollowTargets(0)[0];
+  getG().board[mine].hollow = true;
+  refused(applyAction(0, { t: "cast", id: "hollow", payload: { target: mine } }), "pawn of yours");
+});
+
+it("can never capture", () => {
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(0, 1), 1]]);
+  const live = getG();
+  assert(engine.captureMoves(rc(7, 4)).length > 0, "the fixture really does offer a jump");
+  live.board[rc(7, 4)].hollow = true;
+  equal(engine.captureMoves(rc(7, 4)).length, 0, "and a decoy cannot take it");
+  equal(engine.capturersFor(0).length, 0,
+    "so the mandatory-capture rule does not bill it for walking away either");
+});
+
+it("is revealed, and the spell wasted, when an enemy spell picks it out", () => {
+  // Deliberately NOT filtered out of the target list: an option that silently
+  // vanishes is itself an answer, and the client could not compute the same
+  // list without knowing the secret.
+  const g = staged([[rc(7, 4), 0], [rc(2, 3), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(7, 4)].hollow = true;
+  live.players[1].hand = ["veil"];
+  live.players[1].fp = 9;
+  assert(engine.veilTargets(1).includes(rc(7, 4)),
+    "the decoy must still appear in the enemy's target list");
+
+  allowed(applyAction(1, { t: "cast", id: "veil", payload: { target: rc(7, 4) } }));
+  const after = getG();
+  equal(after.board[rc(7, 4)].hollow, false, "the disguise came off");
+  equal(after.board[rc(7, 4)].noCapture, 0, "and the stun never landed");
+  assert(after.log.some((l) => /was a Hollow/.test(l.text)), "the reveal is announced");
+  assert(after.log.filter((l) => /was a Hollow/.test(l.text)).every((l) => l.only == null),
+    "and announced to BOTH seats — the reveal is the payoff, not another secret");
+});
+
+it("is revealed by the crown", () => {
+  const g = staged([[rc(1, 2), 0], [rc(9, 4), 1]]);
+  getG().board[rc(1, 2)].hollow = true;
+  allowed(applyAction(0, { t: "move", from: rc(1, 2), to: rc(0, 1), kind: "step" }));
+  const p = getG().board[rc(0, 1)];
+  equal(p.rank, "queen");
+  equal(p.hollow, false, "nothing below carries a secret queen");
+});
+
+it("is revealed by the capture that kills it", () => {
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 1);
+  getG().board[rc(7, 4)].hollow = true;
+  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+  assert(getG().log.some((l) => /was a Hollow/.test(l.text)),
+    "the opponent finds out what they spent the jump on");
+});
+
+/* ── Quantum Pawn ────────────────────────────────────────────────────────── */
+
+describe("a superposition is public, but which half is real is not");
+
+/** Cast Quantum Pawn for `seat` and hand back [gameState, squareA, squareB]. */
+function superposed(seat = 0) {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.turn = seat; live.phase = "declare"; live.hasActed = false;
+  live.players[seat].hand = ["quantum"];
+  live.players[seat].fp = 9;
+  const at = engine.quantumTargets(seat)[0];
+  const spot = engine.quantumSpots(at)[0];
+  allowed(applyAction(seat, { t: "cast", id: "quantum", payload: { target: at, spot } }));
+  return [getG(), at, spot];
+}
+
+it("shows both bodies to both players but tells only the owner which is which", () => {
+  const [g, a, b] = superposed(0);
+  equal(g.board[a].quantum, g.board[b].quantum, "the two squares share a link");
+  assert(g.board[a].quantum !== 0, "and it is a real link, not zero");
+  equal(g.board[a].quantumReal !== g.board[b].quantumReal, true, "exactly one of them is real");
+
+  const foe = viewFor(g, 1, {});
+  equal(foe.board[a].quantum, foe.board[b].quantum, "the opponent can see the pair — that much is public");
+  assert(!("quantumReal" in foe.board[a]) && !("quantumReal" in foe.board[b]),
+    "but not which of them the pawn is");
+  assert(foe.log.every((l) => !/real pawn is/.test(l.text)), "and the log does not say either");
+  assert(viewFor(g, 0, {}).log.some((l) => /real pawn is/.test(l.text)), "while the owner is told");
+});
+
+it("neither half can capture", () => {
+  const [g, a, b] = superposed(0);
+  load(g);
+  equal(captureMoves(a).length, 0);
+  equal(captureMoves(b).length, 0);
+});
+
+it("refuses a pawn that has already stood beside an enemy", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.players[0].hand = ["quantum"];
+  live.players[0].fp = 9;
+  const at = engine.quantumTargets(0)[0];
+  const spot = engine.quantumSpots(at)[0];
+  live.board[at].everAdjacent = true;
+  refused(applyAction(0, { t: "cast", id: "quantum", payload: { target: at, spot } }),
+    "stood beside an enemy");
+});
+
+it("refuses a second square that is not an empty dark square beside the first", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  getG().players[0].hand = ["quantum"];
+  getG().players[0].fp = 9;
+  const at = engine.quantumTargets(0)[0];
+  for (const bad of [at, emptySquare(getG()), anyPieceOf(getG(), 1)])
+    refused(applyAction(0, { t: "cast", id: "quantum", payload: { target: at, spot: bad } }),
+      "beside the first");
+});
+
+it("a jump at the empty half takes nothing and pays nothing", () => {
+  // Staged by hand so the answer is known: the struck square is the ghost.
+  // Violet advances down the board, so its attacker sits ABOVE the pair.
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].quantum = 77; live.board[rc(5, 4)].quantumReal = true;
+  live.board[rc(5, 6)].quantum = 77; live.board[rc(5, 6)].quantumReal = false;
+  live.players[1].fp = 0;
+
+  // Violet jumps the GHOST at rc(5,6), landing on rc(6,7).
+  allowed(applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" }));
+  const after = getG();
+  equal(after.board[rc(5, 6)], null, "the ghost is gone");
+  assert(after.board[rc(5, 4)], "and the real pawn is untouched");
+  equal(after.board[rc(5, 4)].quantum, 0, "the superposition is over for good");
+  equal(after.board[rc(6, 7)] && after.board[rc(6, 7)].owner, 1, "the attacker completed the jump");
+  equal(after.players[1].fp, 0, "and was paid nothing for it");
+  equal(after.board[rc(6, 7)].captures, 0, "it does not even count as a capture");
+  equal(after.lastCapture, null, "so there is nothing for Hopscotch to reverse");
+});
+
+it("a jump at the real half captures it and the ghost vanishes", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].quantum = 77; live.board[rc(5, 4)].quantumReal = false;
+  live.board[rc(5, 6)].quantum = 77; live.board[rc(5, 6)].quantumReal = true;
+  live.players[1].fp = 0;
+
+  allowed(applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" }));
+  const after = getG();
+  equal(after.board[rc(5, 6)], null, "the real pawn was taken");
+  equal(after.board[rc(5, 4)], null, "and the ghost went with it");
+  assert(after.players[1].fp > 0, "this one really was a capture, and was paid for");
+});
+
+it("the collapse is announced to both seats — there is nothing left to hide", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].quantum = 77; live.board[rc(5, 4)].quantumReal = true;
+  live.board[rc(5, 6)].quantum = 77; live.board[rc(5, 6)].quantumReal = false;
+  applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" });
+  const after = getG();
+  const lines = after.log.filter((l) => /never occupied|all along/.test(l.text));
+  assert(lines.length > 0, "the collapse is on the record");
+  assert(lines.every((l) => l.only == null), "and on both players' record");
+});
+
+it("gives the same answer from the same state, so a rewind cannot reroll it", () => {
+  const [a] = superposed(0);
+  const first = a.board.map((p) => (p && p.quantum ? (p.quantumReal ? "R" : "g") : ".")).join("");
+  const [b] = superposed(0);
+  equal(b.board.map((p) => (p && p.quantum ? (p.quantumReal ? "R" : "g") : ".")).join(""), first,
+    "a seeded flip — the machine's search rewinds through this constantly");
+});
+
+it("records having stood beside an enemy, which is a fact about the past", () => {
+  // Gold advances UP the board, toward row 0 — so it closes on a Violet piece
+  // sitting at a lower row number, not a higher one.
+  const g = staged([[rc(5, 4), 0], [rc(3, 2), 1], [rc(0, 1), 1]]);
+  equal(getG().board[rc(5, 4)].everAdjacent, false, "not yet recorded at setup");
+  assert(engine.quantumTargets(0).includes(rc(5, 4)), "and it is a legal target while untouched");
+
+  allowed(applyAction(0, { t: "move", from: rc(5, 4), to: rc(4, 3), kind: "step" }));
+  const p = getG().board[rc(4, 3)];
+  equal(p.everAdjacent, true, "it walked up beside one, and that does not un-happen");
+  load(getG());
+  assert(!engine.quantumTargets(0).includes(rc(4, 3)), "so it can never be split again");
+});
+
+/* ── Temporal Twin ───────────────────────────────────────────────────────── */
+
+describe("a Temporal Twin owes two movements and shares one life");
+
+/** Twin the pawn at the first legal target and hand back [state, a, b]. */
+function twinned(seat = 0, pieces = null) {
+  const g = pieces ? staged(pieces, seat) : (() => {
+    const gg = newGame(0, SEED, { mode: "local" });
+    load(gg); gg.turnNo = 0; beginTurn(0);
+    return getG();
+  })();
+  const live = getG();
+  live.turn = seat; live.phase = "declare"; live.hasActed = false;
+  live.players[seat].hand = ["twin"];
+  live.players[seat].fp = 9;
+  const at = engine.twinTargets(seat)[0];
+  const spot = engine.quantumSpots(at)[0];
+  allowed(applyAction(seat, { t: "cast", id: "twin", payload: { target: at, spot } }));
+  return [getG(), at, spot];
+}
+
+it("is drawable in hot-seat, because nothing about it is secret", () => {
+  assert(engine.modeSpellIds(newGame(0, SEED)).includes("twin"),
+    "both bodies are real and both players see them — there is nothing to conceal");
+});
+
+it("puts two real bodies on the board, sharing one link", () => {
+  const [g, a, b] = twinned(0);
+  equal(g.board[a].twin, g.board[b].twin);
+  assert(g.board[a].twin !== 0);
+  const foe = viewFor(g, 1, {});
+  equal(foe.board[a].twin, foe.board[b].twin, "and the opponent sees the pair in full");
+});
+
+it("owes the second body a move, and refuses to end the turn until it goes", () => {
+  const [g, a, b] = twinned(0, [[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const first = engine.twinTargets(0).length === 0 ? a : a;   // the cast target
+  const mv = legalMovesFor(first)[0];
+  allowed(applyAction(0, { t: "move", from: first, to: mv.to, kind: mv.kind }));
+
+  const mid = getG();
+  equal(mid.turn, 0, "the turn has not passed");
+  assert(mid.twinStep != null, "the other body owes a move");
+  refused(applyAction(0, { t: "endTurn" }), "Temporal Twin");
+});
+
+it("lets only the owed body make that second movement", () => {
+  const [g] = twinned(0, [[rc(5, 4), 0], [rc(9, 0), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const a = getG().board.findIndex((p) => p && p.twin);
+  const mv = legalMovesFor(a)[0];
+  applyAction(0, { t: "move", from: a, to: mv.to, kind: mv.kind });
+
+  const owed = getG().twinStep;
+  assert(owed != null, "something is owed");
+  // The unrelated pawn at rc(9,0) is not it.
+  refused(applyAction(0, { t: "move", from: rc(9, 0), to: rc(8, 1), kind: "step" }));
+  equal(getG().twinStep, owed, "and the refusal did not discharge the debt");
+});
+
+it("hands over once both bodies have moved, and not before", () => {
+  const [g] = twinned(0, [[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const a = getG().board.findIndex((p) => p && p.twin);
+  let mv = legalMovesFor(a)[0];
+  applyAction(0, { t: "move", from: a, to: mv.to, kind: mv.kind });
+  const owed = getG().twinStep;
+  mv = legalMovesFor(owed)[0];
+  applyAction(0, { t: "move", from: owed, to: mv.to, kind: mv.kind });
+
+  const after = getG();
+  equal(after.twinStep, null, "the debt is discharged");
+  equal(after.turn, 1, "and play moved on — two movements, one turn");
+});
+
+it("does not owe a third movement — the pair does not hand it back and forth", () => {
+  const [g] = twinned(0, [[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const a = getG().board.findIndex((p) => p && p.twin);
+  let mv = legalMovesFor(a)[0];
+  applyAction(0, { t: "move", from: a, to: mv.to, kind: mv.kind });
+  const owed = getG().twinStep;
+  mv = legalMovesFor(owed)[0];
+  applyAction(0, { t: "move", from: owed, to: mv.to, kind: mv.kind });
+  equal(getG().twinStep, null, "twinDone is what stops this looping for ever");
+});
+
+it("raises no obligation the second body could not discharge", () => {
+  // Buried behind barriers: the far body cannot move at all, so owing it a
+  // move would be a turn nobody could end.
+  const g = staged([[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const live = getG();
+  live.players[0].hand = ["twin"];
+  live.players[0].fp = 9;
+  const spot = rc(4, 3);
+  live.barriers.push(rc(3, 2), rc(3, 4));            // seal the far body in
+  allowed(applyAction(0, { t: "cast", id: "twin", payload: { target: rc(5, 4), spot } }));
+  const mv = legalMovesFor(rc(5, 4)).find((m) => m.to !== spot);
+  allowed(applyAction(0, { t: "move", from: rc(5, 4), to: mv.to, kind: mv.kind }));
+  assert(getG().twinStep == null || legalMovesFor(getG().twinStep).length > 0,
+    "an obligation was only raised if it could actually be met");
+});
+
+it("loses both bodies to one capture", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].twin = 55; live.board[rc(5, 6)].twin = 55;
+  allowed(applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" }));
+  const after = getG();
+  equal(after.board[rc(5, 6)], null, "the captured body is gone");
+  equal(after.board[rc(5, 4)], null, "and the other went with it");
+});
+
+it("loses the other body to the crown", () => {
+  const g = staged([[rc(1, 2), 0], [rc(5, 6), 0], [rc(9, 4), 1]]);
+  const live = getG();
+  live.board[rc(1, 2)].twin = 56; live.board[rc(5, 6)].twin = 56;
+  allowed(applyAction(0, { t: "move", from: rc(1, 2), to: rc(0, 1), kind: "step" }));
+  const after = getG();
+  equal(after.board[rc(0, 1)].rank, "queen", "the crown stands");
+  equal(after.board[rc(0, 1)].twin, 0, "the pairing is over");
+  equal(after.board[rc(5, 6)], null, "and it cost the other body");
+});
+
+it("loses the other body to a transformation", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(6, 5), 0], [rc(0, 1), 1]]);
+  const live = getG();
+  live.board[rc(5, 4)].twin = 57; live.board[rc(5, 6)].twin = 57;
+  live.players[0].hand = ["juggernautSpell"];
+  live.players[0].fp = 9;
+  allowed(applyAction(0, {
+    t: "cast", id: "juggernautSpell", payload: { target: rc(5, 4), sacrifice: rc(6, 5) },
+  }));
+  const after = getG();
+  equal(after.board[rc(5, 4)].form, "juggernaut");
+  equal(after.board[rc(5, 6)], null, "the other body did not survive it");
+});
+
+it("cannot be twinned twice, nor stacked on a superposition", () => {
+  const [g, a] = twinned(0);
+  load(getG());
+  assert(!engine.twinTargets(0).includes(a), "an already-twinned pawn is not a target");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   9b. THE MODE GATE
+
+   A card whose effect is that your opponent cannot see something is worth
+   nothing across a shared screen, so hot-seat is not dealt one. That gate is a
+   property of the DRAW POOL rather than of any card's rules, which means the
+   test for it belongs with the rest of the disclosure surface: the pool is how
+   a secret gets into a game in the first place.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("the draw pool respects the shape of the game");
+
+it("defaults to hot-seat when nobody says otherwise", () => {
+  equal(newGame(0).mode, "local", "the server's old call shape must not silently deal secrets");
+  equal(newGame(0, SEED, {}).mode, "local");
+  equal(newGame(0, SEED, { mode: "nonsense" }).mode, "local", "an unrecognised mode is not a mode");
+});
+
+it("takes the mode the caller asked for", () => {
+  equal(newGame(0, SEED, { mode: "online" }).mode, "online");
+  equal(newGame(0, SEED, { mode: "ai" }).mode, "ai");
+});
+
+it("keeps a hidden card out of a hot-seat game and lets it into the other two", () => {
+  // Borrow a real card rather than invent one: the gate has to work on the
+  // actual SPELLS table, not on a fixture shaped to suit it.
+  SPELLS.veil.hidden = true;
+  try {
+    assert(!engine.modeSpellIds(newGame(0, SEED)).includes("veil"),
+      "hot-seat must never be dealt a concealment card");
+    assert(engine.modeSpellIds(newGame(0, SEED, { mode: "ai" })).includes("veil"),
+      "the machine is genuinely blinded, so it works there");
+    assert(engine.modeSpellIds(newGame(0, SEED, { mode: "online" })).includes("veil"),
+      "and online is what it was written for");
+  } finally {
+    delete SPELLS.veil.hidden;
+  }
+});
+
+it("keeps an online-only card out of both offline modes", () => {
+  SPELLS.veil.onlineOnly = true;
+  try {
+    for (const mode of ["local", "ai"])
+      assert(!engine.modeSpellIds(newGame(0, SEED, { mode })).includes("veil"),
+        `a card that needs the server's clock cannot be dealt in ${mode}`);
+    assert(engine.modeSpellIds(newGame(0, SEED, { mode: "online" })).includes("veil"));
+  } finally {
+    delete SPELLS.veil.onlineOnly;
+  }
+});
+
+it("the drawable pool never offers what the mode forbids", () => {
+  SPELLS.veil.hidden = true;
+  try {
+    const g = newGame(0, SEED);
+    load(g);
+    g.turnNo = 0;
+    beginTurn(0);
+    assert(!engine.eligibleSpellIds().includes("veil"),
+      "eligibleSpellIds is the one list the draw reads — the gate has to hold there, not just in modeSpellIds");
+  } finally {
+    delete SPELLS.veil.hidden;
+  }
+});
+
+it("...but the sandbox is exempt, because a workbench you cannot test a card in is useless", () => {
+  // This is the opposite of what shipped first, and deliberately so. Gating the
+  // sandbox on the concealment rule left Hollow, Quantum Pawn and Pressure as
+  // the only three cards in the game that could not be tried out anywhere.
+  SPELLS.veil.hidden = true;
+  SPELLS.mirror.onlineOnly = true;
+  try {
+    const s = newGame(0, SEED, { dev: true });
+    load(s);
+    s.turnNo = 0;
+    beginTurn(0);
+    equal(getG().players[0].hand.length, SPELL_IDS.length,
+      "the workbench holds every card there is, whatever the mode would say");
+    assert(getG().players[0].hand.includes("veil"), "including a concealment card");
+    assert(getG().players[0].hand.includes("mirror"), "and one that needs the server");
+  } finally {
+    delete SPELLS.veil.hidden;
+    delete SPELLS.mirror.onlineOnly;
+  }
+});
+
+it("every card this phase added can actually be reached from the sandbox", () => {
+  // The regression itself, named. Reported from a real session: three cards
+  // were missing from the one mode built for trying cards out.
+  const s = newGame(0, SEED, { dev: true });
+  load(s);
+  s.turnNo = 0;
+  beginTurn(0);
+  const hand = getG().players[0].hand;
+  for (const id of ["stutter", "pressure", "hollow", "quantum", "twin"])
+    assert(hand.includes(id), `the sandbox must be able to reach ${id}`);
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -697,7 +1523,8 @@ it("the sandbox really does relax what it claims to", () => {
   g.turnNo = 0;
   beginTurn(0);
 
-  equal(getG().players[0].hand.length, SPELL_IDS.length, "the sandbox hand holds one of everything");
+  equal(getG().players[0].hand.length, SPELL_IDS.length,
+    "the sandbox hand holds one of everything there is");
   equal(getG().players[0].fp, engine.FP_CAP, "and the pool starts full");
 
   const first = movablePieceOf(getG(), 0);

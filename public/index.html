@@ -188,6 +188,18 @@ button:disabled{cursor:not-allowed}
 .piece.sentinel{border-radius:14%;width:84%;height:84%}
 .piece.marked{outline:2.5px solid var(--bad);outline-offset:2.5px}
 .piece.veiled{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(120,255,220,.75) inset}
+/* Only ever drawn on your own decoys — see renderBoard. Deliberately quiet:
+   it has to be legible to the player holding it without turning into a tell
+   over somebody's shoulder. */
+.piece.hollow{opacity:.72;box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(255,255,255,.22) inset}
+.piece.hollow .glyph{opacity:.5}
+/* Both halves of a superposition, drawn for everybody. */
+.piece.quantum{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(150,190,255,.55) inset}
+/* And which half is which, drawn only for the player entitled to know. */
+.piece.qreal{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(150,220,255,.95) inset}
+.piece.qghost{opacity:.6}
+/* A twinned pair. Nothing secret about it, so it is drawn for everybody. */
+.piece.twinned{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(255,205,120,.8) inset}
 .piece .glyph{line-height:1;pointer-events:none}
 .piece .fpdot{
   position:absolute;top:-3px;right:-3px;
@@ -594,6 +606,13 @@ const NET = {
   room: null,          // four-letter code
   token: null,         // your claim on the seat, so a refresh gets it back
   oppConnected: false,
+  // Pressure's clock. The server owns it; these two are only what it last
+  // said, plus the local moment we heard — so the countdown drawn here ticks
+  // smoothly without ever becoming a second source of truth about the game.
+  clockMs: null,       // ms remaining when the last state arrived, or null
+  clockSeat: null,     // whose turn is being counted
+  clockAt: 0,          // performance.now() when that number was received
+  clockTick: null,     // the interval redrawing it
 };
 
 const $ = (id) => document.getElementById(id);
@@ -706,10 +725,18 @@ function renderTopbar() {
   if (AI.thinking) phase = `${AI_LEVELS[AI.level].name} is thinking…`;
   else if (G.chain != null) phase = "Chain-jump — must continue";
   else if (G.heraldBonus != null) phase = "Herald bonus step";
+  else if (G.twinStep != null) phase = "Temporal Twin — move the other body";
   else if (G.mindControl) phase = "Mind Control — move an enemy piece";
   else if (G.owedSacrifice) phase = "Declined capture — a piece is forfeit";
   else if (G.owedDiscard) phase = "Discard owed";
   else if (NET.on && !NET.oppConnected) phase = "Opponent disconnected";
+  // Pressure. Announced on both screens, because a turn being timed changes
+  // how the player NOT on the clock should be thinking too.
+  const left = NET.on ? netClockLeft() : null;
+  if (left != null)
+    phase = NET.clockSeat === NET.seat
+      ? `Under Pressure — ${left}s to act`
+      : `${PLAYERS[NET.clockSeat].name} is under Pressure — ${left}s`;
   $("phasechip").textContent = phase;
 }
 
@@ -747,6 +774,20 @@ function renderBoard() {
       if (p.form === "alchemist") d.classList.add("alchemist");
       if (p.eyeMark > 0) d.classList.add("marked");
       if (p.noCapture > 0) d.classList.add("veiled");
+      // Only ever true on a piece this device is entitled to know about:
+      // viewFor deletes the field outright from every enemy piece, and against
+      // the machine the field is only ever set on pieces the player owns or
+      // the machine does — which is why this asks whose seat is looking.
+      if (p.hollow && (G.dev || p.owner === viewSeat())) d.classList.add("hollow");
+      // A superposition is public — both players can see the two bodies. Which
+      // one is the pawn is not, so the second class is owner-only and rests on
+      // a field viewFor has already deleted from the other seat's copy.
+      // Wholly public: both bodies are real and both players see the pair.
+      if (p.twin) d.classList.add("twinned");
+      if (p.quantum) {
+        d.classList.add("quantum");
+        if (G.dev || p.owner === viewSeat()) d.classList.add(p.quantumReal ? "qreal" : "qghost");
+      }
       // A penalty that has been paid but has not landed yet is otherwise
       // invisible, which reads as "the penalty never happened". Show it.
       const pend = (p.p_frozen || 0) + (p.p_noCapture || 0);
@@ -824,6 +865,12 @@ function describePiece(p, i) {
   if (p.noCapture > 0) bits.push(`Static Veil — cannot capture for ${p.noCapture} more turn(s).`);
   if (p.p_frozen > 0) bits.push(`PENALTY PENDING — will be frozen for ${p.p_frozen} turn(s) starting next turn.`);
   if (p.p_noCapture > 0) bits.push(`PENALTY PENDING — will be unable to capture for ${p.p_noCapture} turn(s).`);
+  if (p.twin) bits.push("TEMPORAL TWIN — both bodies are real and both move each turn. Whatever ends either one ends both.");
+  if (p.quantum)
+    bits.push(p.quantumReal === true ? "SUPERPOSED — and this is the real pawn. Neither square can capture."
+      : p.quantumReal === false ? "SUPERPOSED — this square is the empty half. Neither can capture."
+      : "SUPERPOSED — one of these two squares holds the pawn. Neither can capture.");
+  if (p.hollow) bits.push("HOLLOW — a decoy. It cannot capture, and your opponent sees an ordinary pawn.");
   if (p.eyeMark > 0) bits.push(`Eye For An Eye — marked for ${p.eyeMark} more enemy turn(s).`);
   if (p.veilBy != null && p.noCapture > 0)
     bits.push(`${PLAYERS[p.veilBy].name} owes friendly fire when this stun expires.`);
@@ -1060,15 +1107,36 @@ function drawWhy(P) {
   return "";
 }
 
+/**
+ * The referee log as the seat at this device is entitled to read it.
+ *
+ * Online the server has already filtered it — viewFor() drops another seat's
+ * private lines before they ever leave the process. This exists for the game
+ * against the MACHINE, where there is no wire and no view: the browser holds
+ * the real G, secret lines and all, and rendering it raw would hand the
+ * machine's concealed pieces straight to the player it is concealing them
+ * from. Doing it in both places costs nothing and means neither has to be the
+ * one that remembers.
+ */
+function visibleLog() {
+  // The sandbox has one person in both chairs, so there is nobody to keep a
+  // line from — and a workbench that hides half of what it just did is not
+  // much of a workbench.
+  if (G.dev) return G.log;
+  const me = viewSeat();
+  return G.log.filter((e) => e.only == null || e.only === me);
+}
+
 function renderLog() {
   const zone = $("logzone");
+  const lines = visibleLog();
   zone.classList.toggle("collapsed", !UI.logOpen);
   $("logToggle").setAttribute("aria-expanded", String(!!UI.logOpen));
-  $("logcount").textContent = UI.logOpen ? "" : `${G.log.length} entries`;
+  $("logcount").textContent = UI.logOpen ? "" : `${lines.length} entries`;
   if (!UI.logOpen) return;
   const wrap = $("log");
   wrap.innerHTML = "";
-  for (const e of G.log.slice(-90)) wrap.appendChild(el("div", "logline " + e.kind, e.text));
+  for (const e of lines.slice(-90)) wrap.appendChild(el("div", "logline " + e.kind, e.text));
   wrap.scrollTop = wrap.scrollHeight;
 }
 
@@ -1190,7 +1258,7 @@ function onCellClick(i) {
     // While the rules have you locked to one piece — mid chain-jump, or owed a
     // Herald step — a stray click on an empty square used to drop the
     // selection, taking the only highlight of what you are meant to do with it.
-    const locked = G.chain != null ? G.chain : G.heraldBonus;
+    const locked = G.chain != null ? G.chain : G.heraldBonus != null ? G.heraldBonus : G.twinStep;
     if (locked != null && G.board[locked]) { selectPiece(locked, legalMovesFor(locked)); return; }
     clearSelection(); render(); return;
   }
@@ -1470,6 +1538,38 @@ function beginCast(id, caster) {
       confirmFirst(`${S.text}<br><br>The engine has found <b>${sq(at)}</b>.`, () => finish({}));
       return;
     }
+
+    case "twin":
+      target("Choose a pawn to stand on two squares at once", twinTargets(caster), (from) => {
+        target("Choose its second square — both are real, and both move every turn",
+          quantumSpots(from), (spot) => finish({ target: from, spot }));
+      });
+      return;
+
+    case "quantum":
+      target("Choose a pawn that has never stood beside an enemy", quantumTargets(caster), (from) => {
+        target("Choose the second square it will also stand on",
+          quantumSpots(from), (spot) => finish({ target: from, spot }));
+      });
+      return;
+
+    case "hollow":
+      target("Choose a pawn to hollow out — your opponent will not be told which",
+        hollowTargets(caster), (t) => finish({ target: t }));
+      return;
+
+    case "pressure":
+      confirmFirst(`${S.text}<br><br>Your own next turn is timed too — this is a card you have to be ready for.`,
+        () => finish({}));
+      return;
+
+    case "stutter":
+      // No target: it is aimed at a turn, not at a square. The real price is
+      // worth naming out loud, because 4 FP on the card and 3 more in strain
+      // is most of a full pool.
+      confirmFirst(`${S.text}<br><br>Costs <b>${S.cost} FP</b> now and <b>3 more</b> in strain — ${
+        Math.max(0, G.players[caster].fp - S.cost - 3)} FP would be left.`, () => finish({}));
+      return;
   }
 }
 
@@ -1677,7 +1777,10 @@ function boot(first, opts = {}) {
   aiCancel();                       // kill any beat still pending from a prior game
   netLeave();                       // and drop any online game still attached
   FX.reset();                       // and anything still in the air from it
-  G = newGame(first, null, { dev: !!opts.dev });
+  // Against the machine concealment works — the machine is genuinely blinded.
+  // Hot-seat it does not, because both hands share one screen, so "local"
+  // keeps those cards out of the pool entirely. See MODE in engine.js.
+  G = newGame(first, null, { dev: !!opts.dev, mode: opts.ai ? "ai" : "local" });
   UI = freshUI();
   AI.on = !!opts.ai;
   AI.side = opts.aiSide != null ? opts.aiSide : 1;
@@ -1732,6 +1835,29 @@ const viewSeat = () => (NET.on ? NET.seat : AI.on ? 1 - AI.side : G.turn);
 
 const SESSION_KEY = "caw.session";
 
+/**
+ * Take the server's word for how long is left, and redraw locally until the
+ * next state arrives.
+ *
+ * The interval only repaints; it never decides anything. Every turn the clock
+ * actually decides is decided on the server, which is the only place that can
+ * be trusted with it — a client whose tab was throttled, or whose own clock
+ * runs fast, must not be able to forfeit somebody's turn.
+ */
+function netSetClock(ms, seat) {
+  NET.clockMs = typeof ms === "number" ? ms : null;
+  NET.clockSeat = typeof seat === "number" ? seat : null;
+  NET.clockAt = performance.now();
+  if (NET.clockTick) { clearInterval(NET.clockTick); NET.clockTick = null; }
+  if (NET.clockMs != null) NET.clockTick = setInterval(renderTopbar, 250);
+}
+
+/** Seconds left on the clock as this device sees it, or null. */
+function netClockLeft() {
+  if (NET.clockMs == null) return null;
+  return Math.max(0, Math.ceil((NET.clockMs - (performance.now() - NET.clockAt)) / 1000));
+}
+
 function netSocket() { return NET.socket; }
 function netSend(action) {
   if (!NET.socket) return;
@@ -1756,6 +1882,7 @@ function loadSocketIO() {
 function netLeave() {
   if (NET.socket) { try { NET.socket.emit("leave"); NET.socket.disconnect(); } catch (e) {} }
   NET.on = false; NET.socket = null; NET.room = null; NET.oppConnected = false;
+  netSetClock(null, null);          // and stop the countdown redrawing forever
   try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
 }
 
@@ -1780,6 +1907,7 @@ function netAttach(socket) {
   socket.on("state", (view) => {
     const hadTargeting = !!(UI && UI.targeting);
     NET.oppConnected = !!view.oppConnected;
+    netSetClock(view.clockMs, view.clockSeat);
     G = view;
     if (!UI) UI = freshUI();
     UI.revealed = true;
@@ -1788,9 +1916,10 @@ function netAttach(socket) {
     afterAction();
   });
 
-  socket.on("presence", ({ oppConnected }) => {
+  socket.on("presence", ({ oppConnected, clockMs, clockSeat }) => {
     const was = NET.oppConnected;
     NET.oppConnected = !!oppConnected;
+    netSetClock(clockMs, clockSeat);
     if (was !== NET.oppConnected)
       toast(NET.oppConnected ? "Your opponent is here." : "Your opponent dropped — waiting for them.",
         NET.oppConnected ? "good" : "bad");
@@ -2360,6 +2489,30 @@ function turnMoves(owner) {
   return out;
 }
 
+/**
+ * The same list, minus anything Stutter has forbidden — what the machine may
+ * actually choose from at the ROOT of its search.
+ *
+ * Only at the root. Deeper plies are later turns, where the ban has long since
+ * been spent, so filtering inside turnMoves would quietly delete legal replies
+ * from every branch of the tree.
+ *
+ * The machine does not end its turn through the referee, so the refusal in
+ * dispatchAction never binds it. Without this it would replay the very move
+ * that was unmade, be refused online, and offline simply take it — getting
+ * away with what a player cannot.
+ */
+function rootMoves(owner) {
+  const moves = turnMoves(owner);
+  if (!G.stutter || G.stutter.player !== owner || !G.stutter.banned) return moves;
+  const legal = moves.filter((m) =>
+    !stutterBans(owner, { t: "move", from: m.from, to: m.to, kind: m.kind }));
+  // If the banned move was the only one, the ban has already stopped binding
+  // and stutterBans says so — but be explicit rather than returning an empty
+  // list and leaving the machine with nothing to play.
+  return legal.length ? legal : moves;
+}
+
 /* ── evaluation ─────────────────────────────────────────────────────────────
    Public information only. Reading the opponent's hand would be cheating, so
    only hand SIZE is ever consulted.
@@ -2394,6 +2547,15 @@ function sideScore(side) {
     s += p.rank === "queen" ? VAL_QUEEN : VAL_PAWN;
     if (p.armor) s += VAL_ARMOR;
     if (p.form) s += VAL_FORM[p.form] || 0;
+    // Half of a superposition is worth half a pawn, because half of it is not
+    // there. Reading `quantum` is fair — the link is public, and both players
+    // can count the bodies — but `quantumReal` is never touched, here or
+    // anywhere else the machine looks. That is the blindness contract.
+    if (p.quantum) s -= VAL_PAWN / 2;
+    // A twinned body is a whole pawn — both are real — but the pair shares one
+    // life, so a single jump collects both. Priced on each half, which comes to
+    // roughly a third of the pair.
+    if (p.twin) s -= 34;
     if (p.rank === "pawn") {
       // Closer to the crown is worth more; the last two rows sharply so.
       // Weighted heavily enough that developing beats sitting still.
@@ -2429,6 +2591,15 @@ function sideScore(side) {
   // Wraparound, since both change what simpleMoves returns; these are the
   // things it CANNOT see.
   if (G.mustCapture && G.mustCapture.player === side) s -= 12;   // an obligation, not an option
+  // Stutter, priced as a cost to its VICTIM — which evaluate() turns into the
+  // caster's gain for free. This is only half the judgement, and deliberately
+  // the flat half: what a stutter is worth depends almost entirely on the
+  // position, and that part is measured once per turn by aiStutterGap() rather
+  // than guessed at again on every leaf. See STUTTER_DENIAL for the numbers.
+  // Constant across a search once it is set, so it moves the decision to cast
+  // and nothing else.
+  if (G.stutter && G.stutter.player === side)
+    s -= G.stutter.banned ? STUTTER_DENIAL + 20 : STUTTER_DENIAL;
   if (G.rift) {
     // A rift is worth most to whoever has a piece near a mouth, and it is
     // open to both sides — so price proximity, not ownership.
@@ -2554,7 +2725,7 @@ function searchBestMove(owner) {
   AI_DEADLINE = performance.now() + aiBudget(cfg.timeMs);
   clearOrderingMemory();
 
-  let moves = turnMoves(owner);
+  let moves = rootMoves(owner);
   if (!moves.length) return null;
   if (moves.length === 1) return { move: moves[0], score: 0, depth: 0, nodes: 0, forced: true };
 
@@ -2746,6 +2917,44 @@ function aiSpellCandidates(phaseName) {
     out.push({ id: "tactician", payload: {} });
   if (have("chokepoint") && chokepointTarget(AI.side) >= 0)
     out.push({ id: "chokepoint", payload: {} });
+  // Hollow is a bluff, and a bluff has no value the position evaluator can
+  // see — the board after casting it is a board with one pawn that can no
+  // longer capture, which scores strictly WORSE. Its worth is entirely in
+  // what the opponent does not know, so it rides in on `bonus` the same way
+  // Stutter's does, rather than being smuggled into sideScore where it would
+  // also tell the machine about the OPPONENT's decoys. See STUTTER_DENIAL.
+  //
+  // What can be judged is which pawn to spend: one that has no capture to
+  // give up, and that stands where the enemy has to keep respecting it.
+  if (have("hollow"))
+    for (const i of hollowTargets(AI.side)
+      .filter((i) => !captureMoves(i).length)
+      .map((i) => ({ i, near: adjacentTo(i, (q) => isEnemy(q, AI.side)).length }))
+      .filter((c) => c.near > 0)
+      .sort((a, b) => b.near - a.near)
+      .slice(0, aiWide(3)))
+      out.push({ id: "hollow", payload: { target: i.i }, bonus: HOLLOW_BLUFF + 12 * i.near });
+
+  if (have("twin") && !G.hasActed)
+    for (const i of twinTargets(AI.side).slice(0, aiWide(3))) {
+      const spot = quantumSpots(i)[0];
+      if (spot != null) out.push({ id: "twin", payload: { target: i, spot }, bonus: TWIN_TEMPO });
+    }
+
+  if (have("quantum"))
+    for (const i of quantumTargets(AI.side).slice(0, aiWide(3))) {
+      const spot = quantumSpots(i)[0];
+      if (spot != null) out.push({ id: "quantum", payload: { target: i, spot }, bonus: QUANTUM_GAMBIT });
+    }
+
+  if (have("stutter") && !G.stutter) {
+    const gap = aiStutterGap();
+    // sideScore prices STUTTER_DENIAL of this flatly, because that much is
+    // true of any stutter. The excess is what THIS position is worth, and it
+    // rides along as a bonus rather than being guessed at on every leaf.
+    if (gap >= STUTTER_DENIAL)
+      out.push({ id: "stutter", payload: {}, bonus: gap - STUTTER_DENIAL });
+  }
   if (have("echo"))
     for (const i of echoTargets(AI.side).slice(0, aiWide(3)))
       out.push({ id: "echo", payload: { target: i } });
@@ -2764,6 +2973,101 @@ function aiSpellCandidates(phaseName) {
         if (a !== b) out.push({ id: "rift", payload: { a, b } });
   }
   return out;
+}
+
+/* ── Stutter's worth ────────────────────────────────────────────────────────
+   Every other card here is priced by a flat term in sideScore. Stutter cannot
+   be, and measuring it is what shows why.
+
+   Sampling best-minus-second-best over a real game, in this evaluator's own
+   units: the MEDIAN gap is 0, the 75th percentile is 3, the 90th is 10 — and
+   the maximum is 490. Three quarters of the time, denying somebody their best
+   turn costs them nothing at all, because their second-best is just as good. A
+   flat term would therefore be wrong in both directions at once: far too
+   generous in the ordinary position, and nowhere near generous enough in the
+   one position out of ten where their reply is close to forced and taking it
+   away is worth two pieces.
+
+   So the position-dependent half of the judgement lives here, in the gate,
+   where it is computed ONCE per turn rather than at every leaf of the search;
+   and the flat half lives in sideScore, priced at this same constant, so that
+   a candidate which clears the gate is one the search will also agree to pay
+   for. Tactician's `availableCaptures >= 2` gate is the same idea with cheaper
+   arithmetic.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * What denying the opponent their best turn is worth right now.
+ *
+ * Roughly 7 Focus — the card plus its strain — is what the machine gives up,
+ * which comes to a little under 80 points of resourceValue. Set at 90 so a
+ * cast has to be clearly, not marginally, worth it.
+ */
+const STUTTER_DENIAL = 90;
+
+/**
+ * And what a Hollow is worth, on the same terms.
+ *
+ * This one is frankly unmeasurable: the card's whole value is a belief in
+ * somebody else's head, and there is no position after the cast that is worth
+ * more than the position before it. So rather than invent a number, this is
+ * set to roughly what the cast COSTS — 3 Focus and a card, a little over 60
+ * points of resourceValue — which makes the machine willing to play it in a
+ * quiet position and unwilling to pay a real tempo price for it. The per-enemy
+ * premium at the call site is the only part with an actual argument behind it:
+ * a decoy nobody has to walk past is not deceiving anyone.
+ */
+const HOLLOW_BLUFF = 62;
+
+/**
+ * And a Quantum Pawn's, on the same footing and for the same reason.
+ *
+ * The board after the cast is worth roughly what it was before it — an extra
+ * body, discounted by half in sideScore because half of it is not there — so
+ * the evaluator sees the 5 Focus and the card go out and nothing come back.
+ * What comes back is a jump the opponent may spend on empty air, which is a
+ * coin flip on a whole tempo plus whatever they gave up to reach it. Set to
+ * cover the cast so the machine will make the gamble in a quiet position and
+ * will not pay a real positional price for it.
+ */
+const QUANTUM_GAMBIT = 92;
+
+/**
+ * Temporal Twin is the one of the three the evaluator can mostly see for
+ * itself: both bodies are real pawns and they show up as material, with the
+ * shared life priced against them in sideScore. What it cannot see is the
+ * TEMPO — two movements every turn for as long as the pair survives — because
+ * the search still explores one movement per turn per side. This covers that,
+ * and nothing else.
+ */
+const TWIN_TEMPO = 45;
+
+function aiStutterGap() {
+  // Measured on the position as it stands, which is a turn early: the real
+  // stutter lands after this turn finishes. Close enough to tell a forced
+  // reply from a free choice, and far cheaper than simulating our own turn
+  // first only to measure theirs.
+  const foe = 1 - AI.side;
+  const moves = orderMoves(turnMoves(foe), 0).slice(0, aiWide(14));
+  if (moves.length < 2) return 0;      // nothing to deny, or nothing to deny it with
+  // Its own clock. Every alphabeta call reads the shared AI_DEADLINE, so
+  // without this the measurement inherits whatever the last search left
+  // behind — usually a deadline already in the past, which makes every reply
+  // score the same and quietly reports a gap of zero from every position.
+  AI_TIMEUP = false;
+  AI_DEADLINE = performance.now() + aiBudget(aiCfg().policyMs);
+  let best = -Infinity, second = -Infinity;
+  for (const m of moves) {
+    const recs = applySeq(m.steps);
+    const v = -alphabeta(1 - foe, 1, -Infinity, Infinity, 1);
+    undoSeq(recs);
+    if (v > best) { second = best; best = v; }
+    else if (v > second) { second = v; }
+  }
+  // A measurement that ran out of time part-way compared an arbitrary subset,
+  // so it is not a reason to spend 7 Focus.
+  if (AI_TIMEUP) return 0;
+  return second === -Infinity ? 0 : best - second;
 }
 
 function aiRearmostPawn(owner) {
@@ -2875,7 +3179,14 @@ function aiCastOnce(phaseName) {
   let best = null, bestV = base + cfg.castEdge;          // demand a real improvement
   const stop = performance.now() + aiPolicyBudget();
   for (const c of cands) {
-    const v = aiSimValue(() => aiExecuteSpell(c), movesNext, d);
+    // `bonus` is what a candidate is worth BEYOND anything the evaluator can
+    // see from the resulting position. Almost nothing needs it — a Veil's
+    // value shows up as a stunned piece, a transformation's as a form — but
+    // Stutter's does not: the whole effect is a turn that will not be taken,
+    // and no static term can tell a position where that is free from one where
+    // it is worth a queen. So the finder measures it and hands the number over
+    // rather than teaching sideScore to guess. See STUTTER_DENIAL.
+    const v = aiSimValue(() => aiExecuteSpell(c), movesNext, d) + (c.bonus || 0);
     if (v > bestV) { bestV = v; best = c; }
     if (performance.now() > stop) break;
   }
@@ -2927,6 +3238,21 @@ function aiFinishMove() {
       G.heraldBonus = null;
       G.phase = "end";
     }
+  }
+  // The second half of a Temporal Twin. The referee refuses to end a turn
+  // while this is owed, and the machine does not end its turn through the
+  // referee — so without this it would simply never take the move the card
+  // exists to give it.
+  while (twinDebt(AI.side) && !G.over && guard++ < 12) {
+    const at = G.twinStep;
+    const opts = legalMovesFor(at);
+    if (!opts.length) { G.twinStep = null; break; }
+    let bestO = opts[0], bestV = -Infinity;
+    for (const o of opts) {
+      const v = aiSimValue(() => performMove(at, o), 1 - AI.side, 2);
+      if (v > bestV) { bestV = v; bestO = o; }
+    }
+    performMove(at, bestO);
   }
 }
 
@@ -3115,7 +3441,10 @@ function aiRandomTurn(side) {
 /** One headless game. `gold`/`violet` are level names or the string "random". */
 function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
   const saved = { ...AI };
-  G = newGame(0, seed);
+  // "ai", not the default "local" — self-play is how the machine's handling of
+  // the concealment cards gets measured, and in a local-mode game it would
+  // never be dealt one.
+  G = newGame(0, seed, { mode: "ai" });
   UI = freshUI();
   G.turnNo = 0;
   AI.on = true; AI.fast = true; AI.thinking = false;
@@ -3186,12 +3515,16 @@ function runTests() {
   // Silence the interface so the engine can be driven headlessly.
   render = () => {}; raiseCurtain = () => {}; toast = () => {}; announceWinner = () => {};
 
-  const blank = (first = 0) => {
-    G = newGame(first, 42);
+  // `opts` reaches newGame, which is how a test asks for a mode other than
+  // hot-seat — the concealment cards are undrawable in "local" and several
+  // groups below need a game that can actually hold one.
+  const blank = (first = 0, opts = {}) => {
+    G = newGame(first, 42, opts);
     UI = freshUI();
     G.board = new Array(CELLS).fill(null);
     return G;
   };
+  const countHollow = (owner) => G.board.filter((p) => p && p.owner === owner && p.hollow).length;
   const put = (i, owner, rank = "pawn", extra = {}) => {
     const p = mkPiece(owner, rank);
     Object.assign(p, extra);
@@ -3544,12 +3877,13 @@ function runTests() {
   /* ── the draw pool ─────────────────────────────────────────────────── */
   group("Spell pool");
   G = newGame(0, 42); UI = freshUI();
-  ok("every spell id starts eligible to draw", eligibleSpellIds().length === SPELL_IDS.length,
-    eligibleSpellIds().length);
+  ok("every spell the mode allows starts eligible to draw",
+    eligibleSpellIds().length === modeSpellIds().length, eligibleSpellIds().length);
   const COSTS = {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
     tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
+    stutter: 4, pressure: 3, hollow: 3, quantum: 5, twin: 5,
   };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));
@@ -3576,7 +3910,7 @@ function runTests() {
   G = newGame(0, 42); UI = freshUI();
   G.drawCounts.cascade = SPELLS.cascade.maxDraws;
   ok("a maxDraws card drops out of the pool once exhausted", !eligibleSpellIds().includes("cascade"));
-  ok("...but every other card is unaffected", eligibleSpellIds().length === SPELL_IDS.length - 1);
+  ok("...but every other card is unaffected", eligibleSpellIds().length === modeSpellIds().length - 1);
 
   blank();
   G.players[0].fp = 9; G.players[0].hand = ["cascade"];
@@ -3710,6 +4044,316 @@ function runTests() {
     captureMoves(rc(7, 4)).length === 0);
 
   /* ── Chronos's Gaze ────────────────────────────────────────────────── */
+  /* ── the turn model ────────────────────────────────────────────────── */
+  group("Stutter");
+  blank();
+  put(rc(9, 4), 0); put(rc(9, 6), 0);
+  put(rc(2, 3), 1); put(rc(2, 5), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 10; G.players[0].hand = ["stutter"];
+  G.players[1].fp = 0; G.players[1].hand = [];
+  castSpell("stutter", 0, {});
+  ok("it arms against the opponent, not the caster",
+    G.stutter && G.stutter.player === 1, JSON.stringify(G.stutter));
+  ok("...and nothing is banned until a turn has actually been taken",
+    G.stutter.banned === null);
+  ok("...and it costs 4 for the card plus 3 in strain",
+    G.players[0].fp === 3, G.players[0].fp);
+  ok("...and bars the caster's next draw",
+    G.players[0].p_noDraw === 1 || G.players[0].noDraw === 1);
+
+  endTurnLocal();
+  ok("arming survives the handover — beginTurn must not clear it",
+    !!G.stutter && G.turn === 1, `${G.turn} / ${JSON.stringify(G.stutter)}`);
+
+  const stFrom = rc(2, 3), stTaken = rc(3, 2), stOther = rc(3, 4);
+  const stRes = applyAction(1, { t: "move", from: stFrom, to: stTaken, kind: "step" });
+  ok("the stuttered turn is played out and then unmade",
+    stRes.ok && !!G.board[stFrom] && !G.board[stTaken],
+    `${stRes.ok} / ${!!G.board[stFrom]} / ${!!G.board[stTaken]}`);
+  ok("...and the seat keeps the turn rather than handing over",
+    G.turn === 1 && G.phase === "declare" && !G.hasActed,
+    `${G.turn} / ${G.phase} / ${G.hasActed}`);
+  ok("...with the move it just made now named as the one it may not repeat",
+    G.stutter && G.stutter.banned && G.stutter.banned.to === stTaken,
+    JSON.stringify(G.stutter && G.stutter.banned));
+  ok("...and the turn counter did not advance for a turn that was unmade",
+    G.history[G.history.length - 1].turnNo === G.turnNo);
+
+  ok("repeating it is refused",
+    !applyAction(1, { t: "move", from: stFrom, to: stTaken, kind: "step" }).ok);
+  ok("...and refusing it leaves the piece where it was",
+    !!G.board[stFrom] && !G.board[stTaken]);
+  ok("any other turn is allowed",
+    applyAction(1, { t: "move", from: stFrom, to: stOther, kind: "step" }).ok);
+  ok("...and the second attempt stands", !G.board[stFrom] && !!G.board[stOther]);
+  ok("...spending the card, so play returns to the opponent",
+    G.stutter === null && G.turn === 0, `${JSON.stringify(G.stutter)} / ${G.turn}`);
+
+  // "Take a different turn" cannot mean "lose the game". Down to a single
+  // legal move, the ban stops binding.
+  blank();
+  put(rc(9, 4), 0);                                   // so the game is not already won
+  put(rc(0, 1), 1);                                   // Violet's one and only piece
+  // Sealed rather than blocked by a piece: an enemy pawn on that square would
+  // hand this pawn a capture, which is a second move and defeats the fixture.
+  G.barriers.push(rc(1, 2));
+  G.turn = 1; G.phase = "declare";
+  G.players[1].fp = 0; G.players[1].hand = [];
+  G.players[1].noDraw = 9;                            // and drawing is off the table
+  G.stutter = { player: 1, banned: { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" } };
+  ok("the position really does leave exactly one move",
+    legalMovesFor(rc(0, 1)).length === 1 && legalMovesFor(rc(0, 1))[0].to === rc(1, 0),
+    JSON.stringify(legalMovesFor(rc(0, 1)).map((m) => m.to)));
+  ok("...so the ban lifts rather than sealing the game shut",
+    !stutterHasAlternative(1) && !stutterBans(1, { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" }));
+  ok("...and the referee lets it through",
+    applyAction(1, { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" }).ok);
+
+  // A turn that did nothing has nothing to unmake, and banning "do nothing"
+  // would rewind for ever.
+  blank();
+  put(rc(9, 4), 0); put(rc(2, 3), 1);
+  G.turn = 1; G.phase = "declare";
+  G.stutter = { player: 1, banned: null };
+  G.turnAction = null;
+  const stNoop = endTurn();
+  ok("a turn that did nothing spends the card instead of rewinding for ever",
+    G.stutter === null && stNoop.sameSeat === false && G.turn === 0,
+    `${JSON.stringify(G.stutter)} / ${stNoop.sameSeat} / ${G.turn}`);
+
+  // Chronos's Gaze truncates history in place and could have been cast during
+  // the very turn Stutter is trying to unmake.
+  blank();
+  put(rc(9, 4), 0); put(rc(2, 3), 1);
+  G.turn = 1; G.phase = "end";
+  G.stutter = { player: 1, banned: null };
+  G.turnAction = { t: "move", from: rc(2, 3), to: rc(3, 2), kind: "step" };
+  G.history = [];                                     // the moment has been unmade already
+  endTurn();
+  ok("with no snapshot to return to it fizzles rather than rewinding somebody else's turn",
+    G.stutter === null && G.turn === 0, `${JSON.stringify(G.stutter)} / ${G.turn}`);
+
+  // The machine does not end its turn through the referee, so the refusal in
+  // dispatchAction never binds it. rootMoves is the one place that does.
+  blank();
+  put(rc(9, 4), 0); put(rc(2, 3), 1); put(rc(2, 5), 1);
+  G.turn = 1; G.phase = "declare";
+  const stAll = turnMoves(1);
+  G.stutter = { player: 1, banned: { t: "move", from: rc(2, 3), to: rc(3, 2), kind: "step" } };
+  const stRoot = rootMoves(1);
+  ok("the machine's own move list drops the banned turn",
+    stRoot.length === stAll.length - 1
+      && !stRoot.some((m) => m.from === rc(2, 3) && m.to === rc(3, 2)),
+    `${stAll.length} → ${stRoot.length}`);
+  ok("...and the evaluator can see being stuttered as a cost",
+    (() => { const withBan = sideScore(1); G.stutter = null; return sideScore(1) > withBan; })());
+
+  /* Whether the machine will PAY for it. Both halves of the judgement are
+     asserted, because either one alone silently does nothing: without the gate
+     it would buy a stutter worth nothing, and without the bonus the flat score
+     term caps its value at STUTTER_DENIAL and it never clears the cast margin
+     however sharp the position. */
+  const stAIWas = { on: AI.on, side: AI.side, level: AI.level, fast: AI.fast, thinking: AI.thinking };
+
+  // A quiet position: several replies, all equally good. Denying one is free
+  // for the victim, so the card must not be bought.
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 1, "queen");
+  put(rc(1, 6), 1); put(rc(1, 8), 1);
+  put(rc(10, 5), 0); put(rc(10, 7), 0);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 10; G.players[0].hand = ["stutter"];
+  G.players[1].fp = 0; G.players[1].hand = [];
+  AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+  ok("nothing worth denying, so the machine is not even offered the card",
+    aiStutterGap() < STUTTER_DENIAL
+      && !aiSpellCandidates("declare").some((c) => c.id === "stutter"),
+    Math.round(aiStutterGap()));
+  ok("...and it keeps its Focus", !aiCastOnce("declare") && G.stutter === null);
+
+  // The same card against a position with exactly ONE turn worth taking: a
+  // hanging queen with a single escape, and other legal turns to fall back on
+  // so the ban still has something to bite.
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 1, "queen");                 // hanging...
+  put(rc(6, 3), 0);                          // ...to this pawn, which lands on f8
+  put(rc(4, 3), 1); put(rc(6, 5), 1);        // her own pawns seal every escape but f8
+  G.barriers.push(rc(7, 2));                 // and her counter-jump has nowhere to land
+  put(rc(1, 6), 1); put(rc(1, 8), 1);        // spare turns, so she is not down to one move
+  put(rc(10, 5), 0); put(rc(10, 7), 0);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 10; G.players[0].hand = ["stutter"];
+  G.players[1].fp = 0; G.players[1].hand = [];
+  AI.side = 0;
+  ok("the fixture really is sharp — one saving turn, and the rest legal",
+    capturersFor(1).length === 0 && turnMoves(1).length > 2 && aiStutterGap() > 200,
+    `${turnMoves(1).length} moves, gap ${Math.round(aiStutterGap())}`);
+  const stCand = aiSpellCandidates("declare").find((c) => c.id === "stutter");
+  ok("...so the card is offered, carrying what the position is worth",
+    !!stCand && stCand.bonus > 100, stCand && Math.round(stCand.bonus));
+  ok("...and the machine pays for it",
+    aiCastOnce("declare") && G.stutter && G.stutter.player === 1,
+    JSON.stringify(G.stutter));
+
+  AI.on = stAIWas.on; AI.side = stAIWas.side; AI.level = stAIWas.level;
+  AI.fast = stAIWas.fast; AI.thinking = stAIWas.thinking;
+
+  group("Hollow");
+  blank(0, { mode: "ai" });
+  put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(0, 1), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 9; G.players[0].hand = ["hollow"];
+  ok("a pawn with a jump available is still a legal target",
+    hollowTargets(0).includes(rc(7, 4)));
+  castSpell("hollow", 0, { target: rc(7, 4) });
+  ok("the pawn is marked", G.board[rc(7, 4)].hollow === true);
+  ok("...and can no longer capture", captureMoves(rc(7, 4)).length === 0);
+  ok("...so the mandatory-capture rule stops billing it", capturersFor(0).length === 0);
+  ok("...but it can still move", simpleMoves(rc(7, 4)).length > 0);
+  ok("...and the line naming it is private to its owner",
+    G.log.filter((l) => /decoy/i.test(l.text)).every((l) => l.only === 0));
+  ok("...while the cast itself is public",
+    G.log.some((l) => /casts Hollow/.test(l.text) && l.only == null));
+
+  /* §3c. The machine's contract, and the one that matters: it must not be
+     able to price a board with a decoy differently from a board without one.
+     A term in sideScore would break this, because evaluate() calls sideScore
+     for BOTH sides — so pricing your own decoy prices your opponent's too. */
+  blank(0, { mode: "ai" });
+  put(rc(7, 4), 0); put(rc(3, 2), 0); put(rc(6, 5), 1); put(rc(2, 3), 1);
+  const hPlain = [sideScore(0), sideScore(1)];
+  G.board[rc(7, 4)].hollow = true;
+  const hDecoy = [sideScore(0), sideScore(1)];
+  ok("the evaluator cannot tell a decoy from a pawn — its own side",
+    hPlain[0] === hDecoy[0], `${hPlain[0]} vs ${hDecoy[0]}`);
+  ok("...nor the other one, which is the half that would leak",
+    hPlain[1] === hDecoy[1], `${hPlain[1]} vs ${hDecoy[1]}`);
+  G.board[rc(6, 5)].hollow = true;
+  ok("...and an ENEMY decoy is invisible to it too",
+    sideScore(0) === hPlain[0] && sideScore(1) === hPlain[1]);
+
+  // The machine still has to be able to CAST it, which is why the value rides
+  // on the candidate rather than on the evaluator.
+  {
+    const hWas = { on: AI.on, side: AI.side, fast: AI.fast, level: AI.level };
+    blank(0, { mode: "ai" });
+    // A pawn standing next to an enemy but with its jump blocked: exactly the
+    // pawn the finder is supposed to pick, since hollowing out a real threat
+    // would throw the threat away.
+    put(rc(7, 4), 0); put(rc(9, 0), 0);
+    put(rc(6, 5), 1); put(rc(5, 6), 1); put(rc(0, 1), 1);
+    G.turn = 0; G.phase = "declare";
+    G.players[0].fp = 9; G.players[0].hand = ["hollow"];
+    AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+    const hCands = aiSpellCandidates("declare").filter((c) => c.id === "hollow");
+    ok("the machine is offered a decoy, and prefers a pawn with no jump to give up",
+      hCands.length > 0 && hCands.every((c) => captureMoves(c.payload.target).length === 0),
+      hCands.map((c) => sq(c.payload.target)).join(","));
+    ok("...carrying the worth the evaluator cannot see",
+      hCands.every((c) => c.bonus >= HOLLOW_BLUFF));
+    ok("...and it pays for one", aiCastOnce("declare") && countHollow(0) === 1, countHollow(0));
+    AI.on = hWas.on; AI.side = hWas.side; AI.fast = hWas.fast; AI.level = hWas.level;
+  }
+
+  group("Quantum Pawn");
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 0); put(rc(1, 6), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 9; G.players[0].hand = ["quantum"];
+  ok("an untouched pawn with an empty square beside it can be split",
+    quantumTargets(0).includes(rc(5, 4)));
+  const qSpot = quantumSpots(rc(5, 4))[0];
+  castSpell("quantum", 0, { target: rc(5, 4), spot: qSpot });
+  const qPair = quantumPair(G.board[rc(5, 4)].quantum);
+  ok("...leaving two bodies linked by one id", qPair.length === 2, qPair.length);
+  ok("...exactly one of which is real",
+    qPair.filter((i) => G.board[i].quantumReal).length === 1);
+  ok("...neither able to capture", qPair.every((i) => !canCapture(G.board[i])));
+  ok("...with the square named privately to its owner",
+    G.log.filter((l) => /real pawn is/.test(l.text)).every((l) => l.only === 0));
+  ok("...while the split itself is public",
+    G.log.some((l) => /stands on both/.test(l.text) && l.only == null));
+
+  /* The blindness contract for this card is NOT "a pair scores like a pawn" —
+     the pair is plainly visible and the machine is entitled to count it. It is
+     that the machine cannot tell WHICH half is the real one. */
+  blank(0, { mode: "ai" });
+  put(rc(5, 4), 0); put(rc(4, 3), 0); put(rc(1, 6), 1); put(rc(1, 8), 1);
+  G.board[rc(5, 4)].quantum = 9; G.board[rc(4, 3)].quantum = 9;
+  G.board[rc(5, 4)].quantumReal = true; G.board[rc(4, 3)].quantumReal = false;
+  const qA = [sideScore(0), sideScore(1)];
+  G.board[rc(5, 4)].quantumReal = false; G.board[rc(4, 3)].quantumReal = true;
+  const qB = [sideScore(0), sideScore(1)];
+  ok("the evaluator cannot tell which half of a superposition is real",
+    qA[0] === qB[0] && qA[1] === qB[1], `${qA} vs ${qB}`);
+  G.board[rc(5, 4)].quantum = 0; G.board[rc(4, 3)].quantum = 0;
+  ok("...but it does discount the pair, which is public and fair to read",
+    sideScore(0) > qA[0], `${sideScore(0)} vs ${qA[0]}`);
+
+  {
+    const qWas = { on: AI.on, side: AI.side, fast: AI.fast, level: AI.level };
+    blank(0, { mode: "ai" });
+    put(rc(5, 4), 0); put(rc(9, 0), 0); put(rc(1, 6), 1); put(rc(0, 1), 1);
+    G.turn = 0; G.phase = "declare";
+    G.players[0].fp = 10; G.players[0].hand = ["quantum"];
+    AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+    const qC = aiSpellCandidates("declare").filter((c) => c.id === "quantum");
+    ok("the machine is offered the gamble, carrying its own worth",
+      qC.length > 0 && qC.every((c) => c.bonus === QUANTUM_GAMBIT), qC.length);
+    ok("...and takes it", aiCastOnce("declare")
+      && G.board.filter((p) => p && p.quantum).length === 2);
+    AI.on = qWas.on; AI.side = qWas.side; AI.fast = qWas.fast; AI.level = qWas.level;
+  }
+
+  group("Temporal Twin");
+  blank(0, { mode: "local" });
+  put(rc(5, 4), 0); put(rc(1, 6), 1); put(rc(1, 8), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 9; G.players[0].hand = ["twin"];
+  const tSpot = quantumSpots(rc(5, 4))[0];
+  castSpell("twin", 0, { target: rc(5, 4), spot: tSpot });
+  ok("both bodies are real pieces", countPieces(0) === 2, countPieces(0));
+  ok("...sharing one link", G.board[rc(5, 4)].twin === G.board[tSpot].twin);
+  ok("...and nothing about it is private",
+    G.log.filter((l) => /stands on both/.test(l.text)).every((l) => l.only == null));
+
+  // The machine does not end its turn through the referee, so aiFinishMove is
+  // the only thing that will ever take the second movement for it.
+  {
+    const tWas = { on: AI.on, side: AI.side, fast: AI.fast, level: AI.level };
+    AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+    const tA = rc(5, 4);
+    const tMv = legalMovesFor(tA)[0];
+    performMove(tA, tMv);
+    ok("after one body moves, the other owes a move", G.twinStep != null, G.twinStep);
+    aiFinishMove();
+    ok("...and the machine takes it rather than walking away",
+      G.twinStep === null, G.twinStep);
+    ok("...leaving both bodies still on the board", countPieces(0) === 2, countPieces(0));
+
+    blank(0, { mode: "local" });
+    put(rc(5, 4), 0); put(rc(9, 0), 0); put(rc(1, 6), 1); put(rc(0, 1), 1);
+    G.turn = 0; G.phase = "declare";
+    G.players[0].fp = 10; G.players[0].hand = ["twin"];
+    AI.side = 0;
+    const tC = aiSpellCandidates("declare").filter((c) => c.id === "twin");
+    ok("the machine is offered the pairing, carrying the tempo it cannot search",
+      tC.length > 0 && tC.every((c) => c.bonus === TWIN_TEMPO), tC.length);
+    ok("...and takes it", aiCastOnce("declare")
+      && G.board.filter((p) => p && p.twin).length === 2);
+    AI.on = tWas.on; AI.side = tWas.side; AI.fast = tWas.fast; AI.level = tWas.level;
+  }
+
+  // The evaluator may read the pairing freely — it is public — but should
+  // price the shared life against it.
+  blank(0, { mode: "local" });
+  put(rc(5, 4), 0); put(rc(4, 3), 0); put(rc(1, 6), 1);
+  const tPlain = sideScore(0);
+  G.board[rc(5, 4)].twin = 8; G.board[rc(4, 3)].twin = 8;
+  ok("a twinned pair is worth less than two loose pawns, because one jump takes both",
+    sideScore(0) < tPlain, `${sideScore(0)} vs ${tPlain}`);
+
   group("Chronos's Gaze");
   blank(0);
   put(rc(6, 5), 0); put(rc(9, 2), 0); put(rc(2, 5), 1);
@@ -3923,6 +4567,99 @@ function runTests() {
   NET.on = seatWas.net; NET.seat = seatWas.seat; AI.on = seatWas.ai; AI.side = seatWas.side;
   UI.revealed = seatWas.revealed; G.turn = seatWas.turn;
   buildBoard();
+
+  /* ── concealment ───────────────────────────────────────────────────────
+     viewFor() covers the wire, and test/engine.test.js §9 proves it. What it
+     cannot cover is the game against the MACHINE, where there is no wire: the
+     browser holds the real G, so the client has to do its own filtering or
+     the machine's secrets render straight onto the screen of the player they
+     are being kept from. These are that second copy.
+     ─────────────────────────────────────────────────────────────────── */
+  group("Concealment on this device");
+  {
+    const cWas = { net: NET.on, seat: NET.seat, ai: AI.on, side: AI.side, turn: G.turn };
+    blank(0, { mode: "ai" });
+    // Playing Gold against the machine: viewSeat() is 0, and seat 1 is the
+    // machine, whose private lines and effects must not reach this screen.
+    NET.on = false; AI.on = true; AI.side = 1; G.turn = 0;
+    ok("vs the machine the device speaks for one seat only", viewSeat() === 0, viewSeat());
+
+    log("a line for everyone", "sys");
+    log("a line only Gold may read", "rule", 0);
+    log("a line only the machine may read", "rule", 1);
+    const cSeen = visibleLog().map((l) => l.text);
+    ok("the log keeps the public lines", cSeen.includes("a line for everyone"));
+    ok("...and your own private ones", cSeen.includes("a line only Gold may read"));
+    ok("...and drops the machine's", !cSeen.includes("a line only the machine may read"));
+
+    // The transcript, the second channel. FX.pump is what drains G.fx onto the
+    // board, so the filter has to hold there rather than in the recipes.
+    const cEnabled = FX.enabled, cMode = FX.mode, cRun = FX.run, cQueued = [];
+    FX.reset();
+    FX.mode = "normal";
+    FX.enabled = () => true;
+    FX.run = () => {};                       // never actually paint in a test
+    G.fx = [
+      { n: 1, type: "spell", id: "veil", caster: 1 },
+      { n: 2, type: "hollow", at: rc(5, 4), only: 1 },
+    ];
+    FX.pump();
+    for (const e of FX.queue) cQueued.push(e.type);
+    ok("the transcript queues the machine's public effect", cQueued.includes("spell"));
+    ok("...and never queues the one addressed to the machine alone",
+      !cQueued.includes("hollow"), cQueued.join(","));
+    ok("...while the high-water mark still clears the whole batch, so a withheld effect cannot resurface",
+      FX.seen === 2, FX.seen);
+
+    /* And the sandbox, which redacts nothing — one person is driving both
+       chairs, so a line or a marker withheld from "the other player" would
+       simply never be seen by anyone. This is the regression that shipped
+       first: the concealment cards were gated out of the one mode built for
+       trying cards out. */
+    // beginTurn is what stocks the sandbox — devStockHands runs from there,
+    // not from newGame. And renderBoard rather than render(): the suite stubs
+    // render() out at the top so the engine can be driven headlessly.
+    G = newGame(0, 42, { dev: true, mode: "local" });
+    UI = freshUI();
+    NET.on = false; AI.on = false;
+    G.turnNo = 0;
+    beginTurn(0);
+    ok("the workbench holds every card there is",
+      G.players[0].hand.length === SPELL_IDS.length, G.players[0].hand.length);
+    for (const cId of ["stutter", "pressure", "hollow", "quantum", "twin"])
+      ok(`...including ${SPELLS[cId].name}`, G.players[0].hand.includes(cId));
+
+    log("a sandbox line for one seat only", "rule", 0);
+    G.turn = 1;
+    ok("...and hides no log line from the other chair",
+      visibleLog().some((l) => l.text === "a sandbox line for one seat only"));
+
+    G.turn = 0;
+    const cH = hollowTargets(0)[0];
+    castSpell("hollow", 0, { target: cH });
+    const cMarks = () => document.querySelectorAll("#board .piece.hollow").length;
+    renderBoard();
+    const cOwnerSees = cMarks();
+    G.turn = 1; renderBoard();
+    ok("...nor a decoy marker, from either chair",
+      cOwnerSees === 1 && cMarks() === 1, `${cOwnerSees} then ${cMarks()}`);
+
+    // The same cast in a real hot-seat game must still be hidden. If this ever
+    // starts matching the sandbox, the exemption has leaked into real play.
+    G = newGame(0, 42, { mode: "local" });
+    UI = freshUI();
+    G.players[0].fp = 9; G.players[0].hand = ["hollow"]; G.phase = "declare"; G.turn = 0;
+    castSpell("hollow", 0, { target: hollowTargets(0)[0] });
+    renderBoard();
+    const cLiveOwner = cMarks();
+    G.turn = 1; renderBoard();
+    ok("outside the sandbox the decoy is still the owner's alone",
+      cLiveOwner === 1 && cMarks() === 0, `${cLiveOwner} then ${cMarks()}`);
+
+    FX.enabled = cEnabled; FX.mode = cMode; FX.run = cRun;
+    FX.reset();
+    NET.on = cWas.net; NET.seat = cWas.seat; AI.on = cWas.ai; AI.side = cWas.side; G.turn = cWas.turn;
+  }
 
   /* ── the machine ───────────────────────────────────────────────────── */
   group("The machine — search");
