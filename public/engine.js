@@ -165,6 +165,14 @@ const FORMS = {
  */
 const RARITY = { common: 8, uncommon: 4, rare: 2, legendary: 1 };
 
+/**
+ * How long a turn under Pressure gets. Named here, in the rules, rather than
+ * in the server that counts it down or the interface that draws it: all three
+ * have to agree, and a card whose printed text and actual clock disagreed
+ * would be the worst kind of bug to find mid-game.
+ */
+const PRESSURE_SECONDS = 15;
+
 const SPELLS = {
   hopscotch: {
     name: "Hopscotch", cost: 3, rarity: "uncommon", when: "end", group: "Movement",
@@ -322,6 +330,14 @@ const SPELLS = {
     penalty: "The strain costs you 3 more Focus on top of the card, and you may not draw next turn.",
     timing: "Either phase, on your own turn.",
   },
+  pressure: {
+    name: "Pressure", cost: 3, rarity: "uncommon", group: "Game Altering", when: "any",
+    onlineOnly: true,
+    flavor: "Decide. Now.",
+    text: `Your opponent's next turn is played against a ${PRESSURE_SECONDS}-second clock. If it runs out, the referee takes a turn for them at random.`,
+    penalty: "Your own following turn is played against the same clock.",
+    timing: "Either phase, on your own turn. Online only — it is the server that holds the clock.",
+  },
 };
 const SPELL_IDS = Object.keys(SPELLS);
 
@@ -367,6 +383,7 @@ function newPlayerState() {
     noTransform: 0,     // turns during which no transformation may be made
     costCap: 0,         // turns during which spells above `costCapMax` are barred
     costCapMax: 1,
+    timed: 0,           // Pressure — turns played against the server's clock
     extraTurns: 0,      // Temporal Cascade
     lostQueens: [],     // captured queens, revivable by Martyr's Pledge
     martyrBanned: false,// a revived queen died before a new one was crowned
@@ -472,6 +489,7 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     mustCapture: null,      // Tactician — { player } owes a capture this turn
     stutter: null,          // Stutter — { player, banned } a turn owed a second attempt
     turnAction: null,       // what this turn has been spent on — see noteTurnAction
+    timeoutSeq: 0,          // monotonic; seeds the referee's turn when a clock runs out
     setAside: [],           // Phaser cards parked while a Phaser lives
     removed: [],            // Temporal Cascade after use
     log: [],
@@ -1087,6 +1105,9 @@ function spellBlocker(id, caster = G.turn) {
     case "stutter":
       if (G.stutter) return "A turn is already waiting to be unmade.";
       break;
+    case "pressure":
+      if (G.players[1 - caster].timed > 0) return "Your opponent is already on the clock.";
+      break;
   }
   return null;
 }
@@ -1324,7 +1345,11 @@ function tickEffects(obj, keys) {
 }
 
 const PIECE_EFFECTS  = ["frozen", "noCapture"];
-const PLAYER_EFFECTS = ["noSpells", "noDraw", "noTransform", "costCap"];
+/* `timed` rides the same machinery as every other lockout — it is a counter
+   that ticks down at the end of the affected player's turn, which is exactly
+   what "your next turn is timed" means. The server reads it to decide whether
+   to run a clock; the engine itself never looks at a wall clock. */
+const PLAYER_EFFECTS = ["noSpells", "noDraw", "noTransform", "costCap", "timed"];
 
 /** Freeze a piece for `turns` of its owner's turns, respecting who is acting. */
 function freezePiece(p, turns, note) {
@@ -2369,6 +2394,19 @@ function castSpell(id, caster, payload = {}) {
       log("And you may not draw next turn.", "rule");
       break;
     }
+
+    case "pressure": {
+      const victim = 1 - caster;
+      // Their turn has not started, so it lands now; ours has, so it is parked
+      // and promoted when this turn ends. That is the whole of the off-by-one
+      // the two setters exist to keep honest — see the STATUS ENGINE note.
+      effNow(G.players[victim], "timed", 1);
+      effNext(P, "timed", 1);
+      fx("pressure", { caster, victim });
+      log(`Pressure — ${PLAYERS[victim].name}'s next turn is on a ${PRESSURE_SECONDS}-second clock.`, "big");
+      log(`It cuts both ways: ${PLAYERS[caster].name}'s following turn is timed too.`, "rule");
+      break;
+    }
   }
 
   checkGameOver();
@@ -2535,6 +2573,109 @@ function performMindControlMove(from, mv) {
   promoteIfDue(mv.to);
   G.mindControl = null;
   G.lastMove = { from, to: mv.to };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WHEN THE CLOCK RUNS OUT
+
+   Pressure's promise is that a turn WILL be taken, so this has to be able to
+   take one from any state a player can walk away from — not just from a clean
+   Declare phase. A half-finished chain-jump, a seized enemy piece, an owed
+   forfeit or discard all block a turn from ending, and a clock that could
+   leave one of them standing would wedge the room rather than pressuring
+   anybody.
+
+   It ends the turn directly rather than through dispatchAction, the same way
+   the machine does. That is deliberate: the referee is not a player taking an
+   action, it is the rules closing a turn nobody closed.
+
+   The roll is seeded off the game seed and a monotonic counter, exactly as
+   drawSpell's is. Math.random() would be tempting here — this only ever runs
+   on the server, outside any search — but a game whose replay diverges from
+   what was played is not worth the two characters saved.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function playRandomTurn(seat) {
+  if (G.over || G.turn !== seat) return false;
+  const rng = mulberry32((G.seed + G.turnNo * 6151 + G.timeoutSeq++) | 0);
+  const pick = (a) => a[Math.min(a.length - 1, (rng() * a.length) | 0)];
+  let guard = 0;
+
+  log(`${PLAYERS[seat].name} ran out of time — the referee takes the turn.`, "big");
+
+  // Obligations first. Each of these refuses to let a turn end, so none of
+  // them may survive this function.
+  if (G.mindControl) {
+    const from = G.mindControl.piece;
+    const steps = simpleMoves(from).filter((m) => m.kind === "step");
+    if (steps.length) performMindControlMove(from, pick(steps));
+    else G.mindControl = null;
+  }
+  if (G.owedSacrifice && G.owedSacrifice.player === seat) {
+    removePiece(pick(G.owedSacrifice.candidates), "is sacrificed for the skipped capture", "sacrifice");
+    G.owedSacrifice = null;
+  }
+  while (G.owedDiscard && G.owedDiscard.player === seat && guard++ < 12) {
+    const hand = G.players[seat].hand;
+    if (!hand.length) { G.owedDiscard = null; break; }
+    discardCards(seat, [pick(hand)], G.owedDiscard.why);
+    if (--G.owedDiscard.n <= 0) G.owedDiscard = null;
+  }
+
+  /** Finish anything a movement left owing — the chain, then the Herald step. */
+  const settle = () => {
+    while (G.chain != null && !G.over && guard++ < 24) {
+      const caps = captureMoves(G.chain);
+      if (!caps.length) { G.chain = null; G.phase = "end"; break; }
+      performMove(G.chain, pick(caps));
+    }
+    if (G.heraldBonus != null && !G.over) {
+      const steps = legalHeraldSteps(G.heraldBonus);
+      if (steps.length) performMove(G.heraldBonus, pick(steps));
+      else { G.heraldBonus = null; G.phase = "end"; }
+    }
+  };
+
+  settle();
+
+  // Then a movement of its own, if the turn has not already had one. Captures
+  // are taken from the mandatory pool, so the referee never hands the player a
+  // forfeit they did not choose. A Stutter's ban is honoured for the same
+  // reason rootMoves honours it: this path does not go through the refusal in
+  // dispatchAction, so the rule has to be applied where the choice is made.
+  if (!G.over && !G.hasActed && G.phase === "declare" && G.chain == null && G.heraldBonus == null) {
+    const allowed = (from, mv) => !stutterBans(seat, { t: "move", from, to: mv.to, kind: mv.kind });
+    const capturers = capturersFor(seat);
+    const pool = [];
+    if (capturers.length) {
+      for (const i of capturers)
+        for (const mv of captureMoves(i)) if (allowed(i, mv)) pool.push({ from: i, mv });
+    } else {
+      for (let i = 0; i < CELLS; i++) {
+        if (!isAlly(G.board[i], seat)) continue;
+        for (const mv of simpleMoves(i)) if (allowed(i, mv)) pool.push({ from: i, mv });
+      }
+    }
+    if (pool.length) {
+      const chosen = pick(pool);
+      performMove(chosen.from, chosen.mv);
+      settle();
+    }
+  }
+
+  // A Tactician debt outlives the capture that half-paid it while further
+  // captures remain, and endTurn below does not check it — the same gap
+  // aiPayTacticianDebt exists to close for the machine.
+  while (tacticianDebt(seat) && !G.over && guard++ < 12) {
+    const from = capturersFor(seat)[0];
+    const caps = captureMoves(from);
+    if (!caps.length) break;
+    performMove(from, caps[0]);
+    settle();
+  }
+
+  if (!G.over) endTurn();
+  return true;
 }
 
 /* ── undo ───────────────────────────────────────────────────────────────── */
@@ -2974,7 +3115,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     // constants
     N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY, MODES,
-    SECRET_PIECE_FIELDS,
+    SECRET_PIECE_FIELDS, PRESSURE_SECONDS,
     // geometry
     rc, rowOf, colOf, isDark, sq, mirrorOf,
     // lifecycle
@@ -2993,6 +3134,6 @@ if (typeof module !== "undefined" && module.exports) {
     juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
     cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,
     echoTarget, echoTargets, chokepointTarget, tacticianDebt, anchoredAgainst,
-    stutterBans, stutterHasAlternative, sameTurnAction,
+    stutterBans, stutterHasAlternative, sameTurnAction, playRandomTurn,
   };
 }

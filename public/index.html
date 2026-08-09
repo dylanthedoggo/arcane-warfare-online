@@ -594,6 +594,13 @@ const NET = {
   room: null,          // four-letter code
   token: null,         // your claim on the seat, so a refresh gets it back
   oppConnected: false,
+  // Pressure's clock. The server owns it; these two are only what it last
+  // said, plus the local moment we heard — so the countdown drawn here ticks
+  // smoothly without ever becoming a second source of truth about the game.
+  clockMs: null,       // ms remaining when the last state arrived, or null
+  clockSeat: null,     // whose turn is being counted
+  clockAt: 0,          // performance.now() when that number was received
+  clockTick: null,     // the interval redrawing it
 };
 
 const $ = (id) => document.getElementById(id);
@@ -710,6 +717,13 @@ function renderTopbar() {
   else if (G.owedSacrifice) phase = "Declined capture — a piece is forfeit";
   else if (G.owedDiscard) phase = "Discard owed";
   else if (NET.on && !NET.oppConnected) phase = "Opponent disconnected";
+  // Pressure. Announced on both screens, because a turn being timed changes
+  // how the player NOT on the clock should be thinking too.
+  const left = NET.on ? netClockLeft() : null;
+  if (left != null)
+    phase = NET.clockSeat === NET.seat
+      ? `Under Pressure — ${left}s to act`
+      : `${PLAYERS[NET.clockSeat].name} is under Pressure — ${left}s`;
   $("phasechip").textContent = phase;
 }
 
@@ -1488,6 +1502,11 @@ function beginCast(id, caster) {
       return;
     }
 
+    case "pressure":
+      confirmFirst(`${S.text}<br><br>Your own next turn is timed too — this is a card you have to be ready for.`,
+        () => finish({}));
+      return;
+
     case "stutter":
       // No target: it is aimed at a turn, not at a square. The real price is
       // worth naming out loud, because 4 FP on the card and 3 more in strain
@@ -1760,6 +1779,29 @@ const viewSeat = () => (NET.on ? NET.seat : AI.on ? 1 - AI.side : G.turn);
 
 const SESSION_KEY = "caw.session";
 
+/**
+ * Take the server's word for how long is left, and redraw locally until the
+ * next state arrives.
+ *
+ * The interval only repaints; it never decides anything. Every turn the clock
+ * actually decides is decided on the server, which is the only place that can
+ * be trusted with it — a client whose tab was throttled, or whose own clock
+ * runs fast, must not be able to forfeit somebody's turn.
+ */
+function netSetClock(ms, seat) {
+  NET.clockMs = typeof ms === "number" ? ms : null;
+  NET.clockSeat = typeof seat === "number" ? seat : null;
+  NET.clockAt = performance.now();
+  if (NET.clockTick) { clearInterval(NET.clockTick); NET.clockTick = null; }
+  if (NET.clockMs != null) NET.clockTick = setInterval(renderTopbar, 250);
+}
+
+/** Seconds left on the clock as this device sees it, or null. */
+function netClockLeft() {
+  if (NET.clockMs == null) return null;
+  return Math.max(0, Math.ceil((NET.clockMs - (performance.now() - NET.clockAt)) / 1000));
+}
+
 function netSocket() { return NET.socket; }
 function netSend(action) {
   if (!NET.socket) return;
@@ -1784,6 +1826,7 @@ function loadSocketIO() {
 function netLeave() {
   if (NET.socket) { try { NET.socket.emit("leave"); NET.socket.disconnect(); } catch (e) {} }
   NET.on = false; NET.socket = null; NET.room = null; NET.oppConnected = false;
+  netSetClock(null, null);          // and stop the countdown redrawing forever
   try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
 }
 
@@ -1808,6 +1851,7 @@ function netAttach(socket) {
   socket.on("state", (view) => {
     const hadTargeting = !!(UI && UI.targeting);
     NET.oppConnected = !!view.oppConnected;
+    netSetClock(view.clockMs, view.clockSeat);
     G = view;
     if (!UI) UI = freshUI();
     UI.revealed = true;
@@ -1816,9 +1860,10 @@ function netAttach(socket) {
     afterAction();
   });
 
-  socket.on("presence", ({ oppConnected }) => {
+  socket.on("presence", ({ oppConnected, clockMs, clockSeat }) => {
     const was = NET.oppConnected;
     NET.oppConnected = !!oppConnected;
+    netSetClock(clockMs, clockSeat);
     if (was !== NET.oppConnected)
       toast(NET.oppConnected ? "Your opponent is here." : "Your opponent dropped — waiting for them.",
         NET.oppConnected ? "good" : "bad");
@@ -3690,7 +3735,7 @@ function runTests() {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
     tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
-    stutter: 4,
+    stutter: 4, pressure: 3,
   };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));

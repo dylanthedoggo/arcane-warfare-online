@@ -627,6 +627,157 @@ it("will not stack a second Stutter on a pending one", () => {
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
+   8c. THE CLOCK CANNOT WEDGE A ROOM
+
+   Pressure is the only card that makes the server act on its own, and
+   playRandomTurn is what it calls. Its contract is narrow and absolute: from
+   ANY state a player can walk away from, it takes a turn and hands over.
+
+   That matters more than which move it picks. A player can abandon a turn
+   mid-chain-jump, holding a seized enemy piece, or owing a forfeit — and every
+   one of those refuses to let a turn end. If the clock could leave one
+   standing, the room would be stuck for good with no player able to fix it.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("the clock always finds a turn to take");
+
+const { playRandomTurn } = engine;
+
+/** Build a board from scratch with `pieces` = [index, owner, rank?] triples. */
+function staged(pieces, first = 0) {
+  const g = newGame(first, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(first);
+  const live = getG();
+  live.board = new Array(live.board.length).fill(null);
+  for (const [i, owner, rank] of pieces) {
+    const p = { id: live.seq++, owner, rank: rank || "pawn", form: null, armor: false,
+                captures: 0, frozen: 0, noCapture: 0, veilBy: null, eyeMark: 0 };
+    live.board[i] = p;
+  }
+  live.turn = first;
+  live.phase = "declare";
+  live.hasActed = false;
+  return live;
+}
+
+it("takes an ordinary turn and hands over", () => {
+  const g = staged([[rc(9, 4), 0], [rc(2, 3), 1]]);
+  equal(playRandomTurn(0), true, "it reports that it acted");
+  equal(getG().turn, 1, "and play moved on");
+});
+
+it("takes a capture rather than forfeiting a piece to the mandatory-capture rule", () => {
+  // Walking past an available jump costs you the piece that could have taken
+  // it. The referee must never hand a player that bill.
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(9, 0), 0], [rc(0, 1), 1]]);
+  playRandomTurn(0);
+  const after = getG();
+  assert(!after.board[rc(6, 5)], "the jump was taken");
+  equal(after.board[rc(9, 0)] ? 1 : 0, 1, "and no piece of ours was forfeited");
+});
+
+it("finishes a chain-jump somebody walked away from", () => {
+  const g = staged([[rc(7, 4), 0], [rc(6, 5), 1], [rc(4, 7), 1], [rc(0, 1), 1]]);
+  load(g);
+  // Take the first hop by hand, leaving the chain lock set — exactly the state
+  // a player who closed the tab mid-jump leaves behind.
+  applyAction(0, { t: "move", from: rc(7, 4), to: rc(5, 6), kind: "capture" });
+  assert(getG().chain != null, "the fixture really does leave a chain outstanding");
+  playRandomTurn(0);
+  equal(getG().chain, null, "the chain was finished, not abandoned");
+  equal(getG().turn, 1, "and the turn ended");
+});
+
+it("discharges an owed discard instead of leaving the turn unclosable", () => {
+  const g = staged([[rc(9, 4), 0], [rc(2, 3), 1]]);
+  getG().players[0].hand = ["evasive", "mirror"];
+  getG().owedDiscard = { player: 0, n: 1, why: "test" };
+  playRandomTurn(0);
+  equal(getG().owedDiscard, null, "the debt is gone");
+  equal(getG().players[0].hand.length, 1, "and a card actually left the hand");
+  equal(getG().turn, 1);
+});
+
+it("moves a seized piece rather than holding it for ever", () => {
+  const g = staged([[rc(9, 4), 0], [rc(2, 3), 1], [rc(0, 5), 1]]);
+  getG().mindControl = { piece: rc(2, 3) };
+  playRandomTurn(0);
+  equal(getG().mindControl, null, "Mind Control was resolved");
+  equal(getG().turn, 1);
+});
+
+it("hands over even from a position with nothing to do at all", () => {
+  // Both pawns sealed in by barriers: no move, no card, no draw.
+  const g = staged([[rc(0, 1), 1], [rc(9, 4), 0]], 1);
+  const live = getG();
+  live.barriers.push(rc(1, 0), rc(1, 2));
+  live.players[1].hand = [];
+  live.players[1].noDraw = 9;
+  playRandomTurn(1);
+  assert(getG().turn === 0 || getG().over, "the turn passed, or the game ended");
+});
+
+it("gives the same turn from the same state, so a replay does not diverge", () => {
+  const a = staged([[rc(9, 4), 0], [rc(9, 6), 0], [rc(9, 8), 0], [rc(2, 3), 1]]);
+  playRandomTurn(0);
+  const first = getG().board.map((p) => (p ? p.owner : ".")).join("");
+  const b = staged([[rc(9, 4), 0], [rc(9, 6), 0], [rc(9, 8), 0], [rc(2, 3), 1]]);
+  playRandomTurn(0);
+  equal(getG().board.map((p) => (p ? p.owner : ".")).join(""), first,
+    "a seeded roll, not Math.random() — the same game must replay the same way");
+});
+
+it("respects a Stutter's ban rather than replaying the unmade turn", () => {
+  const g = staged([[rc(9, 4), 0], [rc(9, 6), 0], [rc(2, 3), 1]]);
+  const live = getG();
+  live.stutter = { player: 0, banned: { t: "move", from: rc(9, 4), to: rc(8, 3), kind: "step" } };
+  playRandomTurn(0);
+  const after = getG();
+  assert(!(after.board[rc(8, 3)] && !after.board[rc(9, 4)]),
+    "the referee must not take the one turn the rules just forbade");
+});
+
+/* ── the card itself ──────────────────────────────────────────────────── */
+
+describe("Pressure is online-only and puts both players on the clock");
+
+it("is undrawable anywhere the server is not holding the clock", () => {
+  for (const mode of ["local", "ai"])
+    assert(!engine.modeSpellIds(newGame(0, SEED, { mode })).includes("pressure"),
+      `a card that needs a server clock cannot be dealt in ${mode}`);
+  assert(engine.modeSpellIds(newGame(0, SEED, { mode: "online" })).includes("pressure"));
+});
+
+it("times the opponent's next turn and the caster's turn after it", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  const live = getG();
+  live.players[0].hand = ["pressure"];
+  live.players[0].fp = 9;
+  allowed(applyAction(0, { t: "cast", id: "pressure", payload: {} }));
+
+  const after = getG();
+  equal(after.players[1].timed, 1, "their turn starts on the clock immediately");
+  equal(after.players[0].p_timed, 1, "and ours is parked until this turn ends");
+  equal(after.players[0].timed, 0, "the turn being played now is not retroactively timed");
+});
+
+it("will not stack a second clock on a player already under one", () => {
+  const g = newGame(0, SEED, { mode: "online" });
+  load(g);
+  g.turnNo = 0;
+  beginTurn(0);
+  getG().players[0].hand = ["pressure"];
+  getG().players[0].fp = 9;
+  getG().players[1].timed = 1;
+  refused(applyAction(0, { t: "cast", id: "pressure", payload: {} }), "already on the clock");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
    9. WHAT CROSSES THE WIRE
 
    Refusing illegal actions is only half the referee's job. The other half is

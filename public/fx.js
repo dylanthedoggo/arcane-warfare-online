@@ -888,6 +888,7 @@ const FX_HOLD = {
   // Arming a Stutter is a promise; the rewind is the board being taken back.
   // The second beat is the long one for the same reason Chronos's is.
   stutter:     (e) => (e.phase === "rewind" ? 1100 : 620),
+  pressure:    () => 800,
 };
 
 FX.holdOf = function (e) {
@@ -2081,6 +2082,33 @@ FX_PLAY.stutter = function (e) {
     fxShockwave(mid, FX_C.time, 800, { count: 2 }),
     fxGlyph(mid, "⟲", FX_C.time, 620, { size: .7 }),
   ])));
+  return Promise.all(out);
+};
+
+/**
+ * Pressure. The board closes in from both edges at once.
+ *
+ * Deliberately not a clock face — Chronos already owns that image, and this is
+ * not about time passing but about room running out. The countdown itself is
+ * drawn in the top bar, where a player under pressure is already looking.
+ */
+FX_PLAY.pressure = function (e) {
+  const b = fxBoardRect();
+  const out = [
+    fxBanner(SPELLS.pressure.name, SPELLS.pressure.flavor, FX_OWNER(e.caster), 1200),
+    fxShake(7, 420),
+  ];
+  for (const side of [0, 1]) {
+    const wall = fxNode("fx-beam", {
+      left: (side ? b.width - 4 : 0) + "px", top: "0px",
+      width: "4px", height: b.height + "px", color: FX_C.dead,
+    });
+    out.push(fxPlay(wall, [
+      { transform: "translateX(0) scaleX(1)", opacity: 0 },
+      { transform: `translateX(${side ? -b.width * .12 : b.width * .12}px) scaleX(9)`, opacity: .75, offset: .55 },
+      { transform: `translateX(${side ? -b.width * .12 : b.width * .12}px) scaleX(9)`, opacity: 0 },
+    ], 760));
+  }
   return Promise.all(out);
 };
 
