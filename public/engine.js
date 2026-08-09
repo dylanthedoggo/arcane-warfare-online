@@ -338,6 +338,14 @@ const SPELLS = {
     penalty: "It reveals itself the moment a spell touches it, when it is crowned, and on the capture that kills it.",
     timing: "Declare Action phase only.",
   },
+  twin: {
+    name: "Temporal Twin", cost: 5, rarity: "legendary", maxDraws: 1,
+    group: "Transformation", when: "declare",
+    flavor: "Two of it, and only one thread holding them.",
+    text: "One of your pawns stands on two squares, and BOTH are real. You move both of them every turn.",
+    penalty: "They share one life. The instant either is captured, transformed or crowned, the other vanishes with it.",
+    timing: "Declare Action phase only.",
+  },
   quantum: {
     name: "Quantum Pawn", cost: 5, rarity: "legendary", maxDraws: 1,
     group: "Transformation", when: "declare", hidden: true,
@@ -391,6 +399,9 @@ function mkPiece(owner, rank, g = G) {
     quantum: 0,           // shared id of a superposition, 0 if none
     quantumReal: false,   // SECRET
     everAdjacent: false,  // has it ever stood beside an enemy? gates the cast
+    // Temporal Twin. Public in every direction — both bodies are real and both
+    // players can see the pair. Nothing here is redacted.
+    twin: 0,              // shared id of a twinned pair, 0 if none
     veilBy: null,         // who cast the veil (owed the friendly-fire penalty)
     eyeMark: 0,           // Eye For An Eye — opponent turns remaining
   };
@@ -514,6 +525,8 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     turnAction: null,       // what this turn has been spent on — see noteTurnAction
     timeoutSeq: 0,          // monotonic; seeds the referee's turn when a clock runs out
     quantumSeq: 0,          // monotonic; seeds which half of a superposition is real
+    twinStep: null,         // Temporal Twin — the body that still owes its move
+    twinDone: false,        // ...and whether the pair has already had both
     setAside: [],           // Phaser cards parked while a Phaser lives
     removed: [],            // Temporal Cascade after use
     log: [],
@@ -883,6 +896,9 @@ function legalMovesFor(i) {
   if (G.chain != null) return i === G.chain ? captureMoves(i) : [];
   // Owed a Herald bonus step: only that piece, only a plain forward step.
   if (G.heraldBonus != null) return i === G.heraldBonus ? legalHeraldSteps(i) : [];
+  // A twinned pair owes its second movement, and only the body that has not
+  // moved yet may make it.
+  if (G.twinStep != null) return i === G.twinStep ? [...captureMoves(i), ...simpleMoves(i)] : [];
   return [...captureMoves(i), ...simpleMoves(i)];
 }
 
@@ -1144,6 +1160,11 @@ function spellBlocker(id, caster = G.turn) {
       if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
       if (!hollowTargets(caster).length) return "No untransformed pawn of yours is left to hollow out.";
       break;
+    case "twin":
+      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
+      if (G.hasActed) return "Declare it before you move — both bodies move together.";
+      if (!twinTargets(caster).length) return "No untransformed pawn of yours has an empty square beside it.";
+      break;
     case "quantum":
       if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
       if (!quantumTargets(caster).length)
@@ -1302,6 +1323,77 @@ function collapseQuantum(struckIdx) {
     }
   }
   return wasReal;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   TEMPORAL TWIN
+
+   Two bodies, both real, one life between them. Nothing about it is secret —
+   this is the one card in the phase-2 batch with no hidden information at all,
+   so it is drawable hot-seat like anything else.
+
+   What it costs the engine is the TURN MODEL. "You move both each turn" is the
+   first thing in the game to want two movements out of one turn, and rather
+   than loosen `hasActed` — which every other rule leans on — it is expressed
+   as an obligation, the shape already used by chain-jumps and the Herald's
+   bonus step: the first body moves, and the second one now OWES a move that
+   only it can make. Same machinery, same clearing in beginTurn, same
+   suppression in autoPassIfStuck.
+
+   `twinDone` is what stops the two of them handing the obligation back and
+   forth for ever. Without it, the second body's move would look exactly like
+   the first body's did, and finishAction would dutifully owe another one.
+
+   The obligation is only raised when the other body can actually move. An
+   obligation nobody can discharge is a wedged turn, and the second half of a
+   pair is very easy to bury.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** The other square of the twinned pair `id`, or -1. */
+function twinPartner(id, not = -1) {
+  for (let i = 0; i < CELLS; i++)
+    if (i !== not && G.board[i] && G.board[i].twin === id) return i;
+  return -1;
+}
+
+/** Pawns that could be twinned: untransformed, unpaired, with room beside them. */
+function twinTargets(owner) {
+  const out = [];
+  for (let i = 0; i < CELLS; i++) {
+    const p = G.board[i];
+    if (!isAlly(p, owner) || p.rank !== "pawn" || p.form || p.twin || p.quantum) continue;
+    if (quantumSpots(i).length) out.push(i);
+  }
+  return out;
+}
+
+/**
+ * Cut the thread: whatever happened to the body at `i`, its partner does not
+ * outlive it.
+ *
+ * Both ends of the link are cleared BEFORE the partner is removed, which is
+ * what keeps removePiece from coming straight back here and trying to sever a
+ * pair that no longer exists.
+ */
+function severTwin(i, why) {
+  const p = G.board[i];
+  if (!p || !p.twin) return;
+  const id = p.twin;
+  p.twin = 0;
+  const j = twinPartner(id, i);
+  if (j < 0) return;
+  G.board[j].twin = 0;
+  if (G.twinStep === j || G.twinStep === i) G.twinStep = null;
+  fx("twinSever", { at: j, from: i });
+  removePiece(j, why, "twin");
+}
+
+/** Does `seat` still owe the second half of a twinned pair its move? */
+function twinDebt(seat) {
+  if (G.twinStep == null || G.turn !== seat) return false;
+  const p = G.board[G.twinStep];
+  if (!p || p.owner !== seat || !legalMovesFor(G.twinStep).length) { G.twinStep = null; return false; }
+  return true;
 }
 
 function eyeTargets(owner) {
@@ -1558,6 +1650,19 @@ function removePiece(i, why = "captured", kind = "capture") {
     }
   }
   log(`${PLAYERS[p.owner].name}'s ${pieceLabel(p)} at ${sq(i)} ${why}.`, "p" + p.owner);
+  // One life between the two of them. Done last, after this body is off the
+  // board, so the partner's own removal sees a settled position.
+  if (p.twin) {
+    const id = p.twin;
+    p.twin = 0;
+    const j = twinPartner(id, i);
+    if (j >= 0) {
+      G.board[j].twin = 0;
+      if (G.twinStep === j) G.twinStep = null;
+      fx("twinSever", { at: j, from: i });
+      removePiece(j, "vanishes — the other half of it is gone", "twin");
+    }
+  }
   return p;
 }
 
@@ -1568,6 +1673,8 @@ function promoteIfDue(i) {
   // A crowning happens in front of both players, and nothing below carries a
   // secret queen, so the disguise cannot survive it.
   revealHollow(i, "the crown gives it away");
+  // And a twin cannot be in two ranks at once. The crown is worth the body.
+  severTwin(i, "vanishes — its twin has been crowned");
   p.rank = "queen";
   fx("promote", { at: i, owner: p.owner, form: p.form });
   awardFP(p.owner, 2, `a pawn was crowned at ${sq(i)}`);
@@ -1701,7 +1808,7 @@ function heraldShielded(i, caster) {
    ══════════════════════════════════════════════════════════════════════════ */
 
 function pendingSacrifice(owner) {
-  if (G.chain != null || G.heraldBonus != null) return [];
+  if (G.chain != null || G.heraldBonus != null || G.twinStep != null) return [];
   return capturersFor(owner);
 }
 
@@ -1720,6 +1827,10 @@ function performMove(from, mv, opts = {}) {
   const owner = p.owner;
   G.lastMove = { from, to: mv.to };
   if (owner === G.turn) noteTurnAction({ t: "move", from, to: mv.to, kind: mv.kind });
+  // Discharging the twin obligation, if this is it. Cleared before the move
+  // resolves so finishAction below cannot mistake this for the FIRST body
+  // moving and owe a third movement.
+  if (G.twinStep === from) { G.twinStep = null; G.twinDone = true; }
 
   // Recorded before anything moves, while the squares still hold the pieces the
   // animation needs to draw. `chained` marks a hop that continues a sequence
@@ -1840,6 +1951,20 @@ function finishAction(landedAt = null, skipHerald = false) {
     }
   }
   G.heraldBonus = null;
+  // Temporal Twin's second movement. Raised only once per turn (twinDone), and
+  // only when the other body has somewhere to go — an obligation nobody can
+  // discharge is a turn that cannot be ended.
+  if (!G.twinDone && landedAt != null) {
+    const p = G.board[landedAt];
+    if (p && p.twin) {
+      const other = twinPartner(p.twin, landedAt);
+      if (other >= 0 && (captureMoves(other).length || simpleMoves(other).length)) {
+        G.twinStep = other;
+        log("Temporal Twin — the other body has still to move.", "rule");
+        return;
+      }
+    }
+  }
   G.phase = "end";
 }
 
@@ -1986,6 +2111,8 @@ function beginTurn(player) {
   G.lastCapture = null;
   G.mindControl = null;
   G.mustCapture = null;      // Tactician's debt dies with the turn that took it
+  G.twinStep = null;
+  G.twinDone = false;
   G.turnAction = null;
   // G.stutter deliberately survives: it is armed on the caster's turn and
   // fires on the NEXT one, so clearing it here would disarm every cast.
@@ -2211,7 +2338,7 @@ function autoPassIfStuck() {
   if (G.over) return null;
   if (G.chain != null || G.heraldBonus != null || G.mindControl) return null;
   if (G.owedDiscard || G.owedSacrifice) return null;
-  if (tacticianDebt(G.turn)) return null;
+  if (tacticianDebt(G.turn) || twinDebt(G.turn)) return null;
   const who = G.turn;
   if (hasTurnOption(who)) return null;
   log(`${PLAYERS[who].name} has nothing left to do — the turn passes automatically.`, "rule");
@@ -2231,6 +2358,9 @@ function applyTransform(i, form, choices = {}) {
   const F = FORMS[form];
   const owner = p.owner;
   const P = G.players[owner];
+  // A transformation is the third thing that ends a twinning — the two bodies
+  // were one pawn, and one of them has just stopped being a pawn.
+  severTwin(i, "vanishes — its twin has been transformed");
 
   // The FP cost is paid once, generically, by castSpell — every form is now
   // reached only through its spell, and F.cost mirrors that spell's cost.
@@ -2636,6 +2766,22 @@ function castSpell(id, caster, payload = {}) {
       break;
     }
 
+    case "twin": {
+      const from = payload.target, to = payload.spot;
+      const p = G.board[from];
+      const other = mkPiece(caster, "pawn");
+      other.captures = p.captures;
+      other.frozen = p.frozen;
+      other.p_frozen = p.p_frozen || 0;
+      other.everAdjacent = p.everAdjacent;
+      G.board[to] = other;
+      p.twin = p.id; other.twin = p.id;
+      fx("twin", { at: from, spot: to, owner: caster });
+      log(`Temporal Twin — ${PLAYERS[caster].name}'s pawn now stands on both ${sq(from)} and ${sq(to)}, and moves both every turn.`, "big");
+      log("They share one life: whatever ends either of them ends both.", "rule");
+      break;
+    }
+
     case "quantum": {
       const from = payload.target, to = payload.spot;
       const p = G.board[from];
@@ -2901,6 +3047,14 @@ function playRandomTurn(seat) {
       if (steps.length) performMove(G.heraldBonus, pick(steps));
       else { G.heraldBonus = null; G.phase = "end"; }
     }
+    // A twinned pair owes a second movement, and endTurn below refuses while
+    // it stands — so the clock has to discharge it like every other debt.
+    if (twinDebt(G.turn) && !G.over) {
+      const at = G.twinStep;
+      const opts = legalMovesFor(at);
+      if (opts.length) performMove(at, pick(opts));
+      else G.twinStep = null;
+    }
   };
 
   settle();
@@ -3044,7 +3198,7 @@ function dispatchAction(seat, a) {
     case "move": {
       const g = turnGate(seat);
       if (g) return fail(g);
-      if (G.phase !== "declare" && G.chain == null && G.heraldBonus == null)
+      if (G.phase !== "declare" && G.chain == null && G.heraldBonus == null && G.twinStep == null)
         return fail("You have already acted this turn.");
       const p = at(a.from);
       if (!p) return fail("There is no piece on that square.");
@@ -3163,6 +3317,13 @@ function dispatchAction(seat, a) {
           if (!hollowTargets(seat).includes(want.target))
             return fail("That is not an untransformed pawn of yours to hollow out.");
           payload.target = want.target;
+          break;
+        case "twin":
+          if (!twinTargets(seat).includes(want.target))
+            return fail("That pawn cannot be twinned.");
+          if (!quantumSpots(want.target).includes(want.spot))
+            return fail("The second square must be an empty dark square beside the first.");
+          payload.target = want.target; payload.spot = want.spot;
           break;
         case "quantum":
           if (!quantumTargets(seat).includes(want.target))
@@ -3288,6 +3449,7 @@ function dispatchAction(seat, a) {
       if (g) return fail(g);
       if (G.chain != null) return fail("You must continue the chain-jump.");
       if (G.heraldBonus != null) return fail("Resolve the Herald's bonus step first.");
+      if (twinDebt(seat)) return fail("Both halves of a Temporal Twin move — the other one has still to go.");
       if (tacticianDebt(seat))
         return fail("Tactician paid you for those captures — take one before you end the turn.");
       if (G.phase === "declare" && !G.hasActed && pendingSacrifice(seat).length)
@@ -3411,6 +3573,7 @@ if (typeof module !== "undefined" && module.exports) {
     eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
     hollowTargets, revealHollow,
     quantumTargets, quantumSpots, quantumPair, collapseQuantum,
+    twinTargets, twinPartner, severTwin, twinDebt,
     juggernautArmorPool, enchanterSacrificeOptions,
     juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
     cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,

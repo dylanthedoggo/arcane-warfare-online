@@ -198,6 +198,8 @@ button:disabled{cursor:not-allowed}
 /* And which half is which, drawn only for the player entitled to know. */
 .piece.qreal{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(150,220,255,.95) inset}
 .piece.qghost{opacity:.6}
+/* A twinned pair. Nothing secret about it, so it is drawn for everybody. */
+.piece.twinned{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(255,205,120,.8) inset}
 .piece .glyph{line-height:1;pointer-events:none}
 .piece .fpdot{
   position:absolute;top:-3px;right:-3px;
@@ -723,6 +725,7 @@ function renderTopbar() {
   if (AI.thinking) phase = `${AI_LEVELS[AI.level].name} is thinking…`;
   else if (G.chain != null) phase = "Chain-jump — must continue";
   else if (G.heraldBonus != null) phase = "Herald bonus step";
+  else if (G.twinStep != null) phase = "Temporal Twin — move the other body";
   else if (G.mindControl) phase = "Mind Control — move an enemy piece";
   else if (G.owedSacrifice) phase = "Declined capture — a piece is forfeit";
   else if (G.owedDiscard) phase = "Discard owed";
@@ -779,6 +782,8 @@ function renderBoard() {
       // A superposition is public — both players can see the two bodies. Which
       // one is the pawn is not, so the second class is owner-only and rests on
       // a field viewFor has already deleted from the other seat's copy.
+      // Wholly public: both bodies are real and both players see the pair.
+      if (p.twin) d.classList.add("twinned");
       if (p.quantum) {
         d.classList.add("quantum");
         if (p.owner === viewSeat()) d.classList.add(p.quantumReal ? "qreal" : "qghost");
@@ -860,6 +865,7 @@ function describePiece(p, i) {
   if (p.noCapture > 0) bits.push(`Static Veil — cannot capture for ${p.noCapture} more turn(s).`);
   if (p.p_frozen > 0) bits.push(`PENALTY PENDING — will be frozen for ${p.p_frozen} turn(s) starting next turn.`);
   if (p.p_noCapture > 0) bits.push(`PENALTY PENDING — will be unable to capture for ${p.p_noCapture} turn(s).`);
+  if (p.twin) bits.push("TEMPORAL TWIN — both bodies are real and both move each turn. Whatever ends either one ends both.");
   if (p.quantum)
     bits.push(p.quantumReal === true ? "SUPERPOSED — and this is the real pawn. Neither square can capture."
       : p.quantumReal === false ? "SUPERPOSED — this square is the empty half. Neither can capture."
@@ -1248,7 +1254,7 @@ function onCellClick(i) {
     // While the rules have you locked to one piece — mid chain-jump, or owed a
     // Herald step — a stray click on an empty square used to drop the
     // selection, taking the only highlight of what you are meant to do with it.
-    const locked = G.chain != null ? G.chain : G.heraldBonus;
+    const locked = G.chain != null ? G.chain : G.heraldBonus != null ? G.heraldBonus : G.twinStep;
     if (locked != null && G.board[locked]) { selectPiece(locked, legalMovesFor(locked)); return; }
     clearSelection(); render(); return;
   }
@@ -1528,6 +1534,13 @@ function beginCast(id, caster) {
       confirmFirst(`${S.text}<br><br>The engine has found <b>${sq(at)}</b>.`, () => finish({}));
       return;
     }
+
+    case "twin":
+      target("Choose a pawn to stand on two squares at once", twinTargets(caster), (from) => {
+        target("Choose its second square — both are real, and both move every turn",
+          quantumSpots(from), (spot) => finish({ target: from, spot }));
+      });
+      return;
 
     case "quantum":
       target("Choose a pawn that has never stood beside an enemy", quantumTargets(caster), (from) => {
@@ -2535,6 +2548,10 @@ function sideScore(side) {
     // can count the bodies — but `quantumReal` is never touched, here or
     // anywhere else the machine looks. That is the blindness contract.
     if (p.quantum) s -= VAL_PAWN / 2;
+    // A twinned body is a whole pawn — both are real — but the pair shares one
+    // life, so a single jump collects both. Priced on each half, which comes to
+    // roughly a third of the pair.
+    if (p.twin) s -= 34;
     if (p.rank === "pawn") {
       // Closer to the crown is worth more; the last two rows sharply so.
       // Weighted heavily enough that developing beats sitting still.
@@ -2914,6 +2931,12 @@ function aiSpellCandidates(phaseName) {
       .slice(0, aiWide(3)))
       out.push({ id: "hollow", payload: { target: i.i }, bonus: HOLLOW_BLUFF + 12 * i.near });
 
+  if (have("twin") && !G.hasActed)
+    for (const i of twinTargets(AI.side).slice(0, aiWide(3))) {
+      const spot = quantumSpots(i)[0];
+      if (spot != null) out.push({ id: "twin", payload: { target: i, spot }, bonus: TWIN_TEMPO });
+    }
+
   if (have("quantum"))
     for (const i of quantumTargets(AI.side).slice(0, aiWide(3))) {
       const spot = quantumSpots(i)[0];
@@ -3004,6 +3027,16 @@ const HOLLOW_BLUFF = 62;
  * will not pay a real positional price for it.
  */
 const QUANTUM_GAMBIT = 92;
+
+/**
+ * Temporal Twin is the one of the three the evaluator can mostly see for
+ * itself: both bodies are real pawns and they show up as material, with the
+ * shared life priced against them in sideScore. What it cannot see is the
+ * TEMPO — two movements every turn for as long as the pair survives — because
+ * the search still explores one movement per turn per side. This covers that,
+ * and nothing else.
+ */
+const TWIN_TEMPO = 45;
 
 function aiStutterGap() {
   // Measured on the position as it stands, which is a turn early: the real
@@ -3201,6 +3234,21 @@ function aiFinishMove() {
       G.heraldBonus = null;
       G.phase = "end";
     }
+  }
+  // The second half of a Temporal Twin. The referee refuses to end a turn
+  // while this is owed, and the machine does not end its turn through the
+  // referee — so without this it would simply never take the move the card
+  // exists to give it.
+  while (twinDebt(AI.side) && !G.over && guard++ < 12) {
+    const at = G.twinStep;
+    const opts = legalMovesFor(at);
+    if (!opts.length) { G.twinStep = null; break; }
+    let bestO = opts[0], bestV = -Infinity;
+    for (const o of opts) {
+      const v = aiSimValue(() => performMove(at, o), 1 - AI.side, 2);
+      if (v > bestV) { bestV = v; bestO = o; }
+    }
+    performMove(at, bestO);
   }
 }
 
@@ -3831,7 +3879,7 @@ function runTests() {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
     tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
-    stutter: 4, pressure: 3, hollow: 3, quantum: 5,
+    stutter: 4, pressure: 3, hollow: 3, quantum: 5, twin: 5,
   };
   ok("every spell cost matches the rulebook",
     SPELL_IDS.every((id) => SPELLS[id].cost === COSTS[id]));
@@ -4253,6 +4301,54 @@ function runTests() {
       && G.board.filter((p) => p && p.quantum).length === 2);
     AI.on = qWas.on; AI.side = qWas.side; AI.fast = qWas.fast; AI.level = qWas.level;
   }
+
+  group("Temporal Twin");
+  blank(0, { mode: "local" });
+  put(rc(5, 4), 0); put(rc(1, 6), 1); put(rc(1, 8), 1);
+  G.turn = 0; G.phase = "declare";
+  G.players[0].fp = 9; G.players[0].hand = ["twin"];
+  const tSpot = quantumSpots(rc(5, 4))[0];
+  castSpell("twin", 0, { target: rc(5, 4), spot: tSpot });
+  ok("both bodies are real pieces", countPieces(0) === 2, countPieces(0));
+  ok("...sharing one link", G.board[rc(5, 4)].twin === G.board[tSpot].twin);
+  ok("...and nothing about it is private",
+    G.log.filter((l) => /stands on both/.test(l.text)).every((l) => l.only == null));
+
+  // The machine does not end its turn through the referee, so aiFinishMove is
+  // the only thing that will ever take the second movement for it.
+  {
+    const tWas = { on: AI.on, side: AI.side, fast: AI.fast, level: AI.level };
+    AI.on = true; AI.fast = true; AI.side = 0; AI.level = "skilled"; AI.thinking = false;
+    const tA = rc(5, 4);
+    const tMv = legalMovesFor(tA)[0];
+    performMove(tA, tMv);
+    ok("after one body moves, the other owes a move", G.twinStep != null, G.twinStep);
+    aiFinishMove();
+    ok("...and the machine takes it rather than walking away",
+      G.twinStep === null, G.twinStep);
+    ok("...leaving both bodies still on the board", countPieces(0) === 2, countPieces(0));
+
+    blank(0, { mode: "local" });
+    put(rc(5, 4), 0); put(rc(9, 0), 0); put(rc(1, 6), 1); put(rc(0, 1), 1);
+    G.turn = 0; G.phase = "declare";
+    G.players[0].fp = 10; G.players[0].hand = ["twin"];
+    AI.side = 0;
+    const tC = aiSpellCandidates("declare").filter((c) => c.id === "twin");
+    ok("the machine is offered the pairing, carrying the tempo it cannot search",
+      tC.length > 0 && tC.every((c) => c.bonus === TWIN_TEMPO), tC.length);
+    ok("...and takes it", aiCastOnce("declare")
+      && G.board.filter((p) => p && p.twin).length === 2);
+    AI.on = tWas.on; AI.side = tWas.side; AI.fast = tWas.fast; AI.level = tWas.level;
+  }
+
+  // The evaluator may read the pairing freely — it is public — but should
+  // price the shared life against it.
+  blank(0, { mode: "local" });
+  put(rc(5, 4), 0); put(rc(4, 3), 0); put(rc(1, 6), 1);
+  const tPlain = sideScore(0);
+  G.board[rc(5, 4)].twin = 8; G.board[rc(4, 3)].twin = 8;
+  ok("a twinned pair is worth less than two loose pawns, because one jump takes both",
+    sideScore(0) < tPlain, `${sideScore(0)} vs ${tPlain}`);
 
   group("Chronos's Gaze");
   blank(0);

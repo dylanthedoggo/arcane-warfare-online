@@ -893,6 +893,8 @@ const FX_HOLD = {
   hollowReveal: () => 700,
   quantum:         () => 900,
   quantumCollapse: () => 1000,
+  twin:            () => 900,
+  twinSever:       () => 520,
 };
 
 FX.holdOf = function (e) {
@@ -2172,6 +2174,26 @@ FX_PLAY.quantumCollapse = function (e) {
   if (e.other != null)
     out.push(fxCollapse(fxCtr(e.other), FX_C.time, 700, { count: 2, reach: .9 }));
   return Promise.all(out);
+};
+
+/** A pawn becomes two, with a thread drawn between them. */
+FX_PLAY.twin = function (e) {
+  const a = fxCtr(e.at), b = fxCtr(e.spot), own = FX_OWNER(e.owner);
+  return Promise.all([
+    fxBanner(SPELLS.twin.name, SPELLS.twin.flavor, own, 1300),
+    fxLine(a, b, "fx-tether", own, Math.max(2, fxSize() * .05), 700),
+    fxRing(a, own, .3, 1.7, 560, { cls: "thick" }),
+    sleepFX(140).then(() => fxRing(b, own, .3, 1.7, 560, { cls: "thick" })),
+    fxAfterglow(e.spot, own, 900, { peak: .5 }),
+  ]);
+};
+
+/** And the thread parting. The surviving body is about to stop existing. */
+FX_PLAY.twinSever = function (e) {
+  return Promise.all([
+    fxLine(fxCtr(e.from), fxCtr(e.at), "fx-tether", FX_C.dead, Math.max(2, fxSize() * .05), 380),
+    fxCollapse(fxCtr(e.at), FX_C.dead, 520, { count: 2, reach: .8 }),
+  ]);
 };
 
 /* ══════════════════════════════════════════════════════════════════════════

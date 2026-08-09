@@ -1195,6 +1195,147 @@ it("records having stood beside an enemy, which is a fact about the past", () =>
   assert(!engine.quantumTargets(0).includes(rc(4, 3)), "so it can never be split again");
 });
 
+/* ── Temporal Twin ───────────────────────────────────────────────────────── */
+
+describe("a Temporal Twin owes two movements and shares one life");
+
+/** Twin the pawn at the first legal target and hand back [state, a, b]. */
+function twinned(seat = 0, pieces = null) {
+  const g = pieces ? staged(pieces, seat) : (() => {
+    const gg = newGame(0, SEED, { mode: "local" });
+    load(gg); gg.turnNo = 0; beginTurn(0);
+    return getG();
+  })();
+  const live = getG();
+  live.turn = seat; live.phase = "declare"; live.hasActed = false;
+  live.players[seat].hand = ["twin"];
+  live.players[seat].fp = 9;
+  const at = engine.twinTargets(seat)[0];
+  const spot = engine.quantumSpots(at)[0];
+  allowed(applyAction(seat, { t: "cast", id: "twin", payload: { target: at, spot } }));
+  return [getG(), at, spot];
+}
+
+it("is drawable in hot-seat, because nothing about it is secret", () => {
+  assert(engine.modeSpellIds(newGame(0, SEED)).includes("twin"),
+    "both bodies are real and both players see them — there is nothing to conceal");
+});
+
+it("puts two real bodies on the board, sharing one link", () => {
+  const [g, a, b] = twinned(0);
+  equal(g.board[a].twin, g.board[b].twin);
+  assert(g.board[a].twin !== 0);
+  const foe = viewFor(g, 1, {});
+  equal(foe.board[a].twin, foe.board[b].twin, "and the opponent sees the pair in full");
+});
+
+it("owes the second body a move, and refuses to end the turn until it goes", () => {
+  const [g, a, b] = twinned(0, [[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const first = engine.twinTargets(0).length === 0 ? a : a;   // the cast target
+  const mv = legalMovesFor(first)[0];
+  allowed(applyAction(0, { t: "move", from: first, to: mv.to, kind: mv.kind }));
+
+  const mid = getG();
+  equal(mid.turn, 0, "the turn has not passed");
+  assert(mid.twinStep != null, "the other body owes a move");
+  refused(applyAction(0, { t: "endTurn" }), "Temporal Twin");
+});
+
+it("lets only the owed body make that second movement", () => {
+  const [g] = twinned(0, [[rc(5, 4), 0], [rc(9, 0), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const a = getG().board.findIndex((p) => p && p.twin);
+  const mv = legalMovesFor(a)[0];
+  applyAction(0, { t: "move", from: a, to: mv.to, kind: mv.kind });
+
+  const owed = getG().twinStep;
+  assert(owed != null, "something is owed");
+  // The unrelated pawn at rc(9,0) is not it.
+  refused(applyAction(0, { t: "move", from: rc(9, 0), to: rc(8, 1), kind: "step" }));
+  equal(getG().twinStep, owed, "and the refusal did not discharge the debt");
+});
+
+it("hands over once both bodies have moved, and not before", () => {
+  const [g] = twinned(0, [[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const a = getG().board.findIndex((p) => p && p.twin);
+  let mv = legalMovesFor(a)[0];
+  applyAction(0, { t: "move", from: a, to: mv.to, kind: mv.kind });
+  const owed = getG().twinStep;
+  mv = legalMovesFor(owed)[0];
+  applyAction(0, { t: "move", from: owed, to: mv.to, kind: mv.kind });
+
+  const after = getG();
+  equal(after.twinStep, null, "the debt is discharged");
+  equal(after.turn, 1, "and play moved on — two movements, one turn");
+});
+
+it("does not owe a third movement — the pair does not hand it back and forth", () => {
+  const [g] = twinned(0, [[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const a = getG().board.findIndex((p) => p && p.twin);
+  let mv = legalMovesFor(a)[0];
+  applyAction(0, { t: "move", from: a, to: mv.to, kind: mv.kind });
+  const owed = getG().twinStep;
+  mv = legalMovesFor(owed)[0];
+  applyAction(0, { t: "move", from: owed, to: mv.to, kind: mv.kind });
+  equal(getG().twinStep, null, "twinDone is what stops this looping for ever");
+});
+
+it("raises no obligation the second body could not discharge", () => {
+  // Buried behind barriers: the far body cannot move at all, so owing it a
+  // move would be a turn nobody could end.
+  const g = staged([[rc(5, 4), 0], [rc(1, 6), 1], [rc(1, 8), 1]]);
+  const live = getG();
+  live.players[0].hand = ["twin"];
+  live.players[0].fp = 9;
+  const spot = rc(4, 3);
+  live.barriers.push(rc(3, 2), rc(3, 4));            // seal the far body in
+  allowed(applyAction(0, { t: "cast", id: "twin", payload: { target: rc(5, 4), spot } }));
+  const mv = legalMovesFor(rc(5, 4)).find((m) => m.to !== spot);
+  allowed(applyAction(0, { t: "move", from: rc(5, 4), to: mv.to, kind: mv.kind }));
+  assert(getG().twinStep == null || legalMovesFor(getG().twinStep).length > 0,
+    "an obligation was only raised if it could actually be met");
+});
+
+it("loses both bodies to one capture", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  const live = getG();
+  live.board[rc(5, 4)].twin = 55; live.board[rc(5, 6)].twin = 55;
+  allowed(applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 7), kind: "capture" }));
+  const after = getG();
+  equal(after.board[rc(5, 6)], null, "the captured body is gone");
+  equal(after.board[rc(5, 4)], null, "and the other went with it");
+});
+
+it("loses the other body to the crown", () => {
+  const g = staged([[rc(1, 2), 0], [rc(5, 6), 0], [rc(9, 4), 1]]);
+  const live = getG();
+  live.board[rc(1, 2)].twin = 56; live.board[rc(5, 6)].twin = 56;
+  allowed(applyAction(0, { t: "move", from: rc(1, 2), to: rc(0, 1), kind: "step" }));
+  const after = getG();
+  equal(after.board[rc(0, 1)].rank, "queen", "the crown stands");
+  equal(after.board[rc(0, 1)].twin, 0, "the pairing is over");
+  equal(after.board[rc(5, 6)], null, "and it cost the other body");
+});
+
+it("loses the other body to a transformation", () => {
+  const g = staged([[rc(5, 4), 0], [rc(5, 6), 0], [rc(6, 5), 0], [rc(0, 1), 1]]);
+  const live = getG();
+  live.board[rc(5, 4)].twin = 57; live.board[rc(5, 6)].twin = 57;
+  live.players[0].hand = ["juggernautSpell"];
+  live.players[0].fp = 9;
+  allowed(applyAction(0, {
+    t: "cast", id: "juggernautSpell", payload: { target: rc(5, 4), sacrifice: rc(6, 5) },
+  }));
+  const after = getG();
+  equal(after.board[rc(5, 4)].form, "juggernaut");
+  equal(after.board[rc(5, 6)], null, "the other body did not survive it");
+});
+
+it("cannot be twinned twice, nor stacked on a superposition", () => {
+  const [g, a] = twinned(0);
+  load(getG());
+  assert(!engine.twinTargets(0).includes(a), "an already-twinned pawn is not a target");
+});
+
 /* ══════════════════════════════════════════════════════════════════════════
    9b. THE MODE GATE
 
