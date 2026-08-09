@@ -207,13 +207,21 @@ FX.pump = function () {
   // it climbing even through a rewind), so a drop means a different game.
   if (top < FX.seen) FX.reset();
 
-  const fresh = G.fx.filter((e) => e.n > FX.seen);
-  if (!fresh.length) return;
-
-  // Advance the mark even when nothing will be drawn. Otherwise a spell cast
-  // while the tab was hidden would queue up and play, out of nowhere, minutes
-  // later when the player came back.
+  // `only` marks an event addressed to one seat — the reveal of a concealed
+  // piece, say. Online it was dropped by viewFor() before it ever arrived;
+  // this is the same guard for the game against the machine, where the browser
+  // holds the real G and would otherwise animate the machine's secret on the
+  // screen of the player it is being kept from. See visibleLog(), which does
+  // the same job for the third channel.
+  const me = typeof viewSeat === "function" ? viewSeat() : null;
+  const fresh = G.fx.filter((e) => e.n > FX.seen && (e.only == null || e.only === me));
+  // The mark advances to the top of the batch whether or not anything in it
+  // will be drawn — including past events this seat is not allowed to see, so
+  // a withheld effect cannot come back later once the mark catches up.
+  // Otherwise a spell cast while the tab was hidden would queue up and play,
+  // out of nowhere, minutes later when the player came back.
   FX.seen = top;
+  if (!fresh.length) return;
   if (!FX.enabled()) return;
 
   const now = performance.now();

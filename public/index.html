@@ -1060,15 +1060,32 @@ function drawWhy(P) {
   return "";
 }
 
+/**
+ * The referee log as the seat at this device is entitled to read it.
+ *
+ * Online the server has already filtered it — viewFor() drops another seat's
+ * private lines before they ever leave the process. This exists for the game
+ * against the MACHINE, where there is no wire and no view: the browser holds
+ * the real G, secret lines and all, and rendering it raw would hand the
+ * machine's concealed pieces straight to the player it is concealing them
+ * from. Doing it in both places costs nothing and means neither has to be the
+ * one that remembers.
+ */
+function visibleLog() {
+  const me = viewSeat();
+  return G.log.filter((e) => e.only == null || e.only === me);
+}
+
 function renderLog() {
   const zone = $("logzone");
+  const lines = visibleLog();
   zone.classList.toggle("collapsed", !UI.logOpen);
   $("logToggle").setAttribute("aria-expanded", String(!!UI.logOpen));
-  $("logcount").textContent = UI.logOpen ? "" : `${G.log.length} entries`;
+  $("logcount").textContent = UI.logOpen ? "" : `${lines.length} entries`;
   if (!UI.logOpen) return;
   const wrap = $("log");
   wrap.innerHTML = "";
-  for (const e of G.log.slice(-90)) wrap.appendChild(el("div", "logline " + e.kind, e.text));
+  for (const e of lines.slice(-90)) wrap.appendChild(el("div", "logline " + e.kind, e.text));
   wrap.scrollTop = wrap.scrollHeight;
 }
 
@@ -1677,7 +1694,10 @@ function boot(first, opts = {}) {
   aiCancel();                       // kill any beat still pending from a prior game
   netLeave();                       // and drop any online game still attached
   FX.reset();                       // and anything still in the air from it
-  G = newGame(first, null, { dev: !!opts.dev });
+  // Against the machine concealment works — the machine is genuinely blinded.
+  // Hot-seat it does not, because both hands share one screen, so "local"
+  // keeps those cards out of the pool entirely. See MODE in engine.js.
+  G = newGame(first, null, { dev: !!opts.dev, mode: opts.ai ? "ai" : "local" });
   UI = freshUI();
   AI.on = !!opts.ai;
   AI.side = opts.aiSide != null ? opts.aiSide : 1;
@@ -3115,7 +3135,10 @@ function aiRandomTurn(side) {
 /** One headless game. `gold`/`violet` are level names or the string "random". */
 function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
   const saved = { ...AI };
-  G = newGame(0, seed);
+  // "ai", not the default "local" — self-play is how the machine's handling of
+  // the concealment cards gets measured, and in a local-mode game it would
+  // never be dealt one.
+  G = newGame(0, seed, { mode: "ai" });
   UI = freshUI();
   G.turnNo = 0;
   AI.on = true; AI.fast = true; AI.thinking = false;
@@ -3186,8 +3209,11 @@ function runTests() {
   // Silence the interface so the engine can be driven headlessly.
   render = () => {}; raiseCurtain = () => {}; toast = () => {}; announceWinner = () => {};
 
-  const blank = (first = 0) => {
-    G = newGame(first, 42);
+  // `opts` reaches newGame, which is how a test asks for a mode other than
+  // hot-seat — the concealment cards are undrawable in "local" and several
+  // groups below need a game that can actually hold one.
+  const blank = (first = 0, opts = {}) => {
+    G = newGame(first, 42, opts);
     UI = freshUI();
     G.board = new Array(CELLS).fill(null);
     return G;
@@ -3544,8 +3570,8 @@ function runTests() {
   /* ── the draw pool ─────────────────────────────────────────────────── */
   group("Spell pool");
   G = newGame(0, 42); UI = freshUI();
-  ok("every spell id starts eligible to draw", eligibleSpellIds().length === SPELL_IDS.length,
-    eligibleSpellIds().length);
+  ok("every spell the mode allows starts eligible to draw",
+    eligibleSpellIds().length === modeSpellIds().length, eligibleSpellIds().length);
   const COSTS = {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
     juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
@@ -3576,7 +3602,7 @@ function runTests() {
   G = newGame(0, 42); UI = freshUI();
   G.drawCounts.cascade = SPELLS.cascade.maxDraws;
   ok("a maxDraws card drops out of the pool once exhausted", !eligibleSpellIds().includes("cascade"));
-  ok("...but every other card is unaffected", eligibleSpellIds().length === SPELL_IDS.length - 1);
+  ok("...but every other card is unaffected", eligibleSpellIds().length === modeSpellIds().length - 1);
 
   blank();
   G.players[0].fp = 9; G.players[0].hand = ["cascade"];
@@ -3923,6 +3949,54 @@ function runTests() {
   NET.on = seatWas.net; NET.seat = seatWas.seat; AI.on = seatWas.ai; AI.side = seatWas.side;
   UI.revealed = seatWas.revealed; G.turn = seatWas.turn;
   buildBoard();
+
+  /* ── concealment ───────────────────────────────────────────────────────
+     viewFor() covers the wire, and test/engine.test.js §9 proves it. What it
+     cannot cover is the game against the MACHINE, where there is no wire: the
+     browser holds the real G, so the client has to do its own filtering or
+     the machine's secrets render straight onto the screen of the player they
+     are being kept from. These are that second copy.
+     ─────────────────────────────────────────────────────────────────── */
+  group("Concealment on this device");
+  {
+    const cWas = { net: NET.on, seat: NET.seat, ai: AI.on, side: AI.side, turn: G.turn };
+    blank(0, { mode: "ai" });
+    // Playing Gold against the machine: viewSeat() is 0, and seat 1 is the
+    // machine, whose private lines and effects must not reach this screen.
+    NET.on = false; AI.on = true; AI.side = 1; G.turn = 0;
+    ok("vs the machine the device speaks for one seat only", viewSeat() === 0, viewSeat());
+
+    log("a line for everyone", "sys");
+    log("a line only Gold may read", "rule", 0);
+    log("a line only the machine may read", "rule", 1);
+    const cSeen = visibleLog().map((l) => l.text);
+    ok("the log keeps the public lines", cSeen.includes("a line for everyone"));
+    ok("...and your own private ones", cSeen.includes("a line only Gold may read"));
+    ok("...and drops the machine's", !cSeen.includes("a line only the machine may read"));
+
+    // The transcript, the second channel. FX.pump is what drains G.fx onto the
+    // board, so the filter has to hold there rather than in the recipes.
+    const cEnabled = FX.enabled, cMode = FX.mode, cRun = FX.run, cQueued = [];
+    FX.reset();
+    FX.mode = "normal";
+    FX.enabled = () => true;
+    FX.run = () => {};                       // never actually paint in a test
+    G.fx = [
+      { n: 1, type: "spell", id: "veil", caster: 1 },
+      { n: 2, type: "hollow", at: rc(5, 4), only: 1 },
+    ];
+    FX.pump();
+    for (const e of FX.queue) cQueued.push(e.type);
+    ok("the transcript queues the machine's public effect", cQueued.includes("spell"));
+    ok("...and never queues the one addressed to the machine alone",
+      !cQueued.includes("hollow"), cQueued.join(","));
+    ok("...while the high-water mark still clears the whole batch, so a withheld effect cannot resurface",
+      FX.seen === 2, FX.seen);
+
+    FX.enabled = cEnabled; FX.mode = cMode; FX.run = cRun;
+    FX.reset();
+    NET.on = cWas.net; NET.seat = cWas.seat; AI.on = cWas.ai; AI.side = cWas.side; G.turn = cWas.turn;
+  }
 
   /* ── the machine ───────────────────────────────────────────────────── */
   group("The machine — search");

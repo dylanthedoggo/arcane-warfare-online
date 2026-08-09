@@ -165,7 +165,10 @@ io.on("connection", (socket) => {
 
     const room = {
       code,
-      G: newGame(0),                      // the host takes Gold, and Gold opens
+      // The host takes Gold, and Gold opens. `mode` is what makes the
+      // concealment cards drawable at all — see MODE in engine.js. The
+      // sandbox flag is deliberately still not passed, and never should be.
+      G: newGame(0, null, { mode: "online" }),
       seats: [{ token, socketId: null }, null],
       undoOffer: null,
       lastSeen: Date.now(),

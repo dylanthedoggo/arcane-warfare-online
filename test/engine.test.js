@@ -25,7 +25,7 @@
 
 const engine = require("../public/engine.js");
 const {
-  FORMS, SPELL_IDS,
+  FORMS, SPELLS, SPELL_IDS, SECRET_PIECE_FIELDS,
   rc, isDark,
   newGame, beginTurn, log, applyAction, viewFor, setG, getG,
   legalMovesFor,
@@ -608,6 +608,177 @@ it("does not hand back the live state object", () => {
   assert(g.players[0].fp !== 99, "the view is not a window onto the real state");
 });
 
+/* ── the three channels ───────────────────────────────────────────────────
+   A concealment card is hidden only if the board field, the effect transcript
+   and the referee log all agree to keep quiet. Two out of three is not a
+   partial success, it is a leak — so each channel is asserted on its own, and
+   then all three together the way a real card would use them.
+
+   These are deliberately written against the MACHINERY rather than against any
+   one card: they are what a future card gets for free by using `only` and
+   SECRET_PIECE_FIELDS, and what catches the card that forgets to.
+   ─────────────────────────────────────────────────────────────────────── */
+
+it("strips a secret piece field from every piece that is not yours", () => {
+  const g = freshGame();
+  // Stand in for a real concealment card. Registering the field is the whole
+  // opt-in — a card whose field is missing from this list leaks silently, and
+  // this test is the reason that failure is loud instead.
+  SECRET_PIECE_FIELDS.push("hollow");
+  try {
+    const mine = anyPieceOf(g, 0), theirs = anyPieceOf(g, 1);
+    g.board[mine].hollow = true;
+    g.board[theirs].hollow = true;
+
+    const view = viewFor(g, 0, {});
+    equal(view.board[mine].hollow, true, "you may read your own concealed piece");
+    assert(!("hollow" in view.board[theirs]),
+      "the field must be DELETED, not blanked — a client testing for the key must not tell the two apart");
+    assert(g.board[theirs].hollow === true, "and the real game keeps it");
+  } finally {
+    SECRET_PIECE_FIELDS.length = 0;
+  }
+});
+
+it("drops an fx event addressed to the other seat", () => {
+  const g = freshGame();
+  g.fx = [
+    { n: 1, type: "spell", id: "veil", caster: 0 },
+    { n: 2, type: "reveal", at: 5, only: 0 },
+  ];
+  const mine = viewFor(g, 0, {}).fx, theirs = viewFor(g, 1, {}).fx;
+  equal(mine.length, 2, "seat 0 sees the public event and its own private one");
+  equal(theirs.length, 1, "seat 1 sees only the public event");
+  assert(theirs.every((e) => e.type !== "reveal"),
+    "an unredacted event would animate the secret on the wrong screen");
+});
+
+it("drops a log line addressed to the other seat", () => {
+  const g = freshGame();
+  load(g);
+  log("something everybody may read", "sys");
+  log("the pawn at e5 is a decoy", "rule", 0);
+
+  const mine = viewFor(g, 0, {}).log.map((l) => l.text).join("|");
+  const theirs = viewFor(g, 1, {}).log.map((l) => l.text).join("|");
+  assert(mine.includes("decoy"), "the seat it was written for reads it");
+  assert(!theirs.includes("decoy"), "and nobody else does");
+  assert(theirs.includes("something everybody may read"),
+    "filtering must not swallow the public lines around it");
+});
+
+it("filters the log before taking the tail, not after", () => {
+  // Slicing first would let another seat's unreadable lines take up room in
+  // the window and push this seat's own history off the end of it.
+  const g = freshGame();
+  load(g);
+  for (let k = 0; k < 200; k++) log(`private ${k}`, "sys", 1);
+  log("the line seat 0 is waiting for", "big");
+
+  const mine = viewFor(g, 0, {}).log;
+  assert(mine.some((l) => l.text === "the line seat 0 is waiting for"),
+    "seat 0's own line survived a flood of lines it cannot read");
+  assert(mine.every((l) => !l.text.startsWith("private ")), "and none of theirs came through");
+});
+
+it("keeps a secret out of all three channels at once", () => {
+  // What a real concealment card does on the turn it is cast: mark a piece,
+  // announce it to one seat, and animate it for that seat only.
+  const g = freshGame();
+  SECRET_PIECE_FIELDS.push("hollow");
+  try {
+    load(g);
+    const decoy = anyPieceOf(g, 1);
+    g.board[decoy].hollow = true;
+    log(`the pawn at ${engine.sq(decoy)} is hollow`, "rule", 1);
+    g.fx.push({ n: 999, type: "hollow", at: decoy, only: 1 });
+
+    const foe = viewFor(g, 0, {});
+    assert(!("hollow" in foe.board[decoy]), "channel 1: the board says nothing");
+    assert(foe.fx.every((e) => e.type !== "hollow"), "channel 2: the transcript says nothing");
+    assert(foe.log.every((l) => !l.text.includes("hollow")), "channel 3: the log says nothing");
+
+    const owner = viewFor(g, 1, {});
+    equal(owner.board[decoy].hollow, true, "and the owner still knows all three");
+    assert(owner.fx.some((e) => e.type === "hollow"));
+    assert(owner.log.some((l) => l.text.includes("hollow")));
+  } finally {
+    SECRET_PIECE_FIELDS.length = 0;
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   9b. THE MODE GATE
+
+   A card whose effect is that your opponent cannot see something is worth
+   nothing across a shared screen, so hot-seat is not dealt one. That gate is a
+   property of the DRAW POOL rather than of any card's rules, which means the
+   test for it belongs with the rest of the disclosure surface: the pool is how
+   a secret gets into a game in the first place.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("the draw pool respects the shape of the game");
+
+it("defaults to hot-seat when nobody says otherwise", () => {
+  equal(newGame(0).mode, "local", "the server's old call shape must not silently deal secrets");
+  equal(newGame(0, SEED, {}).mode, "local");
+  equal(newGame(0, SEED, { mode: "nonsense" }).mode, "local", "an unrecognised mode is not a mode");
+});
+
+it("takes the mode the caller asked for", () => {
+  equal(newGame(0, SEED, { mode: "online" }).mode, "online");
+  equal(newGame(0, SEED, { mode: "ai" }).mode, "ai");
+});
+
+it("keeps a hidden card out of a hot-seat game and lets it into the other two", () => {
+  // Borrow a real card rather than invent one: the gate has to work on the
+  // actual SPELLS table, not on a fixture shaped to suit it.
+  SPELLS.veil.hidden = true;
+  try {
+    assert(!engine.modeSpellIds(newGame(0, SEED)).includes("veil"),
+      "hot-seat must never be dealt a concealment card");
+    assert(engine.modeSpellIds(newGame(0, SEED, { mode: "ai" })).includes("veil"),
+      "the machine is genuinely blinded, so it works there");
+    assert(engine.modeSpellIds(newGame(0, SEED, { mode: "online" })).includes("veil"),
+      "and online is what it was written for");
+  } finally {
+    delete SPELLS.veil.hidden;
+  }
+});
+
+it("keeps an online-only card out of both offline modes", () => {
+  SPELLS.veil.onlineOnly = true;
+  try {
+    for (const mode of ["local", "ai"])
+      assert(!engine.modeSpellIds(newGame(0, SEED, { mode })).includes("veil"),
+        `a card that needs the server's clock cannot be dealt in ${mode}`);
+    assert(engine.modeSpellIds(newGame(0, SEED, { mode: "online" })).includes("veil"));
+  } finally {
+    delete SPELLS.veil.onlineOnly;
+  }
+});
+
+it("the drawable pool never offers what the mode forbids", () => {
+  SPELLS.veil.hidden = true;
+  try {
+    const g = newGame(0, SEED);
+    load(g);
+    g.turnNo = 0;
+    beginTurn(0);
+    assert(!engine.eligibleSpellIds().includes("veil"),
+      "eligibleSpellIds is the one list the draw reads — the gate has to hold there, not just in modeSpellIds");
+    // And the sandbox draws from the same list, so it cannot stock one either.
+    const s = newGame(0, SEED, { dev: true });
+    load(s);
+    s.turnNo = 0;
+    beginTurn(0);
+    assert(!getG().players[0].hand.includes("veil"),
+      "the workbench must not hold a card the pool would refuse to deal");
+  } finally {
+    delete SPELLS.veil.hidden;
+  }
+});
+
 /* ══════════════════════════════════════════════════════════════════════════
    10. THE DEV SANDBOX CANNOT BE REACHED FROM THE WIRE
 
@@ -697,7 +868,8 @@ it("the sandbox really does relax what it claims to", () => {
   g.turnNo = 0;
   beginTurn(0);
 
-  equal(getG().players[0].hand.length, SPELL_IDS.length, "the sandbox hand holds one of everything");
+  equal(getG().players[0].hand.length, engine.modeSpellIds(getG()).length,
+    "the sandbox hand holds one of everything the mode allows");
   equal(getG().players[0].fp, engine.FP_CAP, "and the pool starts full");
 
   const first = movablePieceOf(getG(), 0);

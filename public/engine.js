@@ -145,6 +145,8 @@ const FORMS = {
    `when`: "declare" | "end" | "any"  (which phase it may be cast in)
    `anyTurn`: castable on the opponent's turn as well
    `rarity`: what a card is worth being dealt — see RARITY below
+   `hidden`: its effect is that the opponent cannot see something — see MODE
+   `onlineOnly`: it needs the server, so it is undrawable anywhere else
    ───────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -359,11 +361,46 @@ function newPlayerState() {
   };
 }
 
-/** Every spell id currently eligible to be drawn — excludes cards removed
- *  (oncePerGame, used), set aside (Phaser, while one lives), or exhausted
- *  (maxDraws hit). */
-function eligibleSpellIds() {
+/* ─────────────────────────────────────────────────────────────────────────
+   MODE — which of the three shapes of game this is.
+
+     "local"    hot-seat. One device, two people, a curtain between turns.
+     "ai"       one person against the machine.
+     "online"   two devices with the server refereeing between them.
+
+   The RULES are identical in all three; `G.mode` exists because two things
+   about a card can depend on the shape of the game rather than on the board.
+
+   CONCEALMENT. A card whose whole effect is that your opponent cannot see
+   something is worth nothing when your opponent is watching you play it. So a
+   `hidden` card is undrawable in hot-seat — not weakened, not house-ruled,
+   simply never dealt. Against the machine it works, because the machine is
+   genuinely blinded (it never reads the marker fields).
+
+   A CLOCK. `onlineOnly` cards need a timer, and only the server has one.
+
+   Both gates live in modeSpellIds(), which is the single list every other
+   part of the draw is filtered from — including the dev sandbox's hand, so
+   the workbench cannot stock a card the pool would refuse to deal.
+   ───────────────────────────────────────────────────────────────────────── */
+
+const MODES = ["local", "ai", "online"];
+
+/** Every spell id this game's MODE permits at all. */
+function modeSpellIds(g = G) {
   return SPELL_IDS.filter((id) => {
+    const S = SPELLS[id];
+    if (S.hidden && g.mode === "local") return false;
+    if (S.onlineOnly && g.mode !== "online") return false;
+    return true;
+  });
+}
+
+/** Every spell id currently eligible to be drawn — excludes cards the mode
+ *  bars outright, removed (oncePerGame, used), set aside (Phaser, while one
+ *  lives), or exhausted (maxDraws hit). */
+function eligibleSpellIds() {
+  return modeSpellIds().filter((id) => {
     if (G.removed.includes(id)) return false;
     if (G.setAside.includes(id)) return false;
     const cap = SPELLS[id].maxDraws;
@@ -385,8 +422,14 @@ function mulberry32(a) {
 /**
  * `opts.dev` opens the sandbox — see the DEV SANDBOX section below. It is a
  * third positional argument for one reason: the server builds its games with
- * `newGame(0)` and nothing on the socket path ever reaches this parameter, so
- * an online game cannot be talked into sandbox mode however a client lies.
+ * `newGame(0, null, { mode: "online" })` and nothing on the socket path ever
+ * reaches this parameter, so an online game cannot be talked into sandbox mode
+ * however a client lies.
+ *
+ * `opts.mode` is the other half of that same argument — see MODE above. It
+ * defaults to "local", the most restrictive setting, so a caller that forgets
+ * to pass one gets a game with no concealment cards in it rather than a
+ * hot-seat game quietly dealing secrets onto a shared screen.
  */
 function newGame(firstPlayer = 0, seed = null, opts = {}) {
   const s = seed == null ? (Math.floor(Math.random() * 1e9)) : seed;
@@ -425,6 +468,10 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     owedDiscard: null,      // { player, n, why } — forced discard pending
     owedSacrifice: null,    // { player, candidates } — declined-capture forfeit pending
     dev: opts.dev === true, // the sandbox. Never true on a game the server owns.
+    // "local" unless told otherwise — see MODE. Anything unrecognised is
+    // treated as hot-seat, which is the setting that hides the least and
+    // therefore deals the fewest secrets.
+    mode: MODES.includes(opts.mode) ? opts.mode : "local",
   };
 
   // Violet on rows 0-3, Gold on rows 8-11 — dark squares only, 24 each.
@@ -507,9 +554,17 @@ function devTopUp() {
   }
 }
 
-/** Both hands hold one of everything, always. The deck is left alone. */
+/**
+ * Both hands hold one of everything the MODE allows, always. The deck is left
+ * alone.
+ *
+ * Filtered through modeSpellIds rather than the raw list because the sandbox
+ * is one screen with both hands on it, and a concealment card there would be
+ * concealing nothing from nobody. Sharing the filter with eligibleSpellIds is
+ * what stops the workbench from stocking a card the pool would never deal.
+ */
 function devStockHands() {
-  for (const P of G.players) P.hand = SPELL_IDS.slice();
+  for (const P of G.players) P.hand = modeSpellIds();
 }
 
 /**
@@ -530,9 +585,21 @@ function devUnlock() {
 
 /* ══════════════════════════════════════════════════════════════════════════
    LOGGING
+
+   One shared array, read by both seats. `only` is the exception: a line
+   written with an audience reaches that seat and no other, and viewFor()
+   filters it out for everybody else.
+
+   Use it sparingly and only for something the rules genuinely conceal — a
+   Hollow's identity, which square a Quantum Pawn really stands on. The default
+   is public, because the referee log is how a player who did not act learns
+   what happened, and a game whose log is half-secret is a game nobody can
+   follow.
    ══════════════════════════════════════════════════════════════════════════ */
-function log(text, kind = "sys") {
-  G.log.push({ text, kind });
+function log(text, kind = "sys", only = null) {
+  const entry = { text, kind };
+  if (only === 0 || only === 1) entry.only = only;
+  G.log.push(entry);
   if (G.log.length > 400) G.log.shift();
 }
 const sq = i => String.fromCharCode(97 + colOf(i)) + (N - rowOf(i));
@@ -564,6 +631,14 @@ function pieceLabel(p) {
    Discipline: an event may carry only what the referee log already makes
    public. Casting a spell is announced, so naming one is fine. A discard is
    logged as a COUNT, so a discard event must never name the card.
+
+   `only: seat` is the escape hatch for the concealment cards, and it is the
+   same word the log uses. An event carrying it is delivered to that seat and
+   dropped for the other — because an unredacted event will happily animate a
+   secret onto the screen of the one player who must not see it. The transcript
+   is the SECOND of the three channels a secret leaks through; the state field
+   is the first and the log is the third, and a card is only hidden if all
+   three are covered. See viewFor().
    ══════════════════════════════════════════════════════════════════════════ */
 
 const FX_KEEP = 48;          // a headless self-play game must not grow this forever
@@ -2640,6 +2715,25 @@ function dispatchAction(seat, a) {
 const HIDDEN_CARD = "?";
 const VIEW_LOG_TAIL = 80;
 
+/**
+ * Piece fields a seat may not read off an ENEMY piece.
+ *
+ * This list is the whole of the board-state half of concealment, and it is
+ * opt-IN by construction: viewFor() is otherwise a straight clone of G, so
+ * anything a card parks on a piece crosses the wire to both seats unless its
+ * name appears here. A new concealment card that forgets to add its field
+ * leaks silently and the game still works, which is exactly the failure this
+ * list — and the leak tests in test/engine.test.js §9 — exist to catch.
+ *
+ * Deleting rather than blanking is deliberate: `"hollow" in p` is then false
+ * on the foe's copy, so a client that tests for the field cannot tell a
+ * concealed piece from an ordinary one by the shape of the object.
+ */
+const SECRET_PIECE_FIELDS = [];
+
+/** Is this fx event or log line addressed to a seat other than `seat`? */
+const forOtherSeat = (e, seat) => e && e.only != null && e.only !== seat;
+
 function viewFor(g, seat, extra = {}) {
   const v = snapshot(g);                   // deep clone, already strips `history`
   const foe = 1 - seat;
@@ -2654,12 +2748,29 @@ function viewFor(g, seat, extra = {}) {
   // Gaze still answers correctly on the client.
   v.history = g.history.map((h) => ({ turn: h.turn, turnNo: h.turnNo }));
 
-  if (v.log.length > VIEW_LOG_TAIL) v.log = v.log.slice(-VIEW_LOG_TAIL);
+  /* ── the three channels a secret leaks through ─────────────────────────
+     Everything above this point is the same redaction the game has always
+     done. Everything below is the concealment cards' — and all three have to
+     be here, because a card is only hidden if the state, the animation AND
+     the log all agree to keep quiet. Missing one of them is silent. */
 
-  // snapshot() drops the effect transcript; the wire is the one place it is the
-  // whole point. This is how a player who did not act still sees the capture.
-  // It says nothing the referee log has not already announced to both seats.
-  v.fx = structuredClone(g.fx || []);
+  // 1. State. Marker fields come off every piece that is not yours.
+  if (SECRET_PIECE_FIELDS.length)
+    for (const p of v.board) {
+      if (!p || p.owner === seat) continue;
+      for (const f of SECRET_PIECE_FIELDS) delete p[f];
+    }
+
+  // 2. The transcript. snapshot() drops it and the wire is the one place it
+  //    is the whole point — this is how a player who did not act still sees
+  //    the capture. Filtered as it is put back, so an effect addressed to one
+  //    seat never reaches the other to be animated.
+  v.fx = structuredClone(g.fx || []).filter((e) => !forOtherSeat(e, seat));
+
+  // 3. The log. Filtered before the tail is taken — slicing first would let
+  //    a seat's own visible lines be crowded out by lines it cannot read.
+  v.log = v.log.filter((e) => !forOtherSeat(e, seat));
+  if (v.log.length > VIEW_LOG_TAIL) v.log = v.log.slice(-VIEW_LOG_TAIL);
 
   v.youAre = seat;
   return Object.assign(v, extra);
@@ -2680,7 +2791,8 @@ function viewFor(g, seat, extra = {}) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     // constants
-    N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY,
+    N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY, MODES,
+    SECRET_PIECE_FIELDS,
     // geometry
     rc, rowOf, colOf, isDark, sq, mirrorOf,
     // lifecycle
@@ -2692,7 +2804,7 @@ if (typeof module !== "undefined" && module.exports) {
     // queries, for the test suite
     legalMovesFor, simpleMoves, captureMoves, capturersFor, pendingSacrifice,
     hasAnyMove, hasTurnOption, immobileWipeout, heraldAdjacent, heraldShielded, legalHeraldSteps,
-    countPieces, countForm, spellBlocker, transformBlocker, eligibleSpellIds,
+    countPieces, countForm, spellBlocker, transformBlocker, eligibleSpellIds, modeSpellIds,
     evasiveTargets, evasiveDests, mirrorTargets, veilTargets, mindControlTargets,
     eyeTargets, phaserTargets, chronosTargets, friendlyPawns, martyrSacrificePool,
     juggernautArmorPool, enchanterSacrificeOptions,
