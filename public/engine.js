@@ -105,12 +105,6 @@ const FORMS = {
     penalty: "Disoriented on transform and after every phase — cannot move next turn.",
     viaSpell: true,
   },
-  sentinel: {
-    name: "Sentinel", glyph: "▓", on: "pawn", cost: 3, cap: 2, capScope: "player", consumesTurn: true,
-    ability: "Solid terrain. Cannot move, capture, or be jumped over. An enemy that captures into a square adjacent to it must end its chain.",
-    penalty: "Every friendly piece in the same column behind it is frozen next turn · consumes your whole turn.",
-    viaSpell: true,
-  },
   herald: {
     name: "Herald", glyph: "⚑", on: "pawn", cost: 3, cap: 1, capScope: "player",
     ability: "A friendly pawn landing adjacent to the Herald may advance one extra square. The bonus step cannot capture.",
@@ -245,12 +239,6 @@ const SPELLS = {
     penalty: "Cannot move next turn · consumes your whole turn.",
     timing: "Either phase, on your own turn.",
   },
-  sentinelSpell: {
-    name: "Sentinel", cost: 3, rarity: "uncommon", group: "Transformation", when: "any",
-    text: "Transform one of your pawns into a Sentinel — solid terrain that cannot move, capture, or be jumped over. Requires a turn in which you have neither moved nor cast another spell.",
-    penalty: "Every friendly piece in the same column behind it is frozen next turn · consumes your whole turn.",
-    timing: "Either phase, on your own turn, before any other action.",
-  },
   heraldSpell: {
     name: "Herald", cost: 3, rarity: "uncommon", group: "Transformation", when: "any",
     text: "Transform a pawn standing on the opponent's half of the board into a Herald. A friendly pawn landing adjacent to it may advance one extra square (no capture).",
@@ -276,7 +264,7 @@ const SPELLS = {
      past reaches — and they last beyond the turn that paid for them.
      ─────────────────────────────────────────────────────────────────── */
   tactician: {
-    name: "Tactician", cost: 1, rarity: "common", group: "Combat", when: "declare",
+    name: "Tactician", cost: 0, rarity: "common", group: "Combat", when: "declare",
     flavor: "Count the throats before you cut one.",
     text: "Gain 1 FP for every capture currently available to you, whether or not you take it.",
     penalty: "You must take one of them this turn — the turn cannot be ended until you do.",
@@ -284,8 +272,8 @@ const SPELLS = {
   },
   rift: {
     name: "Rift", cost: 4, rarity: "uncommon", group: "Movement", when: "declare",
-    text: "Choose two empty dark squares. Any piece, friendly or enemy, that lands on one is immediately carried to the other.",
-    penalty: "The rift is inert for the rest of the turn that opened it.",
+    text: "Choose two empty dark squares. Any piece, friendly or enemy, that lands on one is immediately carried to the other. Cast while a rift is already open — yours or your opponent's — it seals that rift instead.",
+    penalty: "The rift is inert for the rest of the turn that opened it. Only one rift may exist at a time.",
     timing: "Declare Action phase only.",
   },
   wraparound: {
@@ -298,7 +286,7 @@ const SPELLS = {
   anchor: {
     name: "Anchor In Time", cost: 3, rarity: "uncommon", group: "Game Altering", when: "declare",
     flavor: "Some moments refuse to be unmade.",
-    text: "Lock the present. For the rest of the game neither player may rewind past this turn with Chronos's Gaze or Echo.",
+    text: "Lock the present. For the rest of the game neither player may rewind past this turn with Chronos's Gaze or Echo. Cast again on a later turn and the lock moves forward to that turn.",
     penalty: "It binds you too — you lose those rewinds just as your opponent does.",
     timing: "Declare Action phase only.",
   },
@@ -744,10 +732,8 @@ const at = i => G.board[i];
 const isEnemy = (p, owner) => p && p.owner !== owner;
 const isAlly  = (p, owner) => p && p.owner === owner;
 
-/* A Sentinel is terrain: it never acts and never gets jumped. */
-const isSentinel = p => p && p.form === "sentinel";
 /* The Alchemist trades mobility for income, permanently. */
-const isImmobile = p => p && (p.form === "sentinel" || p.form === "alchemist");
+const isImmobile = p => p && p.form === "alchemist";
 
 /** Can this piece take a movement action at all right now? */
 function canAct(p) {
@@ -882,8 +868,7 @@ function captureMoves(i) {
     if (mid < 0 || land < 0) continue;
     const victim = G.board[mid];
     if (!isEnemy(victim, p.owner)) continue;
-    if (isSentinel(victim)) continue;           // Sentinels cannot be jumped
-    if (isBarrier(mid)) continue;               // nor may a sealed square be crossed
+    if (isBarrier(mid)) continue;               // a sealed square may not be crossed
     if (G.board[land] || isBarrier(land)) continue;   // landing must be empty
     out.push({ to: land, kind: "capture", victim: mid });
   }
@@ -978,10 +963,6 @@ function transformBlocker(i, form, opts = {}) {
     case "phaser":
       if (p.captures < 1) return "This pawn has never captured.";
       break;
-    case "sentinel":
-      if (G.hasActed || G.castThisTurn > 0)
-        return "Requires a turn in which you neither move nor cast — declare it first.";
-      break;
     case "herald":
       if (!onEnemyHalf(i, p.owner)) return "Must be on the opponent's half of the board.";
       break;
@@ -1043,7 +1024,6 @@ function transformSpellTargets(form, owner) {
   return out;
 }
 const juggernautTargets = (owner) => transformSpellTargets("juggernaut", owner);
-const sentinelTargets = (owner) => transformSpellTargets("sentinel", owner);
 const heraldTargets = (owner) => transformSpellTargets("herald", owner);
 const enchanterTargets = (owner) => transformSpellTargets("enchanter", owner);
 const alchemistTargets = (owner) => transformSpellTargets("alchemist", owner);
@@ -1124,10 +1104,6 @@ function spellBlocker(id, caster = G.turn) {
       if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
       if (!juggernautTargets(caster).length) return "No piece can be armored as a Juggernaut.";
       break;
-    case "sentinelSpell":
-      if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
-      if (!sentinelTargets(caster).length) return "No pawn can become a Sentinel.";
-      break;
     case "heraldSpell":
       if (!G.dev && P.noTransform > 0) return `Transformation barred for ${P.noTransform} more turn(s).`;
       if (!heraldTargets(caster).length) return "No pawn can become a Herald.";
@@ -1146,14 +1122,24 @@ function spellBlocker(id, caster = G.turn) {
       if (!availableCaptures(caster)) return "You have no capture to count.";
       break;
     case "rift":
-      if (G.rift) return "A rift is already open.";
+      // The same card does both. With a rift already open, casting Rift SEALS
+      // it — whoever opened it. That is what stops one 4 FP cast from owning a
+      // pair of squares for the rest of the game, and it means the card is
+      // never dead in hand just because somebody else played theirs first.
+      if (G.rift) break;
       if (openSquares().length < 2) return "The board has no two empty squares to join.";
       break;
     case "wraparound":
       if (G.wrap > 0) return "The edges are already joined.";
       break;
     case "anchor":
-      if (G.anchor) return "Time is already anchored.";
+      // Deliberately no "already anchored" refusal. An anchor pins the game at
+      // the turn it was cast, so a second one cast later pins it FURTHER
+      // forward — it shortens the reach of every rewind again. Refusing the
+      // recast would have made the first copy of the card silently cancel
+      // every later one, which is not what the card says it does.
+      if (G.anchor && G.anchor.turnNo >= G.turnNo)
+        return "Time is already anchored at this very turn.";
       break;
     case "echo":
       if (G.anchor) return "Time is anchored — nothing may reach back past it.";
@@ -1842,10 +1828,10 @@ function resolveCapture(fromIdx, mv) {
      · THE CROWN. A pawn that reaches the far rank becomes a queen in plain
        sight; a secret queen is not a thing the rest of this file could carry.
 
-     · ANY TRANSFORMATION. Same reasoning. A Sentinel is visibly not an
-       ordinary pawn, so the disguise is already over; carrying the flag on
-       past that point would leave a secret shell on a piece nobody could
-       mistake for a pawn.
+     · ANY TRANSFORMATION. Same reasoning. A Herald is visibly not an ordinary
+       pawn, so the disguise is already over; carrying the flag on past that
+       point would leave a secret shell on a piece nobody could mistake for a
+       pawn.
 
    The last two reveal WITHOUT the retreat, and that is the line: the retreat
    is what the enemy's blow buys them, so only the enemy's blow triggers it.
@@ -1942,11 +1928,6 @@ function breakShell(i, why, from = null) {
   return home;
 }
 
-/** Does a capturing piece that landed on `i` have to stop because of a Sentinel? */
-function sentinelHalts(i, owner) {
-  return adjacentTo(i, (q) => isEnemy(q, owner) && isSentinel(q)).length > 0;
-}
-
 /** Is the pawn at `i` standing next to a friendly Herald? */
 function heraldAdjacent(i) {
   const p = G.board[i];
@@ -2036,17 +2017,6 @@ function performMove(from, mv, opts = {}) {
       log("Promotion ends the jump sequence.", "rule");
       G.chain = null;
       finishAction();
-      return;
-    }
-    if (sentinelHalts(mv.to, owner)) {
-      const walls = adjacentTo(mv.to, (q) => isEnemy(q, owner) && isSentinel(q));
-      fx("sentinelHalt", { at: mv.to, walls });
-      log(`A Sentinel adjacent to ${sq(mv.to)} forces the chain to stop.`, "rule");
-      G.chain = null;
-      // The Sentinel ends the JUMP SEQUENCE, not the move. The pawn is standing
-      // on mv.to like any other, so pass it through — a Herald beside that
-      // square still owes it a bonus step.
-      finishAction(mv.to);
       return;
     }
     if (captureMoves(mv.to).length) {
@@ -2226,11 +2196,11 @@ function veilBacklashPending(player) {
 /**
  * Is every piece `owner` has left one that can never move again?
  *
- * A Sentinel is terrain and an Alchemist has traded its mobility away for
- * income — neither can ever move or capture, and no spell or transformation
- * puts a mobile piece back on the board for a side that has no pawn to
- * sacrifice. A side reduced to nothing but these has not merely been
- * blockaded for a turn; it can never act again, so the game is decided.
+ * An Alchemist has traded its mobility away for income — it can never move or
+ * capture, and no spell or transformation puts a mobile piece back on the board
+ * for a side that has no pawn to sacrifice. A side reduced to nothing but these
+ * has not merely been blockaded for a turn; it can never act again, so the game
+ * is decided.
  */
 function immobileWipeout(owner) {
   let any = false;
@@ -2252,13 +2222,9 @@ function checkGameOver() {
   }
   for (const side of [0, 1]) {
     if (immobileWipeout(side)) {
-      const sent = countForm("sentinel", side), alch = countForm("alchemist", side);
-      const what = !alch ? "nothing left but Sentinels"
-                 : !sent ? "nothing left but Alchemists"
-                 : "nothing left but Sentinels and Alchemists";
       G.over = {
         winner: 1 - side,
-        reason: `${PLAYERS[side].name} has ${what} — not one piece that can ever move again`,
+        reason: `${PLAYERS[side].name} has nothing left but Alchemists — not one piece that can ever move again`,
       };
       return true;
     }
@@ -2528,7 +2494,7 @@ function applyTransform(i, form, choices = {}) {
   // A transformation is the third thing that ends a twinning — the two bodies
   // were one pawn, and one of them has just stopped being a pawn.
   severTwin(i, "vanishes — its twin has been transformed");
-  // And it is the fourth thing that shatters a shell. A Sentinel is visibly
+  // And it is the fourth thing that shatters a shell. A Herald is visibly
   // not an ordinary pawn, so the disguise is over the moment the form lands;
   // carrying the flag past here would leave a secret shell on a piece nobody
   // could mistake for a pawn in the first place.
@@ -2553,19 +2519,6 @@ function applyTransform(i, form, choices = {}) {
       effNext(p, "frozen", 1);
       log("The Phaser is disoriented — it cannot move next turn.", "rule");
       break;
-    case "sentinel": {
-      // Everything of yours in the same column, behind the new Sentinel, freezes.
-      const back = -fwd(owner);
-      const col = colOf(i);
-      let n = 0;
-      for (let r = rowOf(i) + back; r >= 0 && r < N; r += back) {
-        const q = G.board[rc(r, col)];
-        if (isAlly(q, owner)) { effNext(q, "frozen", 1); n++; }
-      }
-      if (n) log(`${n} friendly piece(s) behind the Sentinel are frozen next turn.`, "rule");
-      log("The Sentinel is now terrain — it can never move, capture, or be jumped.", "rule");
-      break;
-    }
     case "herald":
       effNext(p, "frozen", 1);
       log("The Herald is frozen next turn.", "rule");
@@ -2822,9 +2775,6 @@ function castSpell(id, caster, payload = {}) {
     case "juggernautSpell":
       applyTransform(payload.target, "juggernaut", { sacrifice: payload.sacrifice });
       break;
-    case "sentinelSpell":
-      applyTransform(payload.target, "sentinel", {});
-      break;
     case "heraldSpell":
       applyTransform(payload.target, "herald", {});
       break;
@@ -2848,6 +2798,14 @@ function castSpell(id, caster, payload = {}) {
     }
 
     case "rift": {
+      // Closing. The open rift is the target, so no payload is read at all.
+      if (G.rift) {
+        const { a, b } = G.rift;
+        G.rift = null;
+        fx("riftClose", { a, b, caster });
+        log(`Rift — the mouths at ${sq(a)} and ${sq(b)} are sealed. The board is whole again.`, "big");
+        break;
+      }
       G.rift = { a: payload.a, b: payload.b, madeOn: G.turnNo };
       fx("rift", { a: payload.a, b: payload.b, caster });
       log(`Rift — ${sq(payload.a)} and ${sq(payload.b)} are joined. Anything landing on one is carried to the other.`, "big");
@@ -2866,9 +2824,12 @@ function castSpell(id, caster, payload = {}) {
     }
 
     case "anchor": {
+      const moved = !!G.anchor;
       G.anchor = { turnNo: G.turnNo };
       fx("anchor", { caster });
-      log(`Anchor In Time — the game is pinned at turn ${G.turnNo}. Neither player may rewind past it again.`, "big");
+      log(moved
+        ? `Anchor In Time — the pin is dragged forward to turn ${G.turnNo}. Even less of the past is left to rewind to.`
+        : `Anchor In Time — the game is pinned at turn ${G.turnNo}. Neither player may rewind past it again.`, "big");
       break;
     }
 
@@ -3535,10 +3496,6 @@ function dispatchAction(seat, a) {
           payload.target = want.target; payload.sacrifice = want.sacrifice;
           break;
         }
-        case "sentinelSpell":
-          if (!sentinelTargets(seat).includes(want.target)) return fail("That pawn cannot become a Sentinel.");
-          payload.target = want.target;
-          break;
         case "heraldSpell":
           if (!heraldTargets(seat).includes(want.target)) return fail("That pawn cannot become a Herald.");
           payload.target = want.target;
@@ -3562,6 +3519,7 @@ function dispatchAction(seat, a) {
           break;
 
         case "rift": {
+          if (G.rift) break;                       // closing takes no target
           const open = openSquares();
           if (!open.includes(want.a) || !open.includes(want.b))
             return fail("A rift joins two empty dark squares.");
@@ -3748,7 +3706,7 @@ if (typeof module !== "undefined" && module.exports) {
     quantumTargets, quantumSpots, quantumPair, collapseQuantum,
     twinTargets, twinPartner, severTwin, twinDebt,
     juggernautArmorPool, enchanterSacrificeOptions,
-    juggernautTargets, sentinelTargets, heraldTargets, enchanterTargets, alchemistTargets,
+    juggernautTargets, heraldTargets, enchanterTargets, alchemistTargets,
     cellAt, isBarrier, backStepsFrom, openSquares, availableCaptures,
     echoTarget, echoTargets, chokepointTarget, tacticianDebt, anchoredAgainst,
     stutterBans, stutterHasAlternative, sameTurnAction, playRandomTurn,

@@ -42,7 +42,6 @@
   font-weight:800;
   will-change:transform,opacity;
 }
-.fx-ghost.sentinel{border-radius:14%}
 /* Ghosts never inherit the board's idle loops — a piece in flight is busy. */
 .fx-ghost.frozen::after{content:none}
 
