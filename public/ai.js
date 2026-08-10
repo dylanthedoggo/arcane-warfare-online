@@ -446,7 +446,11 @@ function expandChain(origin, at, steps, out, owner) {
     // the sequence there whether it did or not — a chain is a chain of
     // CAPTURES, and half the time that was not one — so the search must not
     // keep extending past it and plan on the coin landing its way.
-    const halt = !stillThere || rec.promoted || rec.quantumHalt || sentinelHalts(mv.to, owner);
+    //
+    // The Sentinel used to add a fourth way to halt here and no longer exists;
+    // promotion is now the only thing that stops a sequence the attacker
+    // survived. performMove agrees — see engine.js.
+    const halt = !stillThere || rec.promoted || rec.quantumHalt;
     if (halt) out.push({ steps: steps.slice(), capture: true, from: origin, to: mv.to });
     else expandChain(origin, mv.to, steps, out, owner);
     steps.pop();
@@ -504,7 +508,7 @@ function rootMoves(owner) {
    ─────────────────────────────────────────────────────────────────────────── */
 
 const VAL_PAWN = 100, VAL_QUEEN = 250;
-const VAL_FORM = { juggernaut: 35, phaser: 55, sentinel: 45, herald: 55, enchanter: 130, alchemist: 95 };
+const VAL_FORM = { juggernaut: 35, phaser: 55, herald: 55, enchanter: 130, alchemist: 95 };
 const VAL_ARMOR = 60;
 
 /**
@@ -1171,9 +1175,6 @@ function aiSpellCandidates(phaseName) {
     for (const i of juggernautTargets(AI.side).slice(0, aiWide(3)))
       for (const s of juggernautArmorPool(i).slice(0, 2))
         out.push({ id: "juggernautSpell", payload: { target: i, sacrifice: s } });
-  if (have("sentinelSpell"))
-    for (const i of sentinelTargets(AI.side).slice(0, aiWide(3)))
-      out.push({ id: "sentinelSpell", payload: { target: i } });
   if (have("heraldSpell"))
     for (const i of heraldTargets(AI.side).slice(0, aiWide(3)))
       out.push({ id: "heraldSpell", payload: { target: i } });
@@ -1268,9 +1269,17 @@ function aiSpellCandidates(phaseName) {
       out.push({ id: "echo", payload: { target: i } });
   if (have("wraparound") && !G.wrap)
     out.push({ id: "wraparound", payload: {} });
-  if (have("anchor") && !G.anchor)
+  // An anchor pins the game at the turn it was cast, so a LATER one pins it
+  // further forward and shortens every rewind again. The referee only refuses
+  // a second anchor on the very turn the first was cast, so neither may this.
+  if (have("anchor") && (!G.anchor || G.anchor.turnNo < G.turnNo))
     out.push({ id: "anchor", payload: {} });
-  if (have("rift")) {
+  if (have("rift") && G.rift) {
+    // Sealing. The same card does both, and with a rift already open the open
+    // rift IS the target — castSpell reads no payload at all. One candidate,
+    // no geometry to search.
+    out.push({ id: "rift", payload: {} });
+  } else if (have("rift")) {
     // Only rifts worth walking into: one mouth beside a piece of ours, the
     // other deep in enemy ground. Every pair would be thousands of candidates.
     const open = openSquares();
@@ -1561,6 +1570,10 @@ function aiShouldDraw() {
   if (P.noDraw > 0 || !eligibleSpellIds().length) return false;
   if (G.drewThisTurn || G.hasActed || G.castThisTurn > 0) return false;
   if (capturersFor(AI.side).length) return false;        // never pass up a capture
+  // A drawn turn that Stutter unmade may not simply be drawn again. rootMoves
+  // does this for movements; the machine never goes through the referee, so
+  // without this it would redraw where a player is refused. See rootMoves.
+  if (stutterBans(AI.side, { t: "draw" })) return false;
   const d = aiCfg().policyDepth;
   const base = aiSearchValue(AI.side, d);
   const v = aiSimValue(() => drawSpell(AI.side), 1 - AI.side, d);
@@ -1574,7 +1587,11 @@ function aiShouldDraw() {
 function aiCastOnce(phaseName) {
   if (G.over || G.players[AI.side].noSpells > 0) return false;
   const movesNext = phaseName === "end" ? 1 - AI.side : AI.side;
-  const offered = aiSpellCandidates(phaseName).filter((c) => !spellBlocker(c.id, AI.side));
+  // Stutter's ban binds the machine exactly as it binds a player: a cast it
+  // unmade may not simply be repeated. Same reasoning as rootMoves — the
+  // refusal lives in the referee, and the machine never goes through it.
+  const offered = aiSpellCandidates(phaseName).filter((c) =>
+    !spellBlocker(c.id, AI.side) && !stutterBans(AI.side, { t: "cast", id: c.id }));
   if (!offered.length) return false;
   const cands = aiShortlist(offered);
   // Silent truncation reads as "everything was considered" when it was not, so
@@ -1675,20 +1692,21 @@ function aiFinishMove() {
    A turn is CHOSEN under applyStep's model of the rules and PLAYED OUT under
    performMove's. Modelling Temporal Twin and Quantum Pawn closed most of the
    distance between those two, but they will never agree perfectly and they do
-   not have to: a quantum whiff, an Eye For An Eye retaliation, a Sentinel halt,
-   an enemy Hollow shell the machine is not entitled to see, or an early
-   promotion can each end a sequence the search expected to continue. What is
-   left in the plan then describes hops from squares that are now empty.
+   not have to: a quantum whiff, an Eye For An Eye retaliation, an enemy Hollow
+   shell the machine is not entitled to see, or an early promotion can each end
+   a sequence the search expected to continue. What is left in the plan then
+   describes hops from squares that are now empty.
 
    Nothing crashes if those are played — performMove returns immediately when
    handed an empty square — so the failure is silent, and what the player sees
    is the machine taking half a turn for no stated reason.
 
-   Worse, one case is not silent at all. A Sentinel halt and a promotion both
-   close the SEQUENCE while leaving the jump sitting there on the board, still
-   perfectly playable. Replaying the plan through it would take a second action
-   in one turn, which no player can do. The referee would refuse it; the machine
-   does not go through the referee.
+   Worse, one case is not silent at all. A promotion closes the SEQUENCE while
+   leaving the jump sitting there on the board, still perfectly playable — as
+   the Sentinel's halt also did, before that card was retired. Replaying the
+   plan through one of those would take a second action in one turn, which no
+   player can do. The referee would refuse it; the machine does not go through
+   the referee.
    ─────────────────────────────────────────────────────────────────────────── */
 
 /** Is a step the search planned still something the rules allow, right now? */

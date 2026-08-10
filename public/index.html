@@ -3990,9 +3990,12 @@ function runTests() {
 
   blank(); AI.side = 0;
   put(rc(7, 4), 0, "pawn", { form: "enchanter" }); put(rc(6, 5), 1); put(rc(4, 5), 1, "queen");
-  put(rc(9, 0), 0); put(rc(2, 3), 0, "pawn", { form: "phaser" }); put(rc(1, 2), 1, "pawn", { form: "sentinel" });
+  put(rc(9, 0), 0); put(rc(2, 3), 0, "pawn", { form: "phaser" }); put(rc(1, 2), 1, "pawn", { form: "alchemist" });
+  // Violet's piece here was a Sentinel until that card was retired; it is an
+  // Alchemist now, which is why this row reads 50 points different from the
+  // one recorded before the retirement — VAL_FORM prices the two at 45 and 95.
   ok("...and so do the transformations, the Enchanter's board-wide swap included",
-    sideScore(0) === 656 && sideScore(1) === 559 && evaluate(0) === 97,
+    sideScore(0) === 656 && sideScore(1) === 609 && evaluate(0) === 47,
     `${sideScore(0)}/${sideScore(1)}/${evaluate(0)}`);
 
   blank(); AI.side = 0;
@@ -4054,11 +4057,11 @@ function runTests() {
   /* ── the plan is re-checked against the board ──────────────────────────
      A turn is chosen under the search's model of the rules and played out one
      beat at a time under the referee's. When those part company — a quantum
-     whiff, an enemy shell, a Sentinel halt — what is left of the plan describes
+     whiff, an enemy shell, an early promotion — what is left of the plan describes
      hops from squares that are now empty.
 
      The dangerous half is not the empty squares, which performMove ignores. It
-     is that a Sentinel halt and a promotion both end the SEQUENCE while leaving
+     is that a promotion ends the SEQUENCE while leaving
      the jump sitting on the board, still playable. Replaying the plan through
      one of those would take a second action in a single turn, which no player
      can do and the referee would refuse — except that the machine does not end
@@ -4105,7 +4108,6 @@ function runTests() {
     const g = aiPlayGame("skilled", "skilled", 30, s);
     if (g.turns > 0
       && G.board.every((p, i) => !p || isDark(i))
-      && countForm("sentinel", 0) <= 2 && countForm("sentinel", 1) <= 2
       && countForm("phaser") <= 2
       && G.board.every((p) => !p || !p.form || FORMS[p.form])) seedsClean++;
     seedNotes.push(`${s}:${g.turns}t`);
