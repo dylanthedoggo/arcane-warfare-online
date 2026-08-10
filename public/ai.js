@@ -132,6 +132,18 @@ let AI = {
   // neighbour, is set the same ad-hoc way and clamps the budget rather than
   // changing its currency. See "what a search may spend".
   deterministic: false,
+  // Multiplier on every search budget; 1 is each level's own figure.
+  //
+  // It exists because `fast` cannot do this job. Clamping to 40 ms makes
+  // Ruthless's 3000 and Novice's 250 into the same number, and twelve times the
+  // thinking is most of what separates those two rungs — so the ladder measured
+  // through `fast` has had the greater part of its own ladder removed. A scale
+  // buys games-per-minute at a cost every level pays in proportion, which is
+  // the difference between a cheap measurement and a misleading one.
+  //
+  // It is also what makes `timeMs` tunable at all: a harness that ignores a
+  // knob cannot be used to set it.
+  budgetScale: 1,
 };
 
 /** Abandon whatever the machine was doing; any in-flight beat becomes a no-op. */
@@ -1146,7 +1158,7 @@ function searchBestMove(owner) {
    ─────────────────────────────────────────────────────────────────────────── */
 
 /** Wall-clock budget for one search. Headless self-play runs on a shoestring. */
-const aiBudget = (ms) => (AI.fast ? Math.min(ms, 40) : ms);
+const aiBudget = (ms) => (AI.fast ? Math.min(ms, 40) : ms) * AI.budgetScale;
 
 /**
  * The same budget in nodes. The floor is one check's worth: the counter's low
@@ -1190,7 +1202,7 @@ function aiSearchValue(owner, depth) {
  * caps the whole decision so one beat of the live driver can never block the
  * page for seconds on a crowded board.
  */
-const aiPolicyBudget = () => (AI.fast ? 180 : aiCfg().policyBudget);
+const aiPolicyBudget = () => (AI.fast ? 180 : aiCfg().policyBudget) * AI.budgetScale;
 
 /**
  * The same budget in the same two currencies, but spanning a whole policy
@@ -1722,8 +1734,11 @@ function aiCastOnce(phaseName) {
   if (!offered.length) return false;
   const cands = aiShortlist(offered);
   // Silent truncation reads as "everything was considered" when it was not, so
-  // say so. Not during headless self-play, which would drown the console.
-  if (cands.length < offered.length && !AI.fast)
+  // say so. Not during headless self-play, which would drown the console —
+  // and `deterministic` is what marks a run as self-play now. It used to be
+  // `fast`, which was the same thing until a self-play run could ask for real
+  // budgets; then a --scale run started printing forty lines a game.
+  if (cands.length < offered.length && !AI.deterministic)
     console.warn(`AI: pricing ${cands.length} of ${offered.length} spell candidates `
       + `(${offered.length - cands.length} past the shortlist cap).`);
   const cfg = aiCfg();
@@ -1747,8 +1762,8 @@ function aiCastOnce(phaseName) {
     if (v > bestV) { bestV = v; best = c; }
     if (aiPolicySpent(stop)) break;
   }
-  if (priced < cands.length && !AI.fast)
-    console.warn(`AI: the clock stopped the policy after ${priced} of ${cands.length} candidates.`);
+  if (priced < cands.length && !AI.deterministic)
+    console.warn(`AI: the budget stopped the policy after ${priced} of ${cands.length} candidates.`);
   if (!best) return false;
   aiExecuteSpell(best);
   return true;
@@ -1903,6 +1918,27 @@ function aiRunTurn() {
   if (!G.over) endTurnLocal();
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   SEAM: BROWSER-ONLY BEGINS
+
+   Everything between this banner and its closing pair is the web page. It
+   paints, it paces itself with setTimeout so a person can watch, and it hides
+   hands between two people sharing a screen. tools/bootstrap.js runs the rest
+   of this file under Node and gives these lines' dependencies — render, UI, FX,
+   NET, clearSelection, announceWinner, raiseCurtain — stand-ins that do
+   nothing, on the grounds that with no screen there is nothing for them to do.
+
+   THE BANNERS ARE CHECKED, not decorative. The bootstrap reads this file, finds
+   this pair, and refuses to start if a page name is used outside them. That is
+   the one failure mode this arrangement has: a render() added to the thinking
+   half would go on working under Node — silently, because the stand-in is a
+   no-op — and the two copies of the machine would drift apart with nothing to
+   say so. A line number in a document does not hold. This does.
+
+   To move the seam, move the banners. To widen it, add the name to the
+   bootstrap's allowlist along with the reason it is allowed.
+   ══════════════════════════════════════════════════════════════════════════ */
+
 /* ── the live driver ────────────────────────────────────────────────────────
    A setTimeout state machine rather than one long async function. Each beat
    does a chunk of synchronous work, paints, and schedules the next. Nothing
@@ -2043,8 +2079,16 @@ function afterHandoff(sameSeat) {
   raiseCurtain();
 }
 
-/* ── self-play harness (used to measure strength; open the console) ─────────
-   aiTournament("skilled", "random", 20)  ->  win/loss record
+/* ══════════════════════════════════════════════════════════════════════════
+   SEAM: BROWSER-ONLY ENDS
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── self-play harness (measures strength) ──────────────────────────────────
+   From a browser console:   aiTournament("skilled", "random", 20)
+   From a terminal:          npm run selfplay -- skilled random 20
+
+   Both run the same code on the same seeds and get the same answer; that is
+   what tools/agreement.js exists to keep true.
    ─────────────────────────────────────────────────────────────────────────── */
 
 function aiRandomTurn(side) {
@@ -2071,8 +2115,19 @@ function aiRandomTurn(side) {
   if (!G.over) endTurnLocal();
 }
 
-/** One headless game. `gold`/`violet` are level names or the string "random". */
-function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
+/**
+ * One headless game. `gold`/`violet` are level names or the string "random".
+ *
+ * `opts` decides what the two of them are given to think with:
+ *
+ *   fast    true (the default) is the page's own shoestring — every budget
+ *           clamped to 40 ms, which is what keeps the self-test suite's games
+ *           down to seconds. It also flattens the levels against each other;
+ *           see AI.budgetScale.
+ *   scale   multiplier on the budgets, applied after `fast`. `{ fast: false,
+ *           scale: 1 }` is the machine as a player meets it, and is slow.
+ */
+function aiPlayGame(gold, violet, maxTurns = 300, seed = null, opts = {}) {
   const saved = { ...AI };
   // "ai", not the default "local" — self-play is how the machine's handling of
   // the concealment cards gets measured, and in a local-mode game it would
@@ -2085,7 +2140,9 @@ function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
   // an instrument that gives a different reading each time it is picked up is
   // not one. With the clock as the budget, the same seeded game came out
   // 17v18 and then 17v17 — see "what a search may spend".
-  AI.on = true; AI.fast = true; AI.deterministic = true; AI.thinking = false;
+  AI.on = true; AI.thinking = false; AI.deterministic = true;
+  AI.fast = opts.fast !== false;
+  AI.budgetScale = opts.scale == null ? 1 : opts.scale;
   beginTurn(0);
   let turns = 0;
   while (!G.over && turns < maxTurns) {
@@ -2108,19 +2165,31 @@ function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
  * Plays `n` games with colours swapped each round so first-move bias cancels.
  * Games that hit the turn limit are awarded on material — a side with twice the
  * pieces left has won in every sense that matters.
+ *
+ * THE SEED IS PRINTED, and that is worth more than it looks: a surprising game
+ * is only worth arguing about if it can be played again, and `aiPlayGame` takes
+ * a seed. `seed0` moves the whole block, so a second opinion can be had on a
+ * hundred games nobody has looked at yet rather than the same hundred.
+ *
+ * That promise rests entirely on the machine being seeded — see aiRng — and on
+ * the budget being counted in something the machine cannot vary, which is what
+ * aiPlayGame turns on. Without both, a printed seed is a promise the output
+ * does not keep.
  */
-function aiTournament(a, b, n = 10, maxTurns = 200) {
+function aiTournament(a, b, n = 10, maxTurns = 200, seed0 = 1000, opts = {}) {
   const rec = { [a]: 0, [b]: 0, ties: 0, games: [] };
   for (let i = 0; i < n; i++) {
     const aIsGold = i % 2 === 0;
-    const r = aiPlayGame(aIsGold ? a : b, aIsGold ? b : a, maxTurns, 1000 + i);
+    const seed = seed0 + i;
+    const r = aiPlayGame(aIsGold ? a : b, aIsGold ? b : a, maxTurns, seed, opts);
     const aP = aIsGold ? r.gold : r.violet, bP = aIsGold ? r.violet : r.gold;
     let w;
     if (r.winner != null) w = (r.winner === 0) === aIsGold ? a : b;
     else w = aP > bP ? a : bP > aP ? b : "ties";
     rec[w]++;
-    rec.games.push({ g: i + 1, winner: w, turns: r.turns, [a]: aP, [b]: bP, how: r.reason });
-    console.log(`game ${i + 1}: ${w} (${r.turns} turns, ${aP}v${bP}, ${r.reason})`);
+    rec.games.push({ g: i + 1, seed, winner: w, turns: r.turns, [a]: aP, [b]: bP, how: r.reason });
+    console.log(`game ${i + 1} (seed ${seed}, ${aIsGold ? a : b} is Gold): ${w} `
+      + `— ${r.turns} turns, ${aP}v${bP}, ${r.reason}`);
   }
   console.log(`${a} ${rec[a]} — ${rec[b]} ${b}  (${rec.ties} tied)`);
   return rec;

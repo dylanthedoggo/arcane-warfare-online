@@ -3687,6 +3687,22 @@ function viewFor(g, seat, extra = {}) {
    setG(room.G) immediately before each applyAction(). That is safe only because
    Node is single-threaded and applyAction never awaits, so no second room can
    interleave. Do not make anything on this path async.
+
+   TWO AUDIENCES, NOT ONE. This list started as what the server needs plus what
+   the Node test suite asks about, and both of those go through the doorway:
+   they hand applyAction a move and read the result. ai.js does not. It plays
+   through the rules directly — performMove, castSpell, applyTransform — and
+   evaluates positions with the geometry and the predicates, so it needs the
+   parts a caller on the doorway never has to name. In the browser it gets them
+   for free, because a classic script shares one lexical scope with this file.
+   Under Node it does not, and a name left out of this list is a ReferenceError
+   at the first position the machine tries to evaluate.
+
+   That is the good failure. The bad one is silent, and it is why `pieceLabel`
+   is on this list rather than being reimplemented as "a minimal text version
+   for Node": a second copy of a piece of the engine drifts from the first, and
+   then two runs of the same game disagree for a reason nobody thinks to look
+   for. If the machine needs something the engine has, it gets the engine's.
    ══════════════════════════════════════════════════════════════════════════ */
 
 if (typeof module !== "undefined" && module.exports) {
@@ -3694,14 +3710,24 @@ if (typeof module !== "undefined" && module.exports) {
     // constants
     N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY, MODES,
     SECRET_PIECE_FIELDS, PRESSURE_SECONDS,
-    // geometry
+    // geometry — the direction tables and the two rows that matter to a pawn
     rc, rowOf, colOf, isDark, sq, mirrorOf,
+    DIAG, ORTHO, moveDirs, adjacentTo, promoRow, homeRow,
     // lifecycle
     newGame, beginTurn, endTurn, snapshot, restore, checkGameOver, log,
+    mkPiece, mulberry32,
     setG: (g) => { G = g; },
     getG: () => G,
     // the doorway
     applyAction, viewFor, undoTarget, applyUndoTo,
+    // the rules, applied. The machine plays through these rather than through
+    // the doorway, which is what keeps its captures, promotions, penalties and
+    // logging identical to a human's turn. See ai.js's second invariant.
+    performMove, castSpell, drawSpell, discardCards, applyTransform, promoteIfDue,
+    // predicates the evaluation reads at every leaf
+    canAct, canCapture, isAlly, isEnemy, isImmobile,
+    // naming, for the log lines the machine writes
+    pieceLabel,
     // queries, for the test suite
     legalMovesFor, simpleMoves, captureMoves, capturersFor, pendingSacrifice,
     hasAnyMove, hasTurnOption, immobileWipeout, heraldAdjacent, heraldShielded, legalHeraldSteps,
