@@ -185,7 +185,6 @@ button:disabled{cursor:not-allowed}
   content:"";position:absolute;inset:0;border-radius:50%;
   background:repeating-linear-gradient(45deg,transparent 0 3px,rgba(140,200,255,.42) 3px 5px);
 }
-.piece.sentinel{border-radius:14%;width:84%;height:84%}
 .piece.marked{outline:2.5px solid var(--bad);outline-offset:2.5px}
 .piece.veiled{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(120,255,220,.75) inset}
 /* Only ever drawn on your own shells — see renderBoard. A shield, not a ghost:
@@ -235,7 +234,6 @@ button:disabled{cursor:not-allowed}
   border:1.5px dashed rgba(127,178,255,.9);
   pointer-events:none;z-index:4;
 }
-.piece.sentinel .pendring{border-radius:18%}
 
 /* ══════════════════════════════════════════════════════════════════
    SIDEBAR
@@ -781,7 +779,6 @@ function renderBoard() {
       if (p.rank === "queen") d.classList.add("queen");
       if (p.armor) d.classList.add("armored");
       if (p.frozen > 0) d.classList.add("frozen");
-      if (p.form === "sentinel") d.classList.add("sentinel");
       // An Alchemist can never move or capture again. fx.css gives it a slow
       // shimmer so it stops reading as an ordinary queen.
       if (p.form === "alchemist") d.classList.add("alchemist");
@@ -1130,7 +1127,8 @@ function renderActions() {
   }
 
   const canDraw = G.phase === "declare" && !G.hasActed && G.castThisTurn === 0 && !G.drewThisTurn
-    && P.noDraw <= 0 && eligibleSpellIds().length > 0;
+    && P.noDraw <= 0 && eligibleSpellIds().length > 0
+    && !stutterBans(G.turn, { t: "draw" });
   add("Draw a Spell Card",
     canDraw ? (G.dev ? "one card · costs you nothing here" : "one card · ends your turn") : drawWhy(P),
     "", canDraw, () => act({ t: "draw" }), "draw");
@@ -1152,6 +1150,9 @@ function drawWhy(P) {
   if (G.drewThisTurn) return "already drew";
   if (G.hasActed || G.castThisTurn) return "must be your first action";
   if (G.phase !== "declare") return "Declare phase only";
+  // Last, because the others describe the turn and this one describes the turn
+  // BEFORE it — the one Stutter unmade, which was spent on exactly this.
+  if (stutterBans(G.turn, { t: "draw" })) return "Stutter — you already took that turn";
   return "";
 }
 
@@ -1520,11 +1521,6 @@ function beginCast(id, caster) {
       });
       return;
 
-    case "sentinelSpell":
-      target("Choose a pawn to transform into a Sentinel", sentinelTargets(caster),
-        (t) => finish({ target: t }));
-      return;
-
     case "heraldSpell":
       target("Choose a pawn on the opponent's half to transform into a Herald", heraldTargets(caster),
         (t) => finish({ target: t }));
@@ -1561,6 +1557,14 @@ function beginCast(id, caster) {
       return;
 
     case "rift":
+      // A rift already open makes this the sealing half of the card, and there
+      // is nothing to point at — the open rift is the target.
+      if (G.rift) {
+        confirmFirst(`A rift is open at <b>${sq(G.rift.a)}</b> and <b>${sq(G.rift.b)}</b>.<br><br>`
+          + "Casting Rift now <b>seals</b> it. Nothing will be carried between those squares again.",
+          () => finish({}));
+        return;
+      }
       target("Choose the first end of the rift", openSquares(), (a) => {
         target("Choose the far end", openSquares().filter((j) => j !== a),
           (b) => finish({ a, b }));
@@ -1572,7 +1576,10 @@ function beginCast(id, caster) {
       return;
 
     case "anchor":
-      confirmFirst(`${S.text}<br><br>Pins the game at <b>turn ${G.turnNo}</b>.`, () => finish({}));
+      confirmFirst(`${S.text}<br><br>`
+        + (G.anchor
+          ? `Time is already pinned at turn <b>${G.anchor.turnNo}</b>. This drags the pin forward to <b>turn ${G.turnNo}</b>.`
+          : `Pins the game at <b>turn ${G.turnNo}</b>.`), () => finish({}));
       return;
 
     case "echo":
@@ -2170,7 +2177,7 @@ function renderRules() {
   if (ruleTab === "Basics") {
     card("Winning", [
       "Capture all enemy pieces, blockade your opponent so they cannot act at all, or accept their resignation.",
-      "A side left with nothing but Sentinels — or any mix of pieces that can never move again — has lost on the spot. Terrain cannot win a war.",
+      "A side left with nothing but pieces that can never move again — Alchemists — has lost on the spot. Terrain cannot win a war.",
     ]);
     card("Movement", [
       "Pawns step one square diagonally forward. Reaching the far row crowns them Queen.",
@@ -2179,7 +2186,7 @@ function renderRules() {
     card("Capture", [
       "Jump an adjacent enemy piece into the empty square beyond it. Pawns capture forward only.",
       "Captures are mandatory. Moving a different piece instead forfeits one of the pieces that could have jumped — you choose which. Ending your turn without moving, or drawing a card, carries no penalty.",
-      "Land a capture with another available and you must keep jumping. A Sentinel adjacent to your landing square, or a promotion, ends the sequence.",
+      "Land a capture with another available and you must keep jumping. A promotion ends the sequence.",
     ]);
     card("The turn", [
       "Start — gain 1 FP every second turn, plus 1 for each of your Alchemists every turn.",
@@ -2447,10 +2454,6 @@ function runTests() {
   ok("a blocked landing square cancels the jump", captureMoves(rc(7, 4)).length === 0);
 
   blank();
-  put(rc(7, 4), 0); put(rc(6, 5), 1, "pawn", { form: "sentinel" });
-  ok("a Sentinel cannot be jumped", captureMoves(rc(7, 4)).length === 0);
-
-  blank();
   put(rc(6, 5), 0); put(rc(5, 4), 1);
   ok("a pawn cannot capture backward",
     captureMoves(rc(6, 5)).length === 1 && captureMoves(rc(6, 5))[0].to === rc(4, 3));
@@ -2470,11 +2473,6 @@ function runTests() {
   ok("the chain resolves and the turn advances", G.chain === null && G.phase === "end");
   ok("both victims are gone", !G.board[rc(6, 5)] && !G.board[rc(4, 5)]);
   ok("two captures paid 2 FP", G.players[0].fp === 2, G.players[0].fp);
-
-  blank();
-  put(rc(7, 4), 0); put(rc(6, 5), 1); put(rc(4, 5), 1); put(rc(4, 7), 1, "pawn", { form: "sentinel" });
-  performMove(rc(7, 4), captureMoves(rc(7, 4))[0]);
-  ok("a Sentinel adjacent to the landing square halts the chain", G.chain === null && G.phase === "end");
 
   /* ── promotion ─────────────────────────────────────────────────────── */
   group("Promotion");
@@ -2533,12 +2531,8 @@ function runTests() {
   ok("an unarmored Juggernaut dies to the next capture", !G.board[rc(6, 5)]);
   ok("capturing a transformed piece pays 2 FP", G.players[0].fp === 2, G.players[0].fp);
 
-  /* ── Sentinel / Herald / Alchemist / Enchanter ─────────────────────── */
+  /* ── Herald / Alchemist / Enchanter ────────────────────────────────── */
   group("Transformations");
-  blank();
-  put(rc(6, 5), 0, "pawn", { form: "sentinel" });
-  ok("a Sentinel never moves", simpleMoves(rc(6, 5)).length === 0 && captureMoves(rc(6, 5)).length === 0);
-
   blank();
   put(rc(6, 5), 0, "queen", { form: "alchemist" });
   put(rc(9, 2), 0);                                  // an army that can still march…
@@ -2614,17 +2608,16 @@ function runTests() {
   ok("...the pawn actually advances", !!G.board[hsteps[0].to] && !G.board[rc(6, 5)]);
   ok("...and the obligation clears", G.heraldBonus === null);
 
-  // Regression: the Sentinel ends a JUMP SEQUENCE. It used to swallow the
-  // Herald's bonus with it, because the halt path dropped the landing square.
+  // Regression: a capture that ends the JUMP SEQUENCE still owes the Herald's
+  // bonus. The halt path used to drop the landing square and swallow it.
   blank();
   put(rc(5, 4), 0, "pawn", { form: "herald" });
   put(rc(8, 3), 0);
   put(rc(7, 4), 1);
-  put(rc(7, 6), 1, "pawn", { form: "sentinel" });
   put(rc(0, 1), 1);
   G.turn = 0; G.phase = "declare"; broke();
   applyAction(0, { t: "move", from: rc(8, 3), to: rc(6, 5), kind: "capture" });
-  ok("a Sentinel halting the chain does not eat the Herald's bonus",
+  ok("a chain that ends beside the Herald still gets its bonus",
     G.heraldBonus === rc(6, 5), `${G.heraldBonus} — ${G.log.slice(-2).map((l) => l.text).join(" / ")}`);
 
   blank();
@@ -2750,8 +2743,8 @@ function runTests() {
     eligibleSpellIds().length === modeSpellIds().length, eligibleSpellIds().length);
   const COSTS = {
     hopscotch: 3, evasive: 3, mirror: 2, veil: 2, mindcontrol: 3, eye: 3, chronos: 4, cascade: 5, martyr: 3, phaserSpell: 3,
-    juggernautSpell: 3, sentinelSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
-    tactician: 1, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
+    juggernautSpell: 3, heraldSpell: 3, enchanterSpell: 3, alchemistSpell: 6,
+    tactician: 0, rift: 4, wraparound: 4, anchor: 3, echo: 4, chokepoint: 4,
     stutter: 4, pressure: 3, hollow: 3, quantum: 5, twin: 5,
   };
   ok("every spell cost matches the rulebook",
@@ -2760,7 +2753,7 @@ function runTests() {
     SPELL_IDS.every((id) => RARITY[SPELLS[id].rarity] > 0));
   ok("...and its weight is derived from that rarity, never hand-written",
     SPELL_IDS.every((id) => SPELLS[id].weight === RARITY[SPELLS[id].rarity]));
-  const FCOSTS = { juggernaut: 3, phaser: 0, sentinel: 3, herald: 3, enchanter: 3, alchemist: 6 };
+  const FCOSTS = { juggernaut: 3, phaser: 0, herald: 3, enchanter: 3, alchemist: 6 };
   ok("every transformation cost matches the rulebook",
     Object.keys(FORMS).every((f) => FORMS[f].cost === FCOSTS[f]));
   ok("every transformation is reached only through its spell",
@@ -2797,7 +2790,7 @@ function runTests() {
   G.turn = 0; G.phase = "declare"; G.players[0].fp = 0; G.players[0].hand = ["tactician"];
   ok("it counts every jump, not every jumper", availableCaptures(0) === 2, availableCaptures(0));
   castSpell("tactician", 0, {});
-  ok("...and pays one Focus for each", G.players[0].fp === 2 - 1, G.players[0].fp);  // 2 gained, 1 spent
+  ok("...and pays one Focus for each", G.players[0].fp === 2, G.players[0].fp);  // 2 gained, the card is free
   ok("...leaving a debt of one capture", tacticianDebt(0));
   ok("...which blocks ending the turn",
     applyAction(0, { t: "endTurn" }).ok === false);
@@ -2836,6 +2829,28 @@ function runTests() {
   performMove(rc(7, 4), { to: rc(6, 5), kind: "step" });
   ok("a blocked far end swallows nobody", !!G.board[rc(6, 5)]);
 
+  // The other half of the card: cast on an open rift, it seals it instead.
+  blank();
+  put(rc(7, 4), 0); put(rc(0, 1), 1);
+  G.rift = { a: rc(6, 5), b: rc(2, 3), madeOn: 0 };
+  G.turn = 0; G.phase = "declare"; G.turnNo = 4;
+  G.players[0].fp = 9; G.players[0].hand = ["rift"];
+  ok("the card is castable with a rift already open", !spellBlocker("rift", 0));
+  ok("...even one the caster did not open", !!applyAction(0, { t: "cast", id: "rift", payload: {} }).ok);
+  ok("...and it closes it", G.rift === null);
+  G.phase = "declare";
+  performMove(rc(7, 4), { to: rc(6, 5), kind: "step" });
+  ok("...so nothing is carried across it again", !!G.board[rc(6, 5)] && !G.board[rc(2, 3)]);
+
+  blank();
+  put(rc(7, 4), 0); put(rc(0, 1), 1);
+  G.rift = { a: rc(6, 5), b: rc(2, 3), madeOn: 0 };
+  G.turn = 0; G.phase = "declare"; G.turnNo = 4;
+  G.players[0].fp = 9; G.players[0].hand = ["rift"];
+  ok("a closing cast ignores whatever squares an edited client names",
+    !!applyAction(0, { t: "cast", id: "rift", payload: { a: rc(9, 0), b: rc(9, 2) } }).ok
+      && G.rift === null);
+
   group("Wraparound");
   blank();
   put(rc(7, 0), 0); put(rc(0, 1), 1);
@@ -2870,8 +2885,19 @@ function runTests() {
   endTurnLocal(); endTurnLocal();
   ok("Chronos can reach back before the anchor is dropped", chronosTargets(0).length > 0);
   castSpell("anchor", 0, {});
+  const firstPin = G.anchor.turnNo;
   ok("...and cannot once it is", chronosTargets(0).length === 0);
   ok("...which binds the caster too", !!spellBlocker("chronos", 0));
+
+  // A second copy is not a dead card. It drags the pin forward to the turn it
+  // is cast on, which is strictly more restrictive than leaving it where it was.
+  G.players[0].hand = ["anchor"]; G.players[0].fp = 9;
+  endTurnLocal(); endTurnLocal();
+  G.phase = "declare";
+  ok("a second Anchor is castable on a later turn", !spellBlocker("anchor", 0));
+  castSpell("anchor", 0, {});
+  ok("...and drags the pin forward", G.anchor.turnNo > firstPin, `${firstPin} → ${G.anchor.turnNo}`);
+  ok("...but not onto the very turn it already pins", !!spellBlocker("anchor", 0));
 
   group("Echo");
   blank(0);
@@ -2978,6 +3004,30 @@ function runTests() {
     !stutterHasAlternative(1) && !stutterBans(1, { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" }));
   ok("...and the referee lets it through",
     applyAction(1, { t: "move", from: rc(0, 1), to: rc(1, 0), kind: "step" }).ok);
+
+  // A turn spent DRAWING is unmade like any other, and drawing again is the
+  // same turn over. The referee refuses it, and — because the machine never
+  // goes through the referee — aiShouldDraw has to refuse it independently.
+  blank();
+  put(rc(9, 4), 0); put(rc(2, 3), 1); put(rc(0, 1), 1);
+  G.turn = 1; G.phase = "declare"; G.turnNo = 6;
+  G.players[1].hand = []; G.players[1].fp = 0;
+  G.stutter = { player: 1, banned: null };
+  G.history = [{ turn: 1, turnNo: G.turnNo, snap: snapshot(G) }];
+  const stDrew = applyAction(1, { t: "draw" });
+  ok("a drawn turn is handed straight back to be taken again",
+    stDrew.ok && stDrew.sameSeat === true && G.turn === 1, JSON.stringify(stDrew));
+  ok("...with the draw unmade", G.players[1].hand.length === 0 && !G.drewThisTurn);
+  ok("...and named as what may not be repeated",
+    G.stutter && G.stutter.banned && G.stutter.banned.t === "draw",
+    JSON.stringify(G.stutter && G.stutter.banned));
+  ok("...so the referee refuses a second draw",
+    !applyAction(1, { t: "draw" }).ok);
+  const stAISide = AI.side;
+  AI.side = 1;
+  G.players[1].noDraw = 0;                            // nothing else standing in its way
+  ok("...and the machine will not take one either", !aiShouldDraw());
+  AI.side = stAISide;
 
   // A turn that did nothing has nothing to unmake, and banning "do nothing"
   // would rewind for ever.
@@ -3423,28 +3473,22 @@ function runTests() {
   ok("a side with no pieces loses", G.over && G.over.winner === 1, JSON.stringify(G.over));
 
   blank();
-  put(rc(6, 5), 0, "pawn", { form: "sentinel" });
-  put(rc(6, 7), 0, "pawn", { form: "sentinel" });
+  put(rc(6, 5), 0, "queen", { form: "alchemist" });
+  put(rc(6, 7), 0, "queen", { form: "alchemist" });
   put(rc(2, 3), 1);
-  ok("a side left with nothing but Sentinels loses",
+  ok("a side left with nothing but Alchemists loses",
     checkGameOver() && G.over.winner === 1, JSON.stringify(G.over));
   blank();
-  put(rc(6, 5), 0, "pawn", { form: "sentinel" });
-  put(rc(0, 1), 0, "queen", { form: "alchemist" });
-  put(rc(2, 3), 1);
-  ok("...as does any side whose every piece is terrain",
-    checkGameOver() && G.over.winner === 1, JSON.stringify(G.over));
-  blank();
-  put(rc(6, 5), 0, "pawn", { form: "sentinel" });
+  put(rc(6, 5), 0, "queen", { form: "alchemist" });
   put(rc(9, 2), 0);
   put(rc(2, 3), 1);
   ok("...but one piece that can still move keeps you alive", !checkGameOver() && !G.over);
   blank();
-  put(rc(6, 5), 0, "pawn", { form: "sentinel" });
+  put(rc(6, 5), 0, "queen", { form: "alchemist" });
   put(rc(9, 2), 0);
-  put(rc(6, 7), 1, "pawn", { form: "sentinel" });
+  put(rc(6, 7), 1, "queen", { form: "alchemist" });
   put(rc(2, 3), 1);
-  ok("...and a Sentinel is no liability while the rest of the army marches",
+  ok("...and an Alchemist is no liability while the rest of the army marches",
     !checkGameOver() && !G.over);
 
   /* ── automatic turn passing ────────────────────────────────────────── */
@@ -4001,8 +4045,8 @@ function runTests() {
   const legalGame = aiPlayGame("skilled", "random", 60, 555);
   ok("a full headless game completes without throwing", legalGame.turns > 0);
   ok("every piece is still on a dark square", G.board.every((p, i) => !p || isDark(i)));
-  ok("no side ever exceeded its Sentinel cap",
-    countForm("sentinel", 0) <= 2 && countForm("sentinel", 1) <= 2);
+  ok("no side ever exceeded its Herald cap",
+    countForm("herald", 0) <= 1 && countForm("herald", 1) <= 1);
   ok("the board-wide Phaser cap of 2 held", countForm("phaser") <= 2);
   ok("no piece carries two transformations",
     G.board.every((p) => !p || !p.form || FORMS[p.form]));
