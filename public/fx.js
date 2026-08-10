@@ -87,7 +87,6 @@ const FX_OWNER = (o) => (PLAYERS[o] ? PLAYERS[o].color : FX_C.time);
 const FX_FORM = {
   juggernaut: "#cfd6ef",
   phaser:     FX_C.frost,
-  sentinel:   FX_C.stone,
   herald:     null,          // null = the owner's colour
   enchanter:  FX_C.arcane,
   alchemist:  FX_C.gain,
@@ -399,12 +398,10 @@ function fxPlay(el, frames, ms, opts) {
 function fxGhost(i, pd, opts) {
   opts = opts || {};
   const S = fxSize();
-  const frac = pd && pd.form === "sentinel" ? 0.84 : 0.78;
-  const d = S * frac * (opts.scale || 1);
+  const d = S * 0.78 * (opts.scale || 1);
   const c = opts.at || fxCtr(i);
   let cls = "piece fx-ghost " + PLAYERS[pd.owner].css;
   if (pd.rank === "queen") cls += " queen";
-  if (pd.form === "sentinel") cls += " sentinel";
   const g = fxNode(cls, {
     left: (c.x - d / 2) + "px", top: (c.y - d / 2) + "px",
     width: d + "px", height: d + "px",
@@ -868,7 +865,6 @@ const FX_HOLD = {
   eyeTether:   () => 110,
   promote:     () => 600,
   transform:   (e) => (e.form === "juggernaut" ? 780 : 570),
-  sentinelHalt:() => 230,
   spell:       (e) => (FX_BIG[e.id] ? 700 : 300),
   hopscotch:   () => 630,
   evasive:     () => 570,
@@ -883,6 +879,7 @@ const FX_HOLD = {
   // are permanent changes, so they get a beat closer to a transformation than
   // to a step; the carry itself is a travel and paces like one.
   rift:        () => 700,
+  riftClose:   () => 620,
   riftCarry:   () => 520,
   wraparound:  () => 900,
   anchor:      () => 700,
@@ -1333,7 +1330,6 @@ FX_PLAY.transform = function (e) {
   const WAVE = {
     juggernaut: { count: 2, ms: 1100 },   // heavy, slow, armoured
     phaser:     { count: 3, ms: 700 },    // fast and electric
-    sentinel:   { count: 2, ms: 900, cls: "square" },   // it is terrain now
     herald:     { count: 1, ms: 860 },
     enchanter:  { count: 3, ms: 950 },    // interference
     alchemist:  { count: 2, ms: 900 },
@@ -1389,26 +1385,6 @@ const FX_TRANSFORM = {
     }
     out.push(sleepFX(520).then(() => fxGlow(k.c, FX_C.frost, 2.1, 400, { peak: .95 })));
     return Promise.all(out);
-  },
-
-  /* It stops being a piece and becomes terrain. The circle squares off, landing
-     on exactly the geometry .piece.sentinel already specifies, and it lands
-     heavily. */
-  sentinel: (e, k) => {
-    const g = fxGhost(e.at, { owner: e.owner, rank: e.rank, form: null });
-    return Promise.all([
-      fxPlay(g, [
-        { borderRadius: "50%", transform: "scale(1)" },
-        { borderRadius: "30%", transform: "scale(1.12)", offset: .45 },
-        { borderRadius: "14%", transform: "scale(1.077)" },
-      ], 740, { easing: "cubic-bezier(.3,1.5,.5,1)" }),
-      sleepFX(620).then(() => Promise.all([
-        fxRing(k.c, FX_C.stone, .8, 2.4, 560, { cls: "square thick" }),
-        fxSparks(k.c, FX_C.stone, 8, 600),
-        fxStreaks(k.c, FX_C.stone, 7, 560),
-        fxShake(6, 280),                    // terrain arriving
-      ])),
-    ]);
   },
 
   /* The banner unrolls, then pulses out to exactly the radius its rule
@@ -1480,24 +1456,6 @@ const FX_TRANSFORM = {
       fxSparks(k.c, FX_C.gain, 7, 820),
     ]);
   }),
-};
-
-/* ── the Sentinel stopping a chain ──────────────────────────────────────── */
-
-FX_PLAY.sentinelHalt = function (e) {
-  const to = fxCtr(e.at);
-  const out = [];
-  for (const w of (e.walls || [])) {
-    const c = fxCtr(w);
-    out.push(fxRing(c, FX_C.stone, .8, 1.8, 540, { cls: "square thick", from: 1 }));
-    out.push(fxLine(c, to, "fx-beam", FX_C.stone, 4, 500));
-    // Terrain refusing to move. The wave is square-cornered and short — it is
-    // the Sentinel's own shape, and it does not travel because nothing gave.
-    out.push(fxShockwave(c, FX_C.stone, 620, { count: 2, reach: .38, cls: "square" }));
-  }
-  out.push(fxRing(to, FX_C.stone, 1.3, .9, 500, { cls: "square" }));
-  out.push(fxShake(3, 200));
-  return Promise.all(out);
 };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1953,6 +1911,21 @@ FX_PLAY.rift = function (e) {
     pair(b, 140),
     sleepFX(420).then(() => fxSweep(Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI, 620)),
   ]);
+};
+
+/**
+ * And the same two mouths closing. Deliberately the reverse of the opening:
+ * the rings collapse inward instead of expanding, and nothing is left behind —
+ * no afterglow, because the whole point is that the mark on the board is gone.
+ */
+FX_PLAY.riftClose = function (e) {
+  const a = fxCtr(e.a), b = fxCtr(e.b);
+  const seal = (c, delay) => sleepFX(delay).then(() => Promise.all([
+    fxRing(c, FX_C.arcane, 2.4, .2, 440, { cls: "thick" }),
+    fxCollapse(c, FX_C.arcane, 460, { count: 2, reach: .9 }),
+    fxGlow(c, FX_C.arcane, 1.6, 380, { peak: .7 }),
+  ]));
+  return Promise.all([seal(a, 0), seal(b, 120)]);
 };
 
 /**

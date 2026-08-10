@@ -360,7 +360,7 @@ it("refuses the old direct-transform action entirely — every form now requires
   const g = freshGame();
   assert(Object.keys(FORMS).every((f) => FORMS[f].viaSpell), "every form should now be spell-only");
   const mine = anyPieceOf(g, 0);
-  refused(applyAction(0, { t: "transform", i: mine, form: "sentinel" }));
+  refused(applyAction(0, { t: "transform", i: mine, form: "herald" }));
 });
 
 it("refuses a transformation cast for a piece that is not yours", () => {
@@ -373,9 +373,12 @@ it("refuses a transformation cast for a piece that is not yours", () => {
 
 it("refuses a transformation cast for an empty square", () => {
   const g = solventGame();
-  g.players[0].hand = ["sentinelSpell"];
+  g.players[0].hand = ["juggernautSpell"];
   load(g);
-  refused(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: emptySquare(g) } }));
+  refused(applyAction(0, {
+    t: "cast", id: "juggernautSpell",
+    payload: { target: emptySquare(g), sacrifice: emptySquare(g) },
+  }));
 });
 
 it("refuses a transformation whose sacrifice was not paid", () => {
@@ -433,7 +436,7 @@ it("refuses a transformation spell that is not in your hand", () => {
   g.players[0].hand = [];
   load(g);
   const mine = anyPieceOf(g, 0);
-  refused(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: mine } }), "Not in your hand");
+  refused(applyAction(0, { t: "cast", id: "heraldSpell", payload: { target: mine } }), "Not in your hand");
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -517,7 +520,7 @@ it("survives a barrage of illegal actions with the position intact", () => {
     { t: "cast", id: SPELL_IDS[0] },
     { t: "cast", id: "instantWin" },
     { t: "cast", id: "juggernautSpell", payload: { target: theirs, sacrifice: mine } },
-    { t: "transform", i: mine, form: "sentinel" },
+    { t: "transform", i: mine, form: "herald" },
     { t: "sacrifice", i: mine },
     { t: "discard", id: SPELL_IDS[0] },
     { t: "heraldSkip" },
@@ -1202,7 +1205,7 @@ it("does not save a pawn sacrificed to a transformation either", () => {
   equal(getG().board[rc(7, 4)], null, "the Juggernaut eats it, shell and all");
 });
 
-it("keeps the chain going, and a Sentinel still halts it", () => {
+it("keeps the chain going — the attacker lands and is still on a chain", () => {
   // A shelled pawn absorbs the first jump; the attacker lands and, having
   // another jump from there, is still on a chain — exactly as armor behaves.
   const live = staged([[rc(7, 4), 0], [rc(5, 2), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 1);
@@ -1262,14 +1265,15 @@ it("...but Hopscotch does finish it when it had nowhere to go", () => {
   equal(getG().board[rc(7, 4)], null, "and the second blow lands on a pawn with no shell left");
 });
 
-it("is shattered by a transformation — no secret shell on a Sentinel", () => {
+it("is shattered by a transformation — no secret shell on a Phaser", () => {
   const live = staged([[rc(7, 4), 0], [rc(0, 1), 1]], 0);
   live.board[rc(7, 4)].hollow = true;
-  live.players[0].hand = ["sentinelSpell"];
+  live.board[rc(7, 4)].captures = 1;          // what the Phaser card asks for
+  live.players[0].hand = ["phaserSpell"];
   live.players[0].fp = 9;
   getG().board[rc(7, 4)].hollowHome = rc(9, 8);
-  allowed(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: rc(7, 4) } }));
-  equal(getG().board[rc(7, 4)].form, "sentinel", "the form landed");
+  allowed(applyAction(0, { t: "cast", id: "phaserSpell", payload: { target: rc(7, 4) } }));
+  equal(getG().board[rc(7, 4)].form, "phaser", "the form landed");
   equal(getG().board[rc(7, 4)].hollow, false, "and it gives the shell away");
   assert(getG().log.some((l) => /was a Hollow/.test(l.text)), "publicly");
   equal(getG().board[rc(9, 8)], null,
@@ -1805,9 +1809,9 @@ it("without the sandbox a card still has to be paid for", () => {
 it("without the sandbox a transformation still costs FP and respects its caps", () => {
   const g = freshGame();
   const pawn = anyPieceOf(g, 0);
-  g.players[0].hand = ["sentinelSpell"];
+  g.players[0].hand = ["heraldSpell"];
   g.players[0].fp = 0;
-  refused(applyAction(0, { t: "cast", id: "sentinelSpell", payload: { target: pawn } }), "FP");
+  refused(applyAction(0, { t: "cast", id: "heraldSpell", payload: { target: pawn } }), "FP");
 });
 
 it("the sandbox really does relax what it claims to", () => {
