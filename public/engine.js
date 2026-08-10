@@ -526,6 +526,12 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     turnAction: null,       // what this turn has been spent on — see noteTurnAction
     timeoutSeq: 0,          // monotonic; seeds the referee's turn when a clock runs out
     quantumSeq: 0,          // monotonic; seeds which half of a superposition is real
+    // monotonic; seeds the machine's own coin flips — the root jitter that
+    // makes the easier levels beatable, and the "random" opponent self-play is
+    // measured against. Declared here rather than in ai.js so that a snapshot
+    // carries it and a rewind takes it back, exactly like its three siblings
+    // above. Nothing in the referee reads it. See ai.js aiRng.
+    aiSeq: 0,
     twinStep: null,         // Temporal Twin — the body that still owes its move
     twinDone: false,        // ...and whether the pair has already had both
     setAside: [],           // Phaser cards parked while a Phaser lives

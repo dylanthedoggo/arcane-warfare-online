@@ -124,7 +124,15 @@ const aiWide = (n) => Math.round(n * aiCfg().width);
  * Game, resigned, or took an undo mid-think — would wake up and mutate the
  * fresh game.
  */
-let AI = { on: false, side: 1, level: "skilled", thinking: false, gen: 0 };
+let AI = {
+  on: false, side: 1, level: "skilled", thinking: false, gen: 0,
+  // Budget the search in nodes rather than in wall-clock milliseconds, so that
+  // the same seeded game plays out the same way twice. Off here and never
+  // turned on by the page; the headless tools set it. `fast`, its older
+  // neighbour, is set the same ad-hoc way and clamps the budget rather than
+  // changing its currency. See "what a search may spend".
+  deterministic: false,
+};
 
 /** Abandon whatever the machine was doing; any in-flight beat becomes a no-op. */
 function aiCancel() { AI.gen++; AI.thinking = false; AI.moveSteps = null; }
@@ -132,8 +140,54 @@ const aiCfg = () => AI_LEVELS[AI.level];
 const isAISeat = (s) => AI.on && s === AI.side;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* ── the machine's own randomness ───────────────────────────────────────────
+   Two things here are decided by a coin flip: the root jitter that makes the
+   easier levels beatable, and the "random" opponent self-play is measured
+   against. Both used to call Math.random(), and that made a nonsense of the
+   engine's care about seeds. Every draw, every quantum roll and every refereed
+   timeout derives from G.seed, which is what makes a game replayable — and the
+   seed reached the referee and stopped there. Two runs of the same seeded game
+   picked different moves.
+
+   Worse, it was invisible from Ruthless, which is where anyone would look
+   first: noise 0 multiplies the sample to zero, so the one level that never
+   jitters reproduced perfectly and the two that do never did.
+
+   So both are seeded the way drawSpell is — off the game seed, the turn number
+   and a monotonic counter — each with a multiplier of its own so the two
+   streams cannot fall into step with each other or with the draw stream.
+
+   THE COUNTER LIVES ON G, which is deliberate on both counts: a snapshot
+   carries it, and a rewind takes it back. Chronos's Gaze and the policy layer's
+   simulations both put the game back to an earlier state, and a stream that
+   kept running through a rewind would make the replay of a rewound game diverge
+   from the game itself.
+
+   IT ADVANCES PER CALL, not per turn. Sixteen searches of one position must not
+   all blunder identically — see the "varies from run to run" test in the page's
+   suite, which is the check that a per-turn counter would silently break.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const AI_SALT_JITTER = 5279;      // root-move jitter
+const AI_SALT_RANDOM = 3001;      // the "random" opponent choosing its move
+
+/**
+ * A seeded stream for one decision. `salt` names which stream.
+ *
+ * The guard is not decoration. `G.aiSeq` is declared in newGame, so any game
+ * this file plays has it — but a game restored from a state written before that
+ * field existed would not, and `undefined++` is NaN, which sticks: every later
+ * call would seed identically and the machine would blunder the same way
+ * forever without once throwing. Silent, and exactly the kind of thing seeding
+ * exists to rule out.
+ */
+function aiRng(salt) {
+  if (typeof G.aiSeq !== "number") G.aiSeq = 0;
+  return mulberry32((G.seed + G.turnNo * salt + G.aiSeq++) | 0);
+}
+
 const MATE = 1e6;
-let AI_NODES = 0, AI_DEADLINE = 0, AI_TIMEUP = false;
+let AI_NODES = 0, AI_DEADLINE = 0, AI_TIMEUP = false, AI_NODE_DEADLINE = 0;
 
 /* ── fast make / unmake (search only — no logging, no FP, no penalties) ──── */
 
@@ -826,7 +880,7 @@ function orderMoves(moves, ply = 0) {
 function quiesce(owner, alpha, beta, ply, base = 0) {
   // Capture chains can fan out badly in a crowded midgame, so this honours the
   // clock too — without it a single quiescence call could run unbounded.
-  if ((++AI_NODES & 511) === 0 && performance.now() > AI_DEADLINE) AI_TIMEUP = true;
+  if ((++AI_NODES & 511) === 0 && aiOutOfBudget()) AI_TIMEUP = true;
 
   /* A board swept clean is a WIN, not a large material lead, and alphabeta has
      always said so. Quiescence did not, so the one place a forced win is most
@@ -893,7 +947,7 @@ function quiesce(owner, alpha, beta, ply, base = 0) {
  * name that belongs to another position.
  */
 function alphabeta(owner, depth, alpha, beta, ply = 0) {
-  if ((++AI_NODES & 511) === 0 && performance.now() > AI_DEADLINE) AI_TIMEUP = true;
+  if ((++AI_NODES & 511) === 0 && aiOutOfBudget()) AI_TIMEUP = true;
   if (AI_TIMEUP) return evaluate(owner);
 
   if (countPieces(owner) === 0) return -MATE + ply;
@@ -973,11 +1027,13 @@ function alphabeta(owner, depth, alpha, beta, ply = 0) {
  * So: alpha comes from the raw score, the levels that jitter pay for it with a
  * full root window, and the sampling happens once, at the end, on the finished
  * ranking. Ruthless has noise 0 and none of it applies to it at all.
+ *
+ * The sample is drawn from a seeded stream, not Math.random — see aiRng.
  */
 function searchBestMove(owner) {
   const cfg = aiCfg();
-  AI_NODES = 0; AI_TIMEUP = false;
-  AI_DEADLINE = performance.now() + aiBudget(cfg.timeMs);
+  AI_NODES = 0;
+  aiStartBudget(cfg.timeMs);
   clearOrderingMemory();
   aiNewSearch();
 
@@ -1030,12 +1086,16 @@ function searchBestMove(owner) {
   // cannot flip at random between iterations. Moves sharing a moveKey share a
   // sample — the ordering tables already treat those as the same idea.
   if (cfg.noise && ranked && ranked.length > 1) {
+    // One stream per search, drawn from only when a level actually jitters —
+    // so a noiseless level does not so much as advance the counter, and
+    // Ruthless's play is bit-for-bit what it was before any of this.
+    const rng = aiRng(AI_SALT_JITTER);
     const jitter = new Map();
     let pick = null, pickV = -Infinity;
     for (const r of ranked) {
       const key = moveKey(r.move);
       let j = jitter.get(key);
-      if (j === undefined) { j = (Math.random() - 0.5) * 2 * cfg.noise; jitter.set(key, j); }
+      if (j === undefined) { j = (rng() - 0.5) * 2 * cfg.noise; jitter.set(key, j); }
       const v = r.score + j;
       if (v > pickV) { pickV = v; pick = r; }
     }
@@ -1055,12 +1115,69 @@ function searchBestMove(owner) {
    evaluation, so a spell is only cast when it genuinely pays for itself.
    ─────────────────────────────────────────────────────────────────────────── */
 
+/* ── what a search may spend ────────────────────────────────────────────────
+   Every search here stops on a budget rather than on its depth ceiling: the
+   ceiling is where it would get to given forever, and forever is not on offer
+   on the main thread of a web page.
+
+   The budget is normally WALL-CLOCK, which is the right currency for the
+   browser — a page that freezes for 800 ms has frozen for 800 ms whatever the
+   machine underneath it was doing. It is the wrong currency for anything you
+   mean to reproduce, and that is not a small effect: the opening position, at
+   Skilled, five searches running, reached depths 2, 3, 4, 4, 4. The first two
+   paid for the JIT that the last three then spent. Nothing about that is
+   seeded, so seeding the dice does not touch it, and a self-play run that still
+   wanders once the dice are pinned is no more use than one that never was.
+
+   So `AI.deterministic` changes the currency to NODES. Same shape — a budget
+   that can stop a search mid-iteration, and an iteration stopped that way is
+   thrown away rather than half-believed — but counted in a quantity the machine
+   cannot vary. Off by default; nothing in the page turns it on.
+
+   THE RATE below is nominal, not measured. Its job is to keep the level knobs
+   meaning what they say, so a level given twice the milliseconds still gets
+   twice the search; 120 nodes/ms is roughly what a warmed-up V8 manages here,
+   which lands a deterministic run near the depth a warm clock-bounded one
+   reaches rather than somewhere unrecognisable.
+
+   What this buys is agreement, not portability of strength. A number measured
+   this way is a number about THIS budget — but the budget is now written down,
+   instead of being however fast the laptop felt that afternoon.
+   ─────────────────────────────────────────────────────────────────────────── */
+
 /** Wall-clock budget for one search. Headless self-play runs on a shoestring. */
 const aiBudget = (ms) => (AI.fast ? Math.min(ms, 40) : ms);
 
-function aiSearchValue(owner, depth) {
+/**
+ * The same budget in nodes. The floor is one check's worth: the counter's low
+ * bits are what throttles the budget test (see aiOutOfBudget), so a budget
+ * finer than 512 nodes is a budget that never gets looked at.
+ */
+const AI_NODES_PER_MS = 120;
+const aiNodes = (ms) => Math.max(512, Math.round(ms * AI_NODES_PER_MS));
+
+/**
+ * Open a budget for a search that is about to start. `ms` is the level's own
+ * figure; the fast clamp and the node conversion both happen here, so no call
+ * site has to remember either of them.
+ */
+function aiStartBudget(ms) {
+  const budget = aiBudget(ms);
   AI_TIMEUP = false;
-  AI_DEADLINE = performance.now() + aiBudget(aiCfg().policyMs);
+  AI_DEADLINE = performance.now() + budget;
+  AI_NODE_DEADLINE = AI_NODES + aiNodes(budget);
+}
+
+/**
+ * Spent? Read once per 512 nodes rather than once per node — the counter's low
+ * bits are the throttle, and this is called from the two hottest lines in the
+ * file.
+ */
+const aiOutOfBudget = () =>
+  AI.deterministic ? AI_NODES > AI_NODE_DEADLINE : performance.now() > AI_DEADLINE;
+
+function aiSearchValue(owner, depth) {
+  aiStartBudget(aiCfg().policyMs);
   // Every call arrives on a different board — usually one with a spell already
   // simulated onto it — so nothing the last one cached applies here. This is
   // the call site the transposition table's epoch exists for.
@@ -1074,6 +1191,17 @@ function aiSearchValue(owner, depth) {
  * page for seconds on a crowded board.
  */
 const aiPolicyBudget = () => (AI.fast ? 180 : aiCfg().policyBudget);
+
+/**
+ * The same budget in the same two currencies, but spanning a whole policy
+ * decision rather than one search. Opened once and then asked; the pair exists
+ * because the caller has to hold the mark across a loop.
+ */
+const aiOpenPolicyBudget = () => (AI.deterministic
+  ? AI_NODES + aiNodes(aiPolicyBudget())
+  : performance.now() + aiPolicyBudget());
+const aiPolicySpent = (mark) =>
+  (AI.deterministic ? AI_NODES > mark : performance.now() > mark);
 
 /**
  * Apply `mutate` to a throwaway copy of the game, score the result, then put
@@ -1463,12 +1591,11 @@ function aiStutterGap() {
   const foe = 1 - AI.side;
   const moves = orderMoves(turnMoves(foe), 0).slice(0, aiWide(14));
   if (moves.length < 2) return 0;      // nothing to deny, or nothing to deny it with
-  // Its own clock. Every alphabeta call reads the shared AI_DEADLINE, so
-  // without this the measurement inherits whatever the last search left
-  // behind — usually a deadline already in the past, which makes every reply
-  // score the same and quietly reports a gap of zero from every position.
-  AI_TIMEUP = false;
-  AI_DEADLINE = performance.now() + aiBudget(aiCfg().policyMs);
+  // Its own budget. Every alphabeta call reads the shared one, so without this
+  // the measurement inherits whatever the last search left behind — usually a
+  // deadline already in the past, which makes every reply score the same and
+  // quietly reports a gap of zero from every position.
+  aiStartBudget(aiCfg().policyMs);
   aiNewSearch();
   let best = -Infinity, second = -Infinity;
   for (const m of moves) {
@@ -1605,7 +1732,7 @@ function aiCastOnce(phaseName) {
     ? -aiSearchValue(1 - AI.side, d - 1)
     : aiSearchValue(AI.side, d);
   let best = null, bestV = base + cfg.castEdge;          // demand a real improvement
-  const stop = performance.now() + aiPolicyBudget();
+  const stop = aiOpenPolicyBudget();
   let priced = 0;
   for (const c of cands) {
     priced++;
@@ -1618,7 +1745,7 @@ function aiCastOnce(phaseName) {
     // rather than teaching sideScore to guess. See STUTTER_DENIAL.
     const v = aiSimValue(() => aiExecuteSpell(c), movesNext, d) + (c.bonus || 0);
     if (v > bestV) { bestV = v; best = c; }
-    if (performance.now() > stop) break;
+    if (aiPolicySpent(stop)) break;
   }
   if (priced < cands.length && !AI.fast)
     console.warn(`AI: the clock stopped the policy after ${priced} of ${cands.length} candidates.`);
@@ -1923,7 +2050,11 @@ function afterHandoff(sameSeat) {
 function aiRandomTurn(side) {
   const moves = turnMoves(side);
   if (moves.length) {
-    const m = moves[(Math.random() * moves.length) | 0];
+    // Seeded, like the referee's own random turn — a "random" opponent whose
+    // choices cannot be replayed makes every number measured against it a
+    // one-off. The Math.min guard mirrors playRandomTurn's.
+    const rng = aiRng(AI_SALT_RANDOM);
+    const m = moves[Math.min(moves.length - 1, (rng() * moves.length) | 0)];
     for (const s of m.steps) { if (G.over) break; performMove(s.from, s.mv); }
     let g = 0;
     while (G.chain != null && !G.over && g++ < 12) {
@@ -1949,7 +2080,12 @@ function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
   G = newGame(0, seed, { mode: "ai" });
   UI = freshUI();
   G.turnNo = 0;
-  AI.on = true; AI.fast = true; AI.thinking = false;
+  // `fast` so no pacing applies, and `deterministic` for the same kind of
+  // reason one notch further on: this function is the measuring instrument, and
+  // an instrument that gives a different reading each time it is picked up is
+  // not one. With the clock as the budget, the same seeded game came out
+  // 17v18 and then 17v17 — see "what a search may spend".
+  AI.on = true; AI.fast = true; AI.deterministic = true; AI.thinking = false;
   beginTurn(0);
   let turns = 0;
   while (!G.over && turns < maxTurns) {
