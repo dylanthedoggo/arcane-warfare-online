@@ -114,6 +114,38 @@ const AI_LEVELS = {
  * quietly upgraded its spell play as a side effect.
  */
 
+/**
+ * ── WHAT THESE KNOBS ARE ACTUALLY WORTH ────────────────────────────────────
+ *
+ * Measured with `npm run selfplay`, which is the first time any of it could be.
+ * Before that, justifying a change to a number here meant running tournaments
+ * by hand in a browser tab, and nobody was going to.
+ *
+ * `depth` AND `timeMs` ARE NOT INDEPENDENT, and `depth` is much the weaker of
+ * the two. It is only a ceiling on iterative deepening; the budget is what
+ * usually stops the search first, so the ceiling means nothing unless the
+ * budget can reach it. Ruthless on the opening position, ceiling of 10:
+ *
+ *     4,800 nodes   (AI.fast, which the page's own suite uses)   reaches 4
+ *     7,200 nodes   (selfplay --scale 0.02)                      reaches 5
+ *     18,000 nodes  (selfplay --scale 0.05)                      reaches 6
+ *     72,000 nodes  (--scale 0.2)                                reaches 8
+ *     360,000 nodes (its own 3000 ms — what a player faces)      reaches 10
+ *
+ * So Ruthless plays at its stated depth against a person and nowhere else.
+ * RAISING `depth` ON ITS OWN DOES NOTHING; the budget has to go up with it, and
+ * `timeMs` is the knob that does that. Lowering it, on the other hand, bites
+ * immediately and everywhere.
+ *
+ * And the extra plies buy less here than the ladder implies. Ruthless against a
+ * copy of itself capped at depth 2 — every other figure identical — is a clear
+ * win but not a rout. Most of what separates Novice from Ruthless is `noise`
+ * and the policy edges, not the search.
+ *
+ * `noise` is the strongest single knob in the table and the cheapest. It costs
+ * nothing to compute and it is most of the difficulty ladder.
+ */
+
 /** Shortlist caps, widened for the levels that have the budget to score more. */
 const aiWide = (n) => Math.round(n * aiCfg().width);
 
@@ -578,20 +610,49 @@ const VAL_FORM = { juggernaut: 35, phaser: 55, herald: 55, enchanter: 130, alche
 const VAL_ARMOR = 60;
 
 /**
+ * How many cards are worth holding.
+ *
+ * A turn buys at most three casts, and the pool's costs run 2 to 6 against a
+ * Focus ceiling of 10, so nobody spends more than about three cards before
+ * running dry. Everything past the fifth is a card you will still be holding
+ * when the game ends. See resourceValue and aiShouldDraw, which must agree
+ * about this or the machine values a hand it will not go and get.
+ */
+const HAND_USEFUL = 5;
+
+/**
  * Focus Points and cards with DIMINISHING RETURNS, which matters more than it
  * sounds. With flat values the machine discovers that drawing (+1 FP, +1 card)
  * always scores better than any quiet move, and simply draws every turn
  * forever. In truth a turn only lets you spend so much: the ninth Focus Point
  * and the fourth card are nearly dead weight, so their marginal value has to
  * fall below the worth of actually developing the position.
+ *
+ * DIMINISHING WAS NOT ENOUGH, and the way that surfaced is worth keeping. The
+ * card term fell to +4 and then stayed there — so the twentieth card was worth
+ * exactly as much as the fifth, and drawing remained forever, if barely,
+ * positive. That is harmless while a quiet move is worth more than 4. It is not
+ * harmless in a standoff, where every move on offer is worth LESS than nothing
+ * because the side that breaks the wall loses the pawn: measured in one
+ * headless game, the best of twenty-two legal moves scored -96 and standing pat
+ * scored better than all of them. Two machines found that equilibrium and drew
+ * cards at each other for a hundred and forty turns, 120 draws to 20 moves,
+ * finishing 24 pieces to 24 having never once made contact.
+ *
+ * So cards are clamped the way Focus already was, and for the same reason. The
+ * clamp is not what breaks the standoff — passing is worth real tempo in a
+ * zugzwang and no card price changes that — but it stops the evaluator paying
+ * for a hand nobody can spend, and it is the half of the fix that belongs here.
+ * The other half is aiShouldDraw's, which is where the pass actually lives.
  */
 function resourceValue(fp, cards) {
   // Focus past the ceiling is not merely worth less, it does not exist: the
   // referee refuses to bank it. Clamping here is what stops the machine paying
   // a real tempo cost for income it can never collect.
   const banked = Math.min(fp, FP_CAP);
+  const held = Math.min(cards, HAND_USEFUL);
   return Math.min(banked, 6) * 14 + Math.max(0, banked - 6) * 4
-       + Math.min(cards, 3) * 20 + Math.max(0, cards - 3) * 4;
+       + Math.min(held, 3) * 20 + Math.max(0, held - 3) * 4;
 }
 
 /* ── the mobility term ──────────────────────────────────────────────────────
@@ -1703,12 +1764,38 @@ function aiConsiderChronos() {
  * Drawing costs the whole turn for 1 FP and a card. Rather than guess a rule,
  * price it against actually moving: search both and take the better. This is
  * the tempo judgement humans tend to get wrong.
+ *
+ * ── WHY THERE IS A HARD LIMIT AND NOT ONLY A SEARCH ───────────────────────
+ *
+ * Because drawing is also a PASS, and the search likes passing rather too much.
+ *
+ * A drawn turn is the only turn in the game that does not move a piece, and in
+ * a standoff that is exactly what both sides want. Pawns advance and do not
+ * retreat, so two armies facing each other across one empty rank are in mutual
+ * zugzwang: whoever steps in first is jumped. The search sees that correctly —
+ * every legal move scoring below standing pat is not a bug — and then draws a
+ * card to hand the problem back. So does the other side. Neither ever has to
+ * stop, and two Ruthless machines have played out a hundred and forty turns
+ * this way, 120 draws against 20 moves, finishing 24 pieces to 24 without a
+ * single capture between them.
+ *
+ * No amount of pricing fixes that, because passing genuinely IS worth the
+ * tempo; the comparison below is answering its question correctly. What is
+ * wrong is that the machine is allowed to ask it forever. So the hand size is
+ * a floor under the argument: once you are holding more cards than a game can
+ * spend, drawing has stopped being a resource decision and become a way of
+ * declining to play, and this refuses on those grounds without consulting the
+ * search at all.
+ *
+ * It is not a handicap. Drawing a sixth card while five sit unplayed is a
+ * wasted turn against a human too — the rule only makes the machine admit it.
  */
 function aiShouldDraw() {
   const P = G.players[AI.side];
   if (P.noDraw > 0 || !eligibleSpellIds().length) return false;
   if (G.drewThisTurn || G.hasActed || G.castThisTurn > 0) return false;
   if (capturersFor(AI.side).length) return false;        // never pass up a capture
+  if (P.hand.length >= HAND_USEFUL) return false;        // see above
   // A drawn turn that Stutter unmade may not simply be drawn again. rootMoves
   // does this for movements; the machine never goes through the referee, so
   // without this it would redraw where a player is refused. See rootMoves.

@@ -13,9 +13,16 @@ one being finished.
 
 ## Done — and three things this document had wrong
 
-Stages 0 to 6 are built. `npm run selfplay`, `npm run agreement` and
+All eight stages are built. `npm run selfplay`, `npm run agreement` and
 `npm run test:ai` are the three ways in; `tools/bootstrap.js` is the bridge.
 `npm test` and `public/index.html?test=1` are unchanged at 127 and 349 checks.
+
+Stage 7 earned the whole exercise on its first outing: pointed at the machine
+for the first time, self-play found that two Ruthless opponents would play out
+140 turns and finish **24 pieces to 24, having never captured anything**. That
+had been true in the shipping browser game the entire time. Nothing else in the
+repository could have noticed it, because nothing else ever played a long game
+and looked at the result.
 
 Three of this document's claims did not survive contact, and each is corrected
 in the stage it belongs to. They are collected here because the pattern matters
@@ -501,30 +508,54 @@ the comment block above `AI_LEVELS` — that comment already explains why
 Skilled's policy figures are pinned where they are, and it is the right home for
 whatever comes out of this.
 
-> **Not done, but two things are already on the table for whoever starts.**
+> **What happened.** Done — and the first thing the new machinery was pointed at
+> turned out to be a bug in how the machine plays the actual game, not a knob.
 >
-> First, `depth` and `timeMs` are not independent knobs, and Ruthless's `depth:
-> 10` is mostly decorative. What the ceiling is worth depends entirely on
-> whether the budget can reach it — measured on the opening position:
+> **The knobs first.** `depth` and `timeMs` are not independent, and `depth` is
+> much the weaker. It is only a ceiling on iterative deepening; the budget is
+> what stops the search first, so the ceiling means nothing unless the budget
+> reaches it. Ruthless on the opening position, ceiling of 10:
 >
-> | budget | nodes | depth reached | of a ceiling of |
-> | --- | --- | --- | --- |
-> | `--scale 0.02` | 7,200 | 5 | 10 |
-> | `--scale 0.05` | 18,000 | 6 | 10 |
-> | `--scale 0.2` | 72,000 | 8 | 10 |
-> | `--scale 1` (Ruthless as a player meets it) | 360,000 | 10 | 10 |
+> | budget | nodes | depth reached |
+> | --- | --- | --- |
+> | `AI.fast` — what the page's own suite uses | 4,800 | 4 |
+> | `--scale 0.02` | 7,200 | 5 |
+> | `--scale 0.05` | 18,000 | 6 |
+> | `--scale 0.2` | 72,000 | 8 |
+> | its own 3000 ms — **what a player faces** | 360,000 | 10 |
 >
-> Through `AI.fast` — which is what the browser's own self-test suite uses —
-> Ruthless gets 4,800 nodes and never comes close. Raising `depth` alone would
-> change nothing at any budget below full.
+> So Ruthless plays at its stated depth against a person and nowhere else.
+> Raising `depth` alone would change nothing; `timeMs` has to rise with it.
+> Recorded in the comment block above `AI_LEVELS`, as this stage asks.
 >
-> Second, and less comfortable: **more depth is worth less here than it looks.**
-> Depth 10 beats depth 2 head to head, but only 5-0 with three games drawn and
-> +19 pieces over eight — and two of those draws finished **24 pieces against 24**,
-> meaning neither side captured anything in 140 turns. Two deep searches playing
-> each other decline to engage. Whether that is the evaluation being too cautious
-> about trades, or the mandatory-capture rule making engagement genuinely bad,
-> is the first question worth putting the new machinery to.
+> **Then the thing that mattered.** Two Ruthless machines played 140 turns and
+> finished **24 pieces to 24, having never once captured anything** — 120 draws
+> against 20 moves between them. Diagnosed by scoring every legal move in the
+> dead position: the best of 22 was **-96**, and standing pat beat all of them.
+>
+> That is **zugzwang**, and the search is right about it. Pawns advance and do
+> not retreat, so two armies across one empty rank are stuck: whoever steps in
+> first is jumped. What is wrong is that the machine could decline forever —
+> **drawing a card is the only turn in the game that does not move a piece**, so
+> it is a pass, and both sides passed at each other indefinitely.
+>
+> Two halves to the fix, in `public/ai.js`:
+>
+> - `resourceValue` clamped the card term. Focus was already clamped at the
+>   ceiling — "Focus past the ceiling does not exist" — but cards fell to +4 and
+>   then stayed there, so the twentieth card was worth as much as the fifth and
+>   drawing stayed forever, if barely, positive.
+> - `aiShouldDraw` now refuses outright once the hand holds five. Pricing cannot
+>   fix this on its own, because passing genuinely *is* worth the tempo and the
+>   search is answering correctly; what was wrong is that it could keep asking.
+>   Drawing a sixth card while five sit unplayed is a wasted turn against a human
+>   too — the rule only makes the machine admit it.
+>
+> The same two games, replayed: **24v24 with 0 captures becomes 9v13 with 29
+> jumps**, and 11v13 with 24 jumps. `npm test` and `index.html?test=1` are
+> unchanged at 127 and 349, and the browser/Node agreement fixture did not move
+> at all — those games run short and on the shoestring, where no hand ever
+> reaches five.
 
 ---
 
@@ -585,7 +616,8 @@ whatever comes out of this.
 5. Browser/Node agreement check on a fixed seed. **Gate: do not skip.** ✅
 6. `test/ai.test.js` strength gate — **against a hobbled copy of the machine, not
    against Novice.** Run separately from `npm test`. ✅
-7. Tune `AI_LEVELS` against real numbers. Not done; now possible, and see below.
+7. Tune `AI_LEVELS` against real numbers — **which immediately found a game the
+   machine would not play at all.** ✅
 
 Stage 0 is what makes any of the measurements mean anything. Stages 1–4 are the
 port. Stage 5 is what makes it trustworthy. Stages 6–7 are what makes it worth
