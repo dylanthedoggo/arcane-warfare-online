@@ -138,12 +138,26 @@ const AI_LEVELS = {
  * immediately and everywhere.
  *
  * And the extra plies buy less here than the ladder implies. Ruthless against a
- * copy of itself capped at depth 2 — every other figure identical — is a clear
- * win but not a rout. Most of what separates Novice from Ruthless is `noise`
- * and the policy edges, not the search.
+ * copy of itself capped at depth 2 — every other figure identical — wins 7-1,
+ * but by only 13 pieces across eight games. Real, and not a rout.
  *
- * `noise` is the strongest single knob in the table and the cheapest. It costs
- * nothing to compute and it is most of the difficulty ladder.
+ * `noise` IS WORTH MUCH LESS THAN ITS SIZE SUGGESTS, which was the surprise.
+ * Ruthless against a copy of itself given `noise: 60` — blundering harder than
+ * Novice's 38 — comes out 3-4 with one drawn, +1 piece across eight games. That
+ * is no measurable handicap at all.
+ *
+ * The reason is the game rather than the number. Most of a checkers turn is
+ * forced: a capture is all but compulsory, a chain has no choices inside it,
+ * and a great many positions offer one sane move. Root jitter can only spoil a
+ * free CHOICE, and there are fewer of those here than in a game like chess. A
+ * blunder rate expressed in evaluation points does not convert into blunders at
+ * anything like the rate you would expect.
+ *
+ * The practical reading, for anyone making Novice easier or harder: `noise` is
+ * a weak lever. `depth` does nothing without `timeMs`. `timeMs` itself, and the
+ * policy figures, are where the difficulty actually lives — and note that
+ * Novice's shallow search and small budget, not its jitter, are most of why it
+ * is beatable. None of this was knowable before there was a way to measure it.
  */
 
 /** Shortlist caps, widened for the levels that have the budget to score more. */

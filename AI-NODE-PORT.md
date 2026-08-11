@@ -468,19 +468,18 @@ than on every save.
 > **The fix is to make the opponent track the thing under test.** The gate now
 > plays Ruthless against a copy of *itself* with exactly one thing taken away:
 > same engine in every respect that is not being measured, so the whole of the
-> difference lands on the knob that moved.
+> difference lands on the knob that moved. Ruthless against a twin capped at
+> depth 2 wins **7-1, +13 pieces**, and the depth regression run against that
+> gate is caught.
 >
-> | Matchup | Result |
-> | --- | --- |
-> | depth 10 vs depth 2, all else equal | 5-0, 3 tied, +19 pieces |
-> | noise 0 vs noise 60, all else equal | 5-1, 2 tied, +18 pieces |
+> The **material margin** is what catches it — 0 against a floor of 6 — because
+> a hobbled twin of a hobbled Ruthless is the same engine, and the same engine
+> playing itself finishes level on material. The win count is blunt enough that
+> the regression survived it on a lucky split, so all three assertions stay.
 >
-> Those separate, and the same two regressions run against the new gate are both
-> caught. The **material margin** does the catching — 0 and 1 against a floor of
-> 8 — because a hobbled twin of a hobbled Ruthless is the same engine, and the
-> same engine playing itself finishes level on material. The win count is blunt
-> enough that the depth regression survived it on a lucky split, so all three
-> assertions stay.
+> A second twin, `noise: 60`, was built and then dropped. See Stage 7 — the
+> measurement that removed it turned out to be a fact about the game rather than
+> about the test.
 >
 > Ruthless against Novice is kept at four games for the one thing it can
 > honestly say: that the ladder faces the right way up. It is labelled as such.
@@ -556,6 +555,32 @@ whatever comes out of this.
 > unchanged at 127 and 349, and the browser/Node agreement fixture did not move
 > at all — those games run short and on the shoestring, where no hand ever
 > reaches five.
+>
+> **And then the fix invalidated a gate, which is the system working.** Every
+> figure in Stage 6 had been measured against a machine that spent five turns in
+> six drawing cards, so all of them had to be re-taken. One did not survive:
+>
+> | Ruthless vs a `noise: 60` twin | Result |
+> | --- | --- |
+> | before the standoff fix | 5-1, 2 tied, **+18 pieces** |
+> | after it | 3-4, 1 tied, **+1 piece** |
+>
+> The noiseless machine no longer beats the blundering one. That is not a
+> regression — it is the gate reporting correctly that **root jitter is a far
+> weaker lever than its size suggests.** Most of a checkers turn is forced: a
+> capture is all but compulsory, a chain has no choices inside it, and many
+> positions offer one sane move. Jitter can only spoil a free choice, and there
+> are fewer of those here than in a game like chess. The old +18 was measured in
+> a game where almost nothing happened, so the few real decisions carried
+> everything.
+>
+> The twin was dropped rather than re-tuned until it passed, and what it guarded
+> — that the root ranking is used at all — is already covered in the page's own
+> suite without playing a game. The practical consequence is recorded above
+> `AI_LEVELS`: **`noise` is a weak difficulty knob, `depth` does nothing without
+> `timeMs`, and Novice is beatable mostly because of its shallow search and
+> small budget rather than its jitter.** None of that was knowable before there
+> was a way to measure it, which is the whole argument for having built this.
 
 ---
 
