@@ -1,0 +1,237 @@
+agreement recipe v1 seed=20260810
+
+== skilled (Gold) vs novice (Violet), seed 20260810 ==
+result winner=null turns=30 gold=22 violet=22 reason=turn limit reached
+board 1:1p-Q 3:1p-Q 5:1p-Q 7:1p-Q 9:1p-Q 11:1p-Q 12:1p-Q 16:1p-Q 18:1p-Q 22:1p-Q 25:1p-Q 27:1p-Q 29:1p-Q 33:1p-Q 35:1p-Q 36:1p-Q 38:1p-Q 44:1p-Q 46:1p-Q 51:1p-Q 53:1p-Q 55:1p-Q 62:0p-Q 81:0p-Q 84:0p-Q 90:0p-Q 105:0p-Q 107:0p-Q 108:0p-Q 112:0p-Q 114:0p-Q 116:0p-Q 118:0p-Q 121:0p-Q 123:0p-Q 127:0p-Q 129:0p-Q 131:0p-Q 132:0p-Q 134:0p-Q 136:0p-Q 138:0p-Q 140:0p-Q 142:0p-Q
+focus 3/10 hand 2/0
+log Gold +1 FP — start of turn.
+log Gold moves b4 → a5.
+log Violet +1 FP — start of turn.
+log Violet moves e9 → d8.
+log Gold moves d4 → c5.
+log Violet moves a9 → b8.
+log Gold +1 FP — start of turn.
+log Gold moves h4 → i5.
+log Violet +1 FP — start of turn.
+log Violet moves b10 → a9.
+log Gold moves f4 → g5.
+log Violet moves c11 → b10.
+log Gold +1 FP — start of turn.
+log Gold draws a spell — this ends the turn.
+log Violet +1 FP — start of turn.
+log Violet moves g9 → f8.
+log Gold draws a spell — this ends the turn.
+log Violet moves i9 → j8.
+log Gold +1 FP — start of turn.
+log Gold draws a spell — this ends the turn.
+log Violet +1 FP — start of turn.
+log Violet moves h10 → g9.
+log Gold moves g3 → h4.
+log Violet moves j8 → k7.
+log Gold +1 FP — start of turn.
+log Gold moves f2 → g3.
+log Violet +1 FP — start of turn.
+log Violet moves g9 → h8.
+log Gold moves i5 → j6.
+log Gold's Pawn at j6 is captured.
+log Violet +1 FP — capture.
+log Violet jumps k7 → i5.
+log Gold +1 FP — start of turn.
+log Violet's Pawn at i5 is captured.
+log Gold +1 FP — capture.
+log Gold jumps h4 → j6.
+log Violet +1 FP — start of turn.
+log Violet moves b8 → a7.
+log Gold moves c3 → b4.
+log Violet moves j10 → i9.
+log Gold +1 FP — start of turn.
+log Gold moves c5 → b6.
+log Violet +1 FP — start of turn.
+log Gold's Pawn at b6 is captured.
+log Violet +1 FP — capture.
+log Violet jumps a7 → c5.
+log Gold casts Stutter. (−4 FP)
+log Stutter — Violet's next turn will be played out, unmade, and taken again differently.
+log The strain costs Gold 3 more Focus.
+log And you may not draw next turn.
+log Violet's Pawn at c5 is captured.
+log Gold +1 FP — capture.
+log Gold jumps b4 → d6.
+log Violet moves c9 → b8.
+log Stutter — Violet's turn is unmade. It must be taken differently.
+log Violet moves i11 → j10.
+log Gold +1 FP — start of turn.
+log Gold moves d6 → c7.
+log Violet +1 FP — start of turn.
+
+== ruthless (Gold) vs skilled (Violet), seed 20260811 ==
+result winner=null turns=24 gold=24 violet=24 reason=turn limit reached
+board 1:1p-Q 3:1p-Q 5:1p-Q 7:1p-Q 9:1p-Q 11:1p-Q 12:1p-Q 14:1p-Q 16:1p-Q 18:1p-Q 20:1p-Q 25:1p-Q 29:1p-Q 31:1p-Q 33:1p-Q 35:1p-Q 38:1p-Q 40:1p-Q 44:1p-Q 49:1p-Q 55:1p-Q 59:1p-Q 64:1p-Q 68:1p-Q 81:0p-Q 84:0p-Q 86:0p-Q 88:0p-Q 90:0p-Q 94:0p-Q 101:0p-Q 103:0p-Q 108:0p-Q 110:0p-Q 112:0p-Q 114:0p-Q 116:0p-Q 118:0p-Q 121:0p-Q 123:0p-Q 129:0p-Q 131:0p-Q 132:0p-Q 134:0p-Q 136:0p-Q 138:0p-Q 140:0p-Q 142:0p-Q
+focus 7/6 hand 1/2
+log Gold +1 FP — start of turn.
+log Gold moves b4 → a5.
+log Violet +1 FP — start of turn.
+log Violet moves e9 → d8.
+log Gold moves d4 → c5.
+log Violet moves d10 → e9.
+log Gold +1 FP — start of turn.
+log Gold moves h4 → g5.
+log Violet +1 FP — start of turn.
+log Violet moves k9 → j8.
+log Gold moves f4 → e5.
+log Violet moves d8 → e7.
+log Gold +1 FP — start of turn.
+log Gold moves g3 → f4.
+log Violet +1 FP — start of turn.
+log Violet moves j10 → k9.
+log Gold moves f2 → g3.
+log Violet moves k9 → l8.
+log Gold +1 FP — start of turn.
+log Gold moves j4 → i5.
+log Violet +1 FP — start of turn.
+log Violet moves j8 → i7.
+log Gold moves l4 → k5.
+log Violet moves g9 → h8.
+log Gold +1 FP — start of turn.
+log Gold moves g3 → h4.
+log Violet +1 FP — start of turn.
+log Violet moves a9 → b8.
+log Gold moves h2 → g3.
+log Violet moves k11 → j10.
+log Gold +1 FP — start of turn.
+log Gold moves i5 → j6.
+log Violet +1 FP — start of turn.
+log Violet draws a spell — this ends the turn.
+log Gold draws a spell — this ends the turn.
+log Violet draws a spell — this ends the turn.
+log Gold +1 FP — start of turn.
+
+== skilled (Gold) vs random (Violet), seed 20260812 ==
+result winner=null turns=30 gold=20 violet=20 reason=turn limit reached
+board 1:1p-Q 3:1p-Q 5:1p-Q 7:1p-Q 9:1p-Q 11:1p-Q 12:1p-Q 14:1p-Q 16:1p-Q 18:1p-Q 20:1p-Q 22:1p-Q 25:1p-Q 31:1p-Q 33:1p-Q 35:1p-Q 44:1p-Q 49:1p-Q 59:1p-Q 64:1p-Q 66:0p-Q 86:0p-Q 97:0p-Q 101:0p-Q 105:0p-Q 107:0p-Q 108:0p-Q 112:0p-Q 121:0p-Q 123:0p-Q 125:0p-Q 127:0p-Q 129:0p-Q 131:0p-Q 132:0p-Q 134:0p-Q 136:0p-Q 138:0p-Q 140:0p-Q 142:0p-Q
+focus 10/10 hand 0/0
+log Gold +1 FP — start of turn.
+log Gold moves f4 → e5.
+log Violet +1 FP — start of turn.
+log Violet moves k9 → l8.
+log Gold moves j4 → i5.
+log Violet moves e9 → f8.
+log Gold +1 FP — start of turn.
+log Gold moves k3 → j4.
+log Violet +1 FP — start of turn.
+log Violet moves f8 → e7.
+log Gold moves g3 → f4.
+log Violet moves a9 → b8.
+log Gold +1 FP — start of turn.
+log Gold moves e5 → d6.
+log Violet +1 FP — start of turn.
+log Gold's Pawn at d6 is captured.
+log Violet +1 FP — capture.
+log Violet jumps e7 → c5.
+log Violet's Pawn at c5 is captured.
+log Gold +1 FP — capture.
+log Gold jumps d4 → b6.
+log Violet moves g9 → h8.
+log Gold +1 FP — start of turn.
+log Gold moves b4 → c5.
+log Violet +1 FP — start of turn.
+log Violet moves h8 → i7.
+log Gold moves i5 → h6.
+log Gold's Pawn at h6 is captured.
+log Violet +1 FP — capture.
+log Violet jumps i7 → g5.
+log Gold +1 FP — start of turn.
+log Violet's Pawn at g5 is captured.
+log Gold +1 FP — capture.
+log Gold jumps h4 → f6.
+log Violet +1 FP — start of turn.
+log Violet moves f10 → e9.
+log Gold moves i3 → h4.
+log Violet moves e9 → f8.
+log Gold +1 FP — start of turn.
+log Gold moves h4 → i5.
+log Violet +1 FP — start of turn.
+log Violet moves c9 → d8.
+log Gold moves f6 → g7.
+log Gold's Pawn at g7 is captured.
+log Violet +1 FP — capture.
+log Violet jumps f8 → h6.
+log Gold +1 FP — start of turn.
+log Violet's Pawn at h6 is captured.
+log Gold +1 FP — capture.
+log Gold jumps i5 → g7.
+log Violet +1 FP — start of turn.
+log Violet moves d8 → c7.
+log Violet's Pawn at c7 is captured.
+log Gold is full at 10 FP — 1 FP from capture is wasted. Spend it or lose it.
+log Gold jumps b6 → d8.
+log Violet moves d10 → c9.
+log Gold is full at 10 FP — 1 FP from start of turn is wasted. Spend it or lose it.
+log Gold moves c3 → b4.
+log Violet is full at 10 FP — 1 FP from start of turn is wasted. Spend it or lose it.
+log Gold's Pawn at d8 is captured.
+log Violet is full at 10 FP — 1 FP from capture is wasted. Spend it or lose it.
+log Violet jumps c9 → e7.
+
+== novice (Gold) vs novice (Violet), seed 20260813 ==
+result winner=null turns=30 gold=21 violet=21 reason=turn limit reached
+board 1:1p-Q 3:1p-Q 5:1p-Q 7:1p-Q 9:1p-Q 11:1p-Q 12:1p-Q 14:1p-Q 18:1p-Q 20:1p-Q 22:1p-Q 27:1p-Q 29:1p-Q 31:1p-Q 35:1p-Q 36:1p-Q 46:1p-Q 57:1p-Q 59:1p-Q 60:1p-Q 64:1p-Q 81:0p-Q 84:0p-Q 90:0p-Q 103:0p-Q 105:0p-Q 107:0p-Q 108:0p-Q 110:0p-Q 112:0p-Q 114:0p-Q 121:0p-Q 123:0p-Q 127:0p-Q 129:0p-Q 131:0p-Q 132:0p-Q 134:0p-Q 136:0p-Q 138:0p-Q 140:0p-Q 142:0p-Q
+focus 10/10 hand 0/0
+log Gold +1 FP — start of turn.
+log Gold moves h4 → g5.
+log Violet +1 FP — start of turn.
+log Violet moves i9 → j8.
+log Gold moves g5 → f6.
+log Violet moves c9 → d8.
+log Gold +1 FP — start of turn.
+log Gold moves g3 → h4.
+log Violet +1 FP — start of turn.
+log Violet moves k9 → l8.
+log Gold moves d4 → c5.
+log Violet moves a9 → b8.
+log Gold +1 FP — start of turn.
+log Gold moves h4 → g5.
+log Violet +1 FP — start of turn.
+log Violet moves b10 → a9.
+log Gold moves b4 → a5.
+log Violet moves g9 → f8.
+log Gold +1 FP — start of turn.
+log Gold moves j4 → k5.
+log Violet +1 FP — start of turn.
+log Violet moves j10 → k9.
+log Gold moves k3 → j4.
+log Violet moves d8 → e7.
+log Gold +1 FP — start of turn.
+log Violet's Pawn at e7 is captured.
+log Gold +1 FP — capture.
+log Gold jumps f6 → d8.
+log Violet +1 FP — start of turn.
+log Gold's Pawn at d8 is captured.
+log Violet +1 FP — capture.
+log Violet jumps e9 → c7.
+log Gold moves f2 → g3.
+log Violet moves b8 → a7.
+log Gold +1 FP — start of turn.
+log Gold moves k5 → j6.
+log Violet +1 FP — start of turn.
+log Violet moves f10 → g9.
+log Gold moves c5 → d6.
+log Gold's Pawn at d6 is captured.
+log Violet +1 FP — capture.
+log Violet jumps c7 → e5.
+log Gold +1 FP — start of turn.
+log Violet's Pawn at e5 is captured.
+log Gold +1 FP — capture.
+log Gold jumps f4 → d6.
+log Violet +1 FP — start of turn.
+log Violet moves e11 → f10.
+log Gold moves i3 → h4.
+log Violet moves f8 → e7.
+log Gold +1 FP — start of turn.
+log Violet's Pawn at e7 is captured.
+log Gold is full at 10 FP — 1 FP from capture is wasted. Spend it or lose it.
+log Gold jumps d6 → f8.
+log Violet +1 FP — start of turn.
+log Gold's Pawn at f8 is captured.
+log Violet is full at 10 FP — 1 FP from capture is wasted. Spend it or lose it.
+log Violet jumps g9 → e7.
