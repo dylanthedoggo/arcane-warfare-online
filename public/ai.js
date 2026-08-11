@@ -188,6 +188,9 @@ const aiWide = (n) => Math.round(n * aiCfg().width);
  */
 let AI = {
   on: false, side: 1, level: "skilled", thinking: false, gen: 0,
+  duel: null,        // exhibition: a level name per seat, or null in a normal game
+  paused: false,     // the watcher stopped the exhibition between beats
+  watch: 0,          // index into WATCH_SPEEDS — playback speed, never strength
   // Budget the search in nodes rather than in wall-clock milliseconds, so that
   // the same seeded game plays out the same way twice. Off here and never
   // turned on by the page; the headless tools set it. `fast`, its older
@@ -211,7 +214,66 @@ let AI = {
 /** Abandon whatever the machine was doing; any in-flight beat becomes a no-op. */
 function aiCancel() { AI.gen++; AI.thinking = false; AI.moveSteps = null; }
 const aiCfg = () => AI_LEVELS[AI.level];
-const isAISeat = (s) => AI.on && s === AI.side;
+/* ── DUEL — both chairs are machines ────────────────────────────────────────
+   Everything else here is written around ONE machine: `AI.side` is the seat it
+   plays and `AI.level` is how hard it plays, and the search reads both from
+   several hundred places. Giving each seat its own brain by threading a second
+   set through the search would be a rewrite of the file for a spectator mode.
+
+   So it does not. `AI.duel` holds the two level names, and that pair becomes
+   "whose turn is being thought about right now" — repointed at the top of every
+   turn by aiTakeSeat(). One brain is ever in the chair at a time, which is also
+   the truth of it: turns strictly alternate, so a second simultaneous search
+   would have nothing to do.
+
+   The trap, worth naming because it is invisible: anything asking "how hard
+   does SEAT s play?" must go through aiLevelFor(s) and not read AI.level, which
+   during a duel answers for whoever is thinking rather than for the seat asked
+   about. The player strip got this wrong first, and labelled both machines with
+   the level of the one on move.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/** The ladder, weakest first. The menus and the ordering test both read it. */
+const AI_ORDER = ["novice", "skilled", "ruthless"];
+
+const isDuel = () => AI.on && !!AI.duel;
+/** How hard `s` plays — the per-seat answer, which is not always AI.level. */
+const aiLevelFor = (s) => (AI.duel ? AI.duel[s] : AI.level);
+const aiNameFor = (s) => AI_LEVELS[aiLevelFor(s)].name;
+const isAISeat = (s) => AI.on && (AI.duel ? AI.duel[s] != null : s === AI.side);
+
+/** Put the brain that owns the seat on move into the chair. A no-op off duel. */
+function aiTakeSeat() {
+  if (!AI.duel) return;
+  AI.side = G.turn;
+  AI.level = aiLevelFor(G.turn);
+}
+
+/* ── how fast to play an exhibition back ────────────────────────────────────
+   A turn takes about eight seconds of wall clock and almost none of it is
+   thinking: it is the deliberate gaps between the driver's beats and the length
+   of the animations, both there so a person can follow what happened while
+   taking their own turn in between. Watching costs you two of those a round and
+   gives you nothing to do during either.
+
+   What "faster" scales is PRESENTATION ONLY. `pace` is documented in the level
+   table as cosmetic and FX.rate stretches animations; neither is a search or
+   policy budget, and nothing here may ever touch one. A machine that thought
+   less hard because the watcher was impatient would not be the machine you
+   asked to watch.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const WATCH_SPEEDS = [
+  { label: "1×", rate: 1,    hint: "the pace it plays you at" },
+  { label: "2×", rate: 0.5,  hint: "half the pauses, the same thinking" },
+  { label: "4×", rate: 0.25, hint: "as fast as the board stays readable" },
+];
+
+/** The scale on every cosmetic wait. 1 outside an exhibition, always. */
+const watchRate = () => (AI.duel ? WATCH_SPEEDS[AI.watch].rate : 1);
+
+/* watchApply and watchCycle touch FX and the interface, so they live inside
+   the browser-only seam below rather than here. */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ── the machine's own randomness ───────────────────────────────────────────
@@ -2005,7 +2067,9 @@ function aiAbandonPlan(s) {
 
 /** The whole turn, synchronously. Used by headless self-play. */
 function aiRunTurn() {
-  if (!AI.on || G.over || G.turn !== AI.side) return;
+  if (!AI.on || G.over) return;
+  aiTakeSeat();
+  if (G.turn !== AI.side) return;
   AI.thinking = true;
   clearOrderingMemory();
   try {
@@ -2056,6 +2120,44 @@ function aiRunTurn() {
    bootstrap's allowlist along with the reason it is allowed.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/** Push the current speed at the effects player. Call after changing AI.watch. */
+function watchApply() { FX.rate = watchRate(); }
+
+/** Cycle 1× → 2× → 4× → 1×. The choice outlives the game, within the session. */
+function watchCycle() {
+  AI.watch = (AI.watch + 1) % WATCH_SPEEDS.length;
+  watchApply();
+  render();
+}
+
+/* ── pause and resume ───────────────────────────────────────────────────────
+   Pause stops the exhibition where it stands rather than at the end of the
+   turn, because a Ruthless mirror spends three seconds a move and a button that
+   took that long to answer would read as broken.
+
+   Stopping mid-turn is safe. aiCancel only invalidates the SCHEDULED beats;
+   nothing is half-applied, because each beat finishes its own chunk of work
+   synchronously before scheduling the next. The board is left after some legal
+   prefix of a turn, which the driver can already re-enter: resuming runs
+   aiTakeTurn from stage 0 and every stage no-ops when its work is done. That
+   re-entrancy exists for the mid-turn undo; pause leans on it.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+function duelPause() {
+  if (!isDuel()) return;
+  AI.paused = true;
+  aiCancel();
+  render();
+}
+
+function duelResume() {
+  if (!isDuel()) return;
+  AI.paused = false;
+  render();
+  if (!G.over && isAISeat(G.turn)) aiTakeTurn();
+}
+
+
 /* ── the live driver ────────────────────────────────────────────────────────
    A setTimeout state machine rather than one long async function. Each beat
    does a chunk of synchronous work, paints, and schedules the next. Nothing
@@ -2066,7 +2168,9 @@ function aiRunTurn() {
 const AI_STAGES = ["discard", "chronos", "draw", "castDeclare", "move", "castEnd", "finish"];
 
 function aiTakeTurn() {
-  if (!AI.on || G.over || G.turn !== AI.side || AI.thinking) return;
+  if (!AI.on || G.over || AI.thinking || AI.paused) return;
+  aiTakeSeat();                          // duel: the chair changes hands each turn
+  if (G.turn !== AI.side) return;
   AI.thinking = true;
   clearOrderingMemory();
   AI.stage = 0;
@@ -2075,7 +2179,7 @@ function aiTakeTurn() {
   UI.targeting = null;
   render();
   const gen = AI.gen;
-  setTimeout(() => aiStep(gen), aiCfg().pace);
+  setTimeout(() => aiStep(gen), aiCfg().pace * watchRate());
 }
 
 function aiStep(gen) {
@@ -2101,7 +2205,7 @@ function aiStep(gen) {
           drawSpell(AI.side);
           AI.thinking = false;
           render();
-          setTimeout(() => { if (gen === AI.gen && !G.over) endTurnLocal(); }, aiCfg().pace);
+          setTimeout(() => { if (gen === AI.gen && !G.over) endTurnLocal(); }, aiCfg().pace * watchRate());
           return;
         }
         AI.stage++; wait = 0; break;
@@ -2163,7 +2267,7 @@ function aiStep(gen) {
   if (G.over) { AI.thinking = false; announceWinner(); return; }
   // Never outrun the animation of the beat just taken — otherwise a machine
   // chain-jump fires its second hop while the first is still in the air.
-  setTimeout(() => aiStep(gen), Math.max(wait, FX.busyMs()));
+  setTimeout(() => aiStep(gen), Math.max(wait * watchRate(), FX.busyMs()));
 }
 
 /**
@@ -2188,6 +2292,7 @@ function afterHandoff(sameSeat) {
   // effects-off game nothing.
   if (isAISeat(G.turn)) {
     UI.revealed = true; render();
+    if (AI.paused) return;               // an exhibition the watcher has stopped
     FX.then(() => setTimeout(aiTakeTurn, 40));
     return;
   }
@@ -2257,6 +2362,9 @@ function aiPlayGame(gold, violet, maxTurns = 300, seed = null, opts = {}) {
   // an instrument that gives a different reading each time it is picked up is
   // not one. With the clock as the budget, the same seeded game came out
   // 17v18 and then 17v17 — see "what a search may spend".
+  // The harness picks the brain per turn itself, below. Leaving a live duel
+  // pairing in place would have aiRunTurn re-point the seat underneath it.
+  AI.duel = null; AI.paused = false;
   AI.on = true; AI.thinking = false; AI.deterministic = true;
   AI.fast = opts.fast !== false;
   AI.budgetScale = opts.scale == null ? 1 : opts.scale;

@@ -318,6 +318,16 @@ button:disabled{cursor:not-allowed}
 .card.form .cname>span:first-child,
 .card.arcane .cname>span:first-child{color:var(--kind)}
 .empty{font-size:11px;color:var(--ink-faint);font-style:italic;padding:5px 0}
+/* Watching two machines, the one hand panel carries both hands, so each needs
+   naming. `currentColor` inherits the side's colour, set on the row itself. */
+.handside{
+  display:flex;justify-content:space-between;gap:6px;align-items:baseline;
+  font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  padding-bottom:3px;border-bottom:1px solid currentColor;opacity:.85;
+}
+.handside+*{margin-top:1px}
+.handside:not(:first-child){margin-top:9px}
+.handside small{font-size:9px;font-weight:400;letter-spacing:0;text-transform:none;opacity:.75}
 
 /* actions */
 #actions{display:flex;flex-direction:column;gap:5px}
@@ -672,6 +682,10 @@ const boardFlipped = () => {
   // exist. Reaching through either of them there throws before wire() has run,
   // which kills the page silently — no handlers, no game, just an empty grid.
   if (!G || !UI) return false;
+  // Watching two machines, viewSeat() follows the turn — and a board that
+  // faced it would spin a full half-turn every time the machines handed over.
+  // A spectator is not marching anywhere, so it is simply pinned.
+  if (isDuel()) return false;
   return (NET.on || UI.revealed) && viewSeat() === 1;
 };
 
@@ -733,7 +747,11 @@ function renderTopbar() {
   nm.textContent = `${PLAYERS[G.turn].name} to act`;
 
   let phase = G.phase === "declare" ? "Declare Action" : "End Phase";
-  if (AI.thinking) phase = `${AI_LEVELS[AI.level].name} is thinking…`;
+  // In an exhibition both chairs are machines, so "Ruthless is thinking" would
+  // not say which one. Name the side as well.
+  if (isDuel() && AI.paused) phase = "Paused";
+  else if (isDuel()) phase = `${PLAYERS[G.turn].name} · ${aiNameFor(G.turn)} is thinking…`;
+  else if (AI.thinking) phase = `${AI_LEVELS[AI.level].name} is thinking…`;
   else if (G.chain != null) phase = "Chain-jump — must continue";
   else if (G.heraldBonus != null) phase = "Herald bonus step";
   else if (G.twinStep != null) phase = "Temporal Twin — move the other body";
@@ -788,7 +806,7 @@ function renderBoard() {
       // viewFor deletes the field outright from every enemy piece, and against
       // the machine the field is only ever set on pieces the player owns or
       // the machine does — which is why this asks whose seat is looking.
-      if (p.hollow && (G.dev || p.owner === viewSeat())) d.classList.add("hollow");
+      if (p.hollow && (G.dev || spectating() || p.owner === viewSeat())) d.classList.add("hollow");
       // A superposition is public — both players can see the two bodies. Which
       // one is the pawn is not, so the second class is owner-only and rests on
       // a field viewFor has already deleted from the other seat's copy.
@@ -796,7 +814,7 @@ function renderBoard() {
       if (p.twin) d.classList.add("twinned");
       if (p.quantum) {
         d.classList.add("quantum");
-        if (G.dev || p.owner === viewSeat()) d.classList.add(p.quantumReal ? "qreal" : "qghost");
+        if (G.dev || spectating() || p.owner === viewSeat()) d.classList.add(p.quantumReal ? "qreal" : "qghost");
       }
       // A penalty that has been paid but has not landed yet is otherwise
       // invisible, which reads as "the penalty never happened". Show it.
@@ -899,7 +917,7 @@ function describePiece(p, i) {
    * machine's own Hollow to the player hovering it — the board stopped doing
    * that at the `.hollow` class and the tooltip was still doing it.
    */
-  const mayRead = G.dev || p.owner === viewSeat();
+  const mayRead = G.dev || spectating() || p.owner === viewSeat();
   const bits = [`${PLAYERS[p.owner].name} ${pieceLabel(p)} · ${sq(i)}`];
   if (p.form) bits.push(FORMS[p.form].ability);
   if (p.armor) bits.push("Armored — survives the first capture.");
@@ -937,7 +955,9 @@ function renderPlayers() {
     const mid = el("div");
     mid.style.flex = "1";
     mid.style.minWidth = "0";
-    mid.appendChild(el("div", "nm", PLAYERS[s].name + (isAISeat(s) ? ` · ${AI_LEVELS[AI.level].name}` : AI.on ? " · you" : "")));
+    // aiNameFor(s), never AI.level: in an exhibition AI.level answers for
+    // whichever machine is thinking, so both strips would wear one name.
+    mid.appendChild(el("div", "nm", PLAYERS[s].name + (isAISeat(s) ? ` · ${aiNameFor(s)}` : AI.on ? " · you" : "")));
     // Hand SIZE is public information; the contents are not.
     const bits = [`${countPieces(s)} pieces`, `${P.hand.length} cards`];
     if (P.lostQueens.length) bits.push(`${P.lostQueens.length} fallen ♛`);
@@ -964,7 +984,9 @@ function renderPlayers() {
     if (effs.children.length) mid.appendChild(effs);
     row.appendChild(mid);
 
-    const mine = s === viewSeat();
+    // A spectator is owed both pools: watching two machines trade spells with
+    // one of the two budgets blanked out makes half the game unreadable.
+    const mine = spectating() || s === viewSeat();
     const fp = el("div", "fp" + (mine && !G.dev && P.fp >= FP_CAP ? " full" : ""));
     if (mine) {
       fp.textContent = G.dev ? "∞" : P.fp;
@@ -998,19 +1020,43 @@ function renderHand() {
   const seat = viewSeat();
   const P = G.players[seat];
   const owner = $("handowner");
-  owner.textContent = (AI.on || NET.on) ? "Your Hand" : `${PLAYERS[seat].name}'s Hand`;
-  owner.style.color = PLAYERS[seat].color;
-  $("handcount").textContent = `${P.hand.length} card${P.hand.length === 1 ? "" : "s"}`;
+  const bothHands = spectating();
+  const total = G.players[0].hand.length + G.players[1].hand.length;
+  const shown = bothHands ? total : P.hand.length;
+  owner.textContent = bothHands ? "Both Hands" : (AI.on || NET.on) ? "Your Hand" : `${PLAYERS[seat].name}'s Hand`;
+  owner.style.color = bothHands ? "var(--ink)" : PLAYERS[seat].color;
+  $("handcount").textContent = `${shown} card${shown === 1 ? "" : "s"}`;
   const scarceLeft = SPELL_IDS.reduce((sum, id) => {
     const cap = SPELLS[id].maxDraws;
     return cap != null ? sum + Math.max(0, cap - (G.drawCounts[id] || 0)) : sum;
   }, 0);
   $("deckcount").textContent = `weighted, ${scarceLeft} scarce draw${scarceLeft === 1 ? "" : "s"} left`;
 
+  // Nobody at this device holds a hand — so instead of showing one seat's, show
+  // both. Neither machine can read the screen, and the bluff a Hollow Shell is
+  // running is the whole reason to watch a game you are not playing.
+  if (bothHands) {
+    for (let s = 0; s < 2; s++) {
+      const row = el("div", "handside");
+      row.style.color = PLAYERS[s].color;
+      row.appendChild(el("span", null, `${PLAYERS[s].name} · ${aiNameFor(s)}`));
+      row.appendChild(el("small", null, `${G.players[s].hand.length} card${G.players[s].hand.length === 1 ? "" : "s"}`));
+      wrap.appendChild(row);
+      renderHandCards(wrap, s);
+    }
+    return;
+  }
+
   if (!UI.revealed) {
     wrap.appendChild(el("div", "empty", "Hidden until you lift the curtain."));
     return;
   }
+  renderHandCards(wrap, seat);
+}
+
+/** One seat's hand as a stack of cards, appended to `wrap`. */
+function renderHandCards(wrap, seat) {
+  const P = G.players[seat];
   if (!P.hand.length) {
     wrap.appendChild(el("div", "empty", "No cards. Spend a turn drawing one."));
     return;
@@ -1036,7 +1082,6 @@ function renderHand() {
     if (!b.disabled) b.addEventListener("click", () => beginCast(id, seat));
     wrap.appendChild(b);
   }
-
 }
 
 function renderActions() {
@@ -1070,6 +1115,18 @@ function renderActions() {
 
   if (G.over) {
     add("New Game", "start over", "primary", true, startNewGame);
+    return;
+  }
+  // Watching two machines, this panel is a remote control rather than a turn:
+  // there is no action here that belongs to anyone at this device.
+  if (isDuel()) {
+    if (AI.paused)
+      add("Resume", `${PLAYERS[G.turn].name} · ${aiNameFor(G.turn)} is to act`, "primary", true, duelResume);
+    else
+      add("Pause", "stop after the beat in progress", "primary", true, duelPause);
+    const sp = WATCH_SPEEDS[AI.watch];
+    add(`Speed · ${sp.label}`, sp.hint, "", true, watchCycle);
+    add("Stop watching", "back to the menu", "", true, startNewGame);
     return;
   }
   if (AI.thinking || isAISeat(G.turn)) {
@@ -1171,7 +1228,7 @@ function visibleLog() {
   // The sandbox has one person in both chairs, so there is nobody to keep a
   // line from — and a workbench that hides half of what it just did is not
   // much of a workbench.
-  if (G.dev) return G.log;
+  if (G.dev || spectating()) return G.log;
   const me = viewSeat();
   return G.log.filter((e) => e.only == null || e.only === me);
 }
@@ -1272,6 +1329,7 @@ function onCellClick(i) {
   // The four game-altering spells hold the board while they resolve. Nothing
   // else does — an ordinary capture is clickable through its own animation.
   if (FX.lock > 0) return;
+  if (isDuel()) { toast("You are watching this one — the machines are playing it.", ""); return; }
   if (AI.thinking || isAISeat(G.turn)) { toast("Wait for the machine to move.", ""); return; }
 
   if (UI.targeting) {
@@ -1684,8 +1742,12 @@ function announceWinner() {
 
 function announceWinnerNow() {
   if (!G.over) return;
+  const w = G.over.winner;
   showModal({
-    title: `${PLAYERS[G.over.winner].name} wins`,
+    // An exhibition is a match between two brains, so the result is about them
+    // and not about the colours they happened to be sitting behind.
+    title: isDuel() ? `${PLAYERS[w].name} wins — ${aiNameFor(w)} beats ${aiNameFor(1 - w)}`
+                    : `${PLAYERS[w].name} wins`,
     sub: G.over.reason + ".",
     buttons: [{ label: "New Game", cls: "go", onClick: startNewGame }, { label: "Review the board", onClick: () => render() }],
   });
@@ -1700,6 +1762,9 @@ function applyUndo(target) {
 
 function requestUndo() {
   if (G.over) { toast("The game is over.", "bad"); return; }
+  // Undo rewinds a turn on behalf of whoever took it. In an exhibition that is
+  // never the person asking, so there is nothing here to give back.
+  if (isDuel()) { toast("You are watching — neither turn is yours to take back.", "bad"); return; }
   if (AI.thinking) { toast("Wait for the machine to finish its move.", "bad"); return; }
 
   if (NET.on) {
@@ -1750,6 +1815,23 @@ function requestUndo() {
 
 function resign() {
   if (G.over) return;
+  // The same argument as the undo above: neither side is yours to concede. The
+  // button's honest meaning while watching is "I have seen enough", so it says
+  // that — and holds the exhibition still while the sheet is up, rather than
+  // letting two more turns go by behind it.
+  if (isDuel()) {
+    const wasPaused = AI.paused;
+    duelPause();
+    showModal({
+      title: "Stop watching?",
+      sub: "Neither of these players is yours to resign for. This abandons the exhibition and goes back to the menu.",
+      buttons: [
+        { label: "Yes, back to the menu", cls: "no", onClick: startNewGame },
+        { label: "Keep watching", onClick: () => { if (wasPaused) render(); else duelResume(); } },
+      ],
+    });
+    return;
+  }
   const who = NET.on ? NET.seat : G.turn;
   showModal({
     title: "Resign?",
@@ -1767,6 +1849,11 @@ function resign() {
 }
 
 function startNewGame() {
+  // An exhibition left running behind the menu would keep thinking, keep
+  // animating and keep burning a search's worth of CPU per turn. Every route to
+  // this screen — the topbar, the actions panel, the win sheet — comes through
+  // here, so stopping it here covers all of them.
+  if (isDuel()) duelPause();
   showModal({
     tag: "mainMenu",                  // the one screen the Space knock listens on
     title: "Checkers Arcane Warfare",
@@ -1786,6 +1873,11 @@ function startNewGame() {
         label: "Play the machine", cls: "violet",
         desc: "A searching opponent. It reads only what you can see — board, Focus Points, and how many cards you hold, never which ones.",
         onClick: pickDifficulty,
+      },
+      {
+        label: "Watch two machines", cls: "violet",
+        desc: "An exhibition. Give each side a brain — the same one twice for an even match — and watch. You referee nothing, and both hands are face up to you.",
+        onClick: pickDuel,
       },
     ],
   });
@@ -1828,20 +1920,104 @@ function pickSide(level) {
   });
 }
 
+/* ── the exhibition ─────────────────────────────────────────────────────────
+   The three mirrors come first and the uneven match is tucked behind a fourth
+   item, because "the same difficulty on both sides" is what an exhibition is
+   usually for: a fair fight is the one that tells you something about the
+   machine. An uneven one mostly tells you which level you picked.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/** One line per level, written for someone watching rather than playing. */
+const DUEL_BLURB = {
+  novice:   "Three moves ahead, the obvious spells only, and the occasional deliberate blunder.",
+  skilled:  "Four moves ahead, and it prices every card in its hand before casting one.",
+  ruthless: "Up to three seconds a move, the whole spell book, and no deliberate mistakes.",
+};
+
+function pickDuel() {
+  showModal({
+    title: "Which two machines?",
+    sub: "Both chairs are played by the machine. Nothing here is yours to move — but every hand is face up to you, which is not true in any game you are actually in.",
+    items: [
+      {
+        label: "Novice vs Novice",
+        desc: "Loose, quick and full of mistakes. The fastest game to watch, and the easiest to follow.",
+        onClick: () => bootDuel("novice", "novice"),
+      },
+      {
+        label: "Skilled vs Skilled",
+        desc: "The even match. A move lands about every second, and both sides use the whole spell book.",
+        onClick: () => bootDuel("skilled", "skilled"),
+      },
+      {
+        label: "Ruthless vs Ruthless",
+        desc: "The best game the machine has in it — and the slowest. It thinks for up to three seconds a move, on both sides of the board.",
+        onClick: () => bootDuel("ruthless", "ruthless"),
+      },
+      {
+        label: "Uneven match…",
+        desc: "Give each side a different brain, and watch how far the gap between two levels actually goes.",
+        onClick: pickDuelGold,
+      },
+    ],
+    buttons: [{ label: "Back", onClick: startNewGame }],
+  });
+}
+
+/** Level items for one seat of an uneven match. */
+const duelLevelItems = (cls, onPick) =>
+  AI_ORDER.map((lvl) => ({
+    label: AI_LEVELS[lvl].name, cls, desc: DUEL_BLURB[lvl], onClick: () => onPick(lvl),
+  }));
+
+function pickDuelGold() {
+  showModal({
+    title: "Who plays Gold?",
+    sub: "Gold opens, from the bottom four rows.",
+    items: duelLevelItems("gold", (gold) => pickDuelViolet(gold)),
+    buttons: [{ label: "Back", onClick: pickDuel }],
+  });
+}
+
+function pickDuelViolet(gold) {
+  showModal({
+    title: "And who answers as Violet?",
+    sub: `Gold is <b>${AI_LEVELS[gold].name}</b>. Violet plays from the top four rows.`,
+    items: duelLevelItems("violet", (violet) => bootDuel(gold, violet)),
+    buttons: [{ label: "Back", onClick: pickDuelGold }],
+  });
+}
+
+/** Gold always opens an exhibition — there is nobody to offer the choice to. */
+const bootDuel = (gold, violet) => boot(0, { duel: [gold, violet] });
+
 function boot(first, opts = {}) {
   aiCancel();                       // kill any beat still pending from a prior game
   netLeave();                       // and drop any online game still attached
   FX.reset();                       // and anything still in the air from it
   // Against the machine concealment works — the machine is genuinely blinded.
   // Hot-seat it does not, because both hands share one screen, so "local"
-  // keeps those cards out of the pool entirely. See MODE in engine.js.
-  G = newGame(first, null, { dev: !!opts.dev, mode: opts.ai ? "ai" : "local" });
+  // keeps those cards out of the pool entirely. See MODE in engine.js. An
+  // exhibition is "ai" for the same reason a single machine is, twice over:
+  // neither side can read the other's hand, so the cards that hide one are
+  // worth playing — and watching one machine bluff another is most of the
+  // point of the mode.
+  const duel = opts.duel || null;
+  G = newGame(first, null, { dev: !!opts.dev, mode: (opts.ai || duel) ? "ai" : "local" });
   UI = freshUI();
-  AI.on = !!opts.ai;
-  AI.side = opts.aiSide != null ? opts.aiSide : 1;
-  AI.level = opts.level || "skilled";
+  AI.duel = duel;
+  AI.paused = false;
+  AI.on = !!(opts.ai || duel);
+  // In an exhibition these two are not settings but a cursor: they name the
+  // chair being thought about, and aiTakeSeat moves them each turn. Seeding
+  // them with the opening seat keeps the first render honest.
+  AI.side = duel ? first : opts.aiSide != null ? opts.aiSide : 1;
+  AI.level = duel ? duel[first] : opts.level || "skilled";
   AI.thinking = false;
   AI.fast = false;
+  // Assigned on every boot, not only on a duel, so the sped-up animations of
+  // an exhibition cannot follow you into the next real game.
+  watchApply();
   G.turnNo = 0;
   if (G.dev) {
     log("Dev sandbox. Act as often as you like, hold every card, transform for free, and never run out of Focus.", "big");
@@ -1849,7 +2025,10 @@ function boot(first, opts = {}) {
   } else {
     log("A new game begins. Pieces hold the dark squares; the four centre rows are the separation space.", "sys");
   }
-  if (AI.on)
+  if (duel) {
+    log(`An exhibition: ${PLAYERS[0].name} is played by ${AI_LEVELS[duel[0]].name}, ${PLAYERS[1].name} by ${AI_LEVELS[duel[1]].name}.`, "sys");
+    log("Both hands are open to you, and so is the whole referee log — neither machine can read this screen, and you are not in the game.", "sys");
+  } else if (AI.on)
     log(`You face the machine — ${AI_LEVELS[AI.level].name}, playing ${PLAYERS[AI.side].name}.`, "sys");
   beginTurn(first);
   render();
@@ -1869,8 +2048,29 @@ function bootDev() {
  * The seat whose hand the interface should show. Online it is your seat and
  * nothing else — the other hand never even reaches this machine. Vs the
  * machine, always yours. Hot-seat, whoever is holding the device.
+ *
+ * Watching two machines there is no such seat, because nobody at this device
+ * holds a hand at all. It answers "the side on move" so that everything reading
+ * it has a defensible seat to work from — but the things that would REDACT on
+ * the strength of it check spectating() first and redact nothing. See below.
  */
-const viewSeat = () => (NET.on ? NET.seat : AI.on ? 1 - AI.side : G.turn);
+const viewSeat = () => (NET.on ? NET.seat : isDuel() ? G.turn : AI.on ? 1 - AI.side : G.turn);
+
+/**
+ * Is this device watching rather than playing?
+ *
+ * Concealment exists to keep one PLAYER from reading another's secrets. Both
+ * halves of that are absent here: the two machines genuinely cannot read each
+ * other (they never touch the hand contents or the marker fields — see the
+ * invariants at the top of ai.js), and the person watching is not in the game,
+ * so there is nothing they could do with what they learn. Redacting a hollow
+ * shell from a spectator hides it from the only pair of eyes in the room and
+ * from nobody else, which is the same argument the sandbox already won.
+ *
+ * So a spectator sees everything, and every redaction in the interface is
+ * spelled `G.dev || spectating() || ...`.
+ */
+const spectating = () => isDuel();
 
 /* ══════════════════════════════════════════════════════════════════════════
    ONLINE
@@ -3609,6 +3809,15 @@ function runTests() {
   NET.seat = 0;
   ok("...and Gold's own board is never turned", boardFlipped() === false);
 
+  // Watching two machines, viewSeat() follows the turn — so a board that faced
+  // it would spin a half-turn every handover, twice a round, for the whole game.
+  NET.on = false; AI.on = true; AI.duel = ["skilled", "skilled"]; UI.revealed = true;
+  G.turn = 0;
+  ok("watching: the board is not turned for Gold's turn", boardFlipped() === false);
+  G.turn = 1;
+  ok("...and does not spin round when the machines hand over", boardFlipped() === false);
+  AI.duel = null;
+
   NET.on = seatWas.net; NET.seat = seatWas.seat; AI.on = seatWas.ai; AI.side = seatWas.side;
   UI.revealed = seatWas.revealed; G.turn = seatWas.turn;
   buildBoard();
@@ -3704,6 +3913,147 @@ function runTests() {
     FX.enabled = cEnabled; FX.mode = cMode; FX.run = cRun;
     FX.reset();
     NET.on = cWas.net; NET.seat = cWas.seat; AI.on = cWas.ai; AI.side = cWas.side; G.turn = cWas.turn;
+  }
+
+  /* ── the exhibition ────────────────────────────────────────────────────
+     Two machines, one screen, nobody playing. Almost everything that can go
+     wrong here is a thing that reads AI.side or AI.level and gets an answer
+     about the WRONG SEAT — during a duel those two name whoever is thinking,
+     not a fixed side, and every one of the tests below failed at least once
+     while that was being sorted out.
+     ─────────────────────────────────────────────────────────────────── */
+  group("Watching two machines");
+  {
+    const dWas = { on: AI.on, side: AI.side, level: AI.level, fast: AI.fast,
+                   duel: AI.duel, paused: AI.paused, watch: AI.watch,
+                   fxRate: FX.rate, net: NET.on };
+    const pair = ["novice", "skilled"];
+    G = newGame(0, 42, { mode: "ai" });
+    UI = freshUI();
+    G.turnNo = 0;
+    beginTurn(0);
+    NET.on = false;
+    AI.on = true; AI.fast = true; AI.paused = false; AI.thinking = false;
+    AI.duel = pair; AI.side = 0; AI.level = pair[0];
+
+    ok("both chairs are machine seats", isAISeat(0) && isAISeat(1));
+    ok("...and neither of them is driven from this device",
+      !iDrive(0) && !iDrive(1));
+    ok("...which is what the interface asks before offering anything to click",
+      isDuel() === true && spectating() === true);
+
+    // The bug this exists for: a strip that reports AI.level answers with the
+    // level of whoever is mid-search, so both machines wear one name.
+    ok("each seat is described by its own brain, not by the one thinking",
+      aiNameFor(0) === "Novice" && aiNameFor(1) === "Skilled",
+      `${aiNameFor(0)} / ${aiNameFor(1)}`);
+    AI.side = 1; AI.level = "skilled";                 // as if Violet were on move
+    ok("...and still is while the other one has the chair",
+      aiNameFor(0) === "Novice" && aiNameFor(1) === "Skilled",
+      `${aiNameFor(0)} / ${aiNameFor(1)}`);
+    AI.side = 0; AI.level = pair[0];
+
+    renderPlayers();
+    const dNames = [...document.querySelectorAll("#players .nm")].map((n) => n.textContent);
+    ok("...which is what the player strips print",
+      dNames[0].includes("Novice") && dNames[1].includes("Skilled"), dNames.join(" | "));
+    const dFp = [...document.querySelectorAll("#players .fp")].map((n) => n.firstChild.textContent);
+    ok("...and a spectator is shown both Focus pools, neither of them blanked",
+      dFp.every((t) => t !== "—"), dFp.join(" / "));
+
+    // The turn-by-turn hand-over. Written against G.turn rather than assuming
+    // strict alternation, because Temporal Cascade can keep a seat twice.
+    const dSeen = [];
+    for (let t = 0; t < 4 && !G.over; t++) {
+      const who = G.turn;
+      aiRunTurn();
+      dSeen.push({ who, side: AI.side, level: AI.level });
+    }
+    ok("the brain in the chair is always the one that owns the seat on move",
+      dSeen.length === 4 && dSeen.every((r) => r.side === r.who && r.level === pair[r.who]),
+      dSeen.map((r) => `${r.who}:${r.side}/${r.level}`).join(" "));
+    ok("...so both machines actually got to play",
+      new Set(dSeen.map((r) => r.who)).size === 2);
+    ok("...and four turns of it went by without either one throwing",
+      G.turnNo > 0 && dSeen.length === 4);
+
+    // Pause is a hard stop, not a request: the next beat must not start.
+    duelPause();
+    const dPausedTurn = G.turn;
+    aiTakeTurn();
+    ok("pausing stops the next turn from starting at all",
+      AI.paused === true && AI.thinking === false && G.turn === dPausedTurn);
+    duelResume();
+    ok("...and resuming clears the flag", AI.paused === false);
+    // Resuming scheduled a real beat. The suite is synchronous and about to
+    // replace G, so that beat must be made a no-op before it can wake up.
+    aiCancel();
+
+    /* The speed control, and the one line it must never cross. Playing an
+       exhibition back faster is a presentation choice; a machine given less
+       time to think is a WEAKER machine, and a Ruthless mirror that quietly
+       played at Skilled strength because the watcher pressed 4× would be
+       measuring nothing. So this pins every search and policy budget. */
+    const dBudgets = () => AI_ORDER.map((l) => {
+      const L = AI_LEVELS[l];
+      return [L.depth, L.timeMs, L.policyDepth, L.policyMs, L.policyBudget, L.noise, L.qply].join("/");
+    }).join(" ");
+    const dWatchWas = AI.watch, dBudgetsWas = dBudgets(), dRateWas = watchRate();
+    watchCycle();
+    ok("the watch speed shortens the gaps between the machine's beats",
+      watchRate() < dRateWas, `${dRateWas} → ${watchRate()}`);
+    ok("...and shortens the animations by exactly as much, so nothing outruns them",
+      FX.rate === watchRate(), `FX.rate ${FX.rate}`);
+    ok("...and does not touch one search or policy budget on any level",
+      dBudgets() === dBudgetsWas, dBudgets());
+    // One step was already taken above, so this completes the lap.
+    for (let k = 0; k < WATCH_SPEEDS.length - 1; k++) watchCycle();
+    ok("...and cycles back round to where it started",
+      AI.watch === dWatchWas && watchRate() === dRateWas, `${AI.watch} vs ${dWatchWas}`);
+    AI.duel = null;
+    ok("...while outside an exhibition it never scales anything at all",
+      watchRate() === 1);
+    AI.duel = pair; AI.watch = dWatchWas; watchApply();
+
+    // Nothing is kept back from someone who is not in the game. Both machines
+    // are blind to this screen, so a redacted spectator view would be hiding
+    // the game from the only eyes in the room.
+    log("a line only Gold's machine may read", "rule", 0);
+    log("a line only Violet's machine may read", "rule", 1);
+    const dLog = visibleLog().map((l) => l.text);
+    ok("a spectator's log keeps both machines' private lines",
+      dLog.includes("a line only Gold's machine may read")
+      && dLog.includes("a line only Violet's machine may read"));
+
+    // And the same for the board markers, which is the interesting half: a
+    // Hollow Shell hidden from the watcher is a bluff nobody ever sees land.
+    G = newGame(0, 42, { mode: "ai" });
+    UI = freshUI();
+    G.players[0].fp = 9; G.players[0].hand = ["hollow"]; G.phase = "declare"; G.turn = 0;
+    castSpell("hollow", 0, { target: hollowTargets(0)[0] });
+    G.players[1].fp = 9; G.players[1].hand = ["hollow"]; G.phase = "declare"; G.turn = 1;
+    castSpell("hollow", 1, { target: hollowTargets(1)[0] });
+    renderBoard();
+    ok("...and both decoys are marked on the board, whichever machine is on move",
+      document.querySelectorAll("#board .piece.hollow").length === 2,
+      document.querySelectorAll("#board .piece.hollow").length);
+
+    // Both hands in the one panel, since the seat it used to show belongs to
+    // nobody here.
+    G.players[0].hand = ["evasive"]; G.players[1].hand = ["mirror"];
+    renderHand();
+    ok("the hand panel carries both hands, named and separated",
+      document.querySelectorAll("#hand .handside").length === 2
+      && document.querySelectorAll("#hand .card").length === 2,
+      `${document.querySelectorAll("#hand .handside").length} labels, `
+      + `${document.querySelectorAll("#hand .card").length} cards`);
+    ok("...and every card in it is unclickable, because neither hand is yours",
+      [...document.querySelectorAll("#hand .card")].every((b) => b.disabled));
+
+    AI.on = dWas.on; AI.side = dWas.side; AI.level = dWas.level; AI.fast = dWas.fast;
+    AI.duel = dWas.duel; AI.paused = dWas.paused; AI.watch = dWas.watch;
+    NET.on = dWas.net; FX.rate = dWas.fxRate;
+    AI.thinking = false;
   }
 
   /* ── the machine ───────────────────────────────────────────────────── */
@@ -4172,7 +4522,7 @@ function runTests() {
   }
 
   group("The machine — difficulty ladder");
-  const ladder = ["novice", "skilled", "ruthless"].map((k) => AI_LEVELS[k]);
+  const ladder = AI_ORDER.map((k) => AI_LEVELS[k]);
   const rises = (f) => ladder.every((L, i) => i === 0 || f(L) > f(ladder[i - 1]));
   const neverFalls = (f) => ladder.every((L, i) => i === 0 || f(L) >= f(ladder[i - 1]));
   ok("each level searches deeper than the last", rises((L) => L.depth),
