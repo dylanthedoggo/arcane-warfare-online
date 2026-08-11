@@ -551,7 +551,7 @@ button:disabled{cursor:not-allowed}
       <h3><span id="handowner">Your Hand</span> · <span id="handcount">0</span></h3>
       <div id="hand"></div>
     </div>
-    <div id="handfoot">Spell pool: <b id="deckcount">weighted</b>. Drawing one costs your whole turn — the card is the payment.</div>
+    <div id="handfoot">Spell pool: <b id="deckcount">weighted</b>.</div>
   </div>
 
   <div id="side">
@@ -1123,7 +1123,7 @@ function renderActions() {
     if (AI.paused)
       add("Resume", `${PLAYERS[G.turn].name} · ${aiNameFor(G.turn)} is to act`, "primary", true, duelResume);
     else
-      add("Pause", "stop after the beat in progress", "primary", true, duelPause);
+      add("Pause", "", "primary", true, duelPause);
     const sp = WATCH_SPEEDS[AI.watch];
     add(`Speed · ${sp.label}`, sp.hint, "", true, watchCycle);
     add("Stop watching", "back to the menu", "", true, startNewGame);
@@ -1857,26 +1857,25 @@ function startNewGame() {
   showModal({
     tag: "mainMenu",                  // the one screen the Space knock listens on
     title: "Checkers Arcane Warfare",
-    sub: "12×12 · 24 pieces each · a weighted spell pool, including every transformation.",
+    sub: "12×12 · 24 pieces each.",
     items: [
       {
         label: "Play online", cls: "gold",
-        desc: "Two devices, one referee. The server holds the real game and checks every move, so nothing you type into a console can bend the rules.",
+        desc: "Two devices, one referee.",
         onClick: openOnlineMenu,
       },
       {
-        label: "Two players — one device", cls: "gold",
-        desc: "Hot-seat. Hands stay hidden behind a pass-the-device curtain.",
+        label: "2 players — one device", cls: "gold",
         onClick: pickFirstPlayer,
       },
       {
         label: "Play the machine", cls: "violet",
-        desc: "A searching opponent. It reads only what you can see — board, Focus Points, and how many cards you hold, never which ones.",
+        desc: "A searching opponent. It reads only what you can see — board, Focus Points, and how many cards you hold.",
         onClick: pickDifficulty,
       },
       {
         label: "Watch two machines", cls: "violet",
-        desc: "An exhibition. Give each side a brain — the same one twice for an even match — and watch. You referee nothing, and both hands are face up to you.",
+        desc: "Give each side a brain — the same one twice for an even match — and watch. You referee nothing, and both hands are face up to you.",
         onClick: pickDuel,
       },
     ],
@@ -1900,7 +1899,7 @@ function pickDifficulty() {
     title: "How hard should it play?",
     sub: "Higher levels search deeper and use the whole spell book.",
     items: [
-      { label: "Novice", desc: "Looks about 3 moves ahead, plays only the obvious spells, and still blunders on purpose. A gentle way to learn the rules.", onClick: () => pickSide("novice") },
+      { label: "Novice", desc: "Looks about 3 moves ahead. A gentle way to learn the rules.", onClick: () => pickSide("novice") },
       { label: "Skilled", desc: "Looks about 4 moves ahead and prices every spell and transformation before casting one. Moves in well under a second.", onClick: () => pickSide("skilled") },
       { label: "Ruthless", desc: "Thinks for up to three seconds a move, searching as deep as that allows, weighs its whole hand just as hard, and never blunders. Expect to lose for a while.", onClick: () => pickSide("ruthless") },
     ],

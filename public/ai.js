@@ -264,7 +264,7 @@ function aiTakeSeat() {
    ─────────────────────────────────────────────────────────────────────────── */
 
 const WATCH_SPEEDS = [
-  { label: "1×", rate: 1,    hint: "the pace it plays you at" },
+  { label: "1×", rate: 1,    hint: "" },
   { label: "2×", rate: 0.5,  hint: "half the pauses, the same thinking" },
   { label: "4×", rate: 0.25, hint: "as fast as the board stays readable" },
 ];
