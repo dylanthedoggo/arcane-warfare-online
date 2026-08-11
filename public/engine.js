@@ -403,11 +403,6 @@ function newPlayerState() {
   return {
     fp: 0,
     turnsTaken: 0,      // your own turns, which is what paces the Focus drip
-    // Consecutive own turns ended without moving a piece OR casting anything —
-    // in practice, turns spent drawing or simply passing. Public: everyone can
-    // see you did nothing. Kept by endTurn, read by the machine's evaluator,
-    // and it is what stops a card reward from being farmable by stalling.
-    idle: 0,
     hand: [],
     noSpells: 0,        // turns during which no spell may be cast
     noDraw: 0,          // turns during which no card may be drawn
@@ -531,6 +526,12 @@ function newGame(firstPlayer = 0, seed = null, opts = {}) {
     turnAction: null,       // what this turn has been spent on — see noteTurnAction
     timeoutSeq: 0,          // monotonic; seeds the referee's turn when a clock runs out
     quantumSeq: 0,          // monotonic; seeds which half of a superposition is real
+    // monotonic; seeds the machine's own coin flips — the root jitter that
+    // makes the easier levels beatable, and the "random" opponent self-play is
+    // measured against. Declared here rather than in ai.js so that a snapshot
+    // carries it and a rewind takes it back, exactly like its three siblings
+    // above. Nothing in the referee reads it. See ai.js aiRng.
+    aiSeq: 0,
     twinStep: null,         // Temporal Twin — the body that still owes its move
     twinDone: false,        // ...and whether the pair has already had both
     setAside: [],           // Phaser cards parked while a Phaser lives
@@ -2433,11 +2434,6 @@ function endTurn() {
   if (checkGameOver()) return { sameSeat: false };
 
   const P = G.players[who];
-  // Did this turn move the game on at all? Drawing and passing do not: the
-  // board is exactly as the opponent left it. Counted before beginTurn clears
-  // the flags, and after the Stutter rewind above, which unmakes a turn
-  // entirely and must not count as one.
-  P.idle = (G.hasActed || G.castThisTurn > 0) ? 0 : P.idle + 1;
   if (P.extraTurns > 0) {
     P.extraTurns--;
     log(`Temporal Cascade — ${PLAYERS[who].name} takes another turn (${P.extraTurns} remaining after this).`, "big");
@@ -3691,6 +3687,22 @@ function viewFor(g, seat, extra = {}) {
    setG(room.G) immediately before each applyAction(). That is safe only because
    Node is single-threaded and applyAction never awaits, so no second room can
    interleave. Do not make anything on this path async.
+
+   TWO AUDIENCES, NOT ONE. This list started as what the server needs plus what
+   the Node test suite asks about, and both of those go through the doorway:
+   they hand applyAction a move and read the result. ai.js does not. It plays
+   through the rules directly — performMove, castSpell, applyTransform — and
+   evaluates positions with the geometry and the predicates, so it needs the
+   parts a caller on the doorway never has to name. In the browser it gets them
+   for free, because a classic script shares one lexical scope with this file.
+   Under Node it does not, and a name left out of this list is a ReferenceError
+   at the first position the machine tries to evaluate.
+
+   That is the good failure. The bad one is silent, and it is why `pieceLabel`
+   is on this list rather than being reimplemented as "a minimal text version
+   for Node": a second copy of a piece of the engine drifts from the first, and
+   then two runs of the same game disagree for a reason nobody thinks to look
+   for. If the machine needs something the engine has, it gets the engine's.
    ══════════════════════════════════════════════════════════════════════════ */
 
 if (typeof module !== "undefined" && module.exports) {
@@ -3698,31 +3710,24 @@ if (typeof module !== "undefined" && module.exports) {
     // constants
     N, CELLS, PLAYERS, FORMS, SPELLS, SPELL_IDS, FP_CAP, RARITY, MODES,
     SECRET_PIECE_FIELDS, PRESSURE_SECONDS,
-    // geometry
+    // geometry — the direction tables and the two rows that matter to a pawn
     rc, rowOf, colOf, isDark, sq, mirrorOf,
-    // the seeded RNG. Exported for ai.js, whose Zobrist tables are built from
-    // it at load time — see the Node bridge at the top of that file.
-    mulberry32,
+    DIAG, ORTHO, moveDirs, adjacentTo, promoRow, homeRow,
     // lifecycle
     newGame, beginTurn, endTurn, snapshot, restore, checkGameOver, log,
+    mkPiece, mulberry32,
     setG: (g) => { G = g; },
     getG: () => G,
     // the doorway
     applyAction, viewFor, undoTarget, applyUndoTo,
-    /* The machine's half of the surface. ai.js drives the rules directly rather
-       than through applyAction — it is the same engine either way, but it plays
-       its turn in pieces (cast, then move, then cast again) instead of as one
-       submitted action. These are what it needs to do that under Node, and they
-       are exported for no other reason. See the bridge at the top of ai.js.
-
-       Nothing here loosens the doorway: applyAction remains the only entry the
-       SERVER ever calls, and test/engine.test.js still proves it refuses what a
-       tampered client sends. A mutator being reachable from a require() in this
-       process was already true of performMove via the engine's own internals. */
-    mkPiece,
-    DIAG, ORTHO, moveDirs, adjacentTo, promoRow, homeRow,
-    isAlly, isEnemy, canAct, canCapture, isImmobile,
-    performMove, promoteIfDue, castSpell, applyTransform, drawSpell, discardCards,
+    // the rules, applied. The machine plays through these rather than through
+    // the doorway, which is what keeps its captures, promotions, penalties and
+    // logging identical to a human's turn. See ai.js's second invariant.
+    performMove, castSpell, drawSpell, discardCards, applyTransform, promoteIfDue,
+    // predicates the evaluation reads at every leaf
+    canAct, canCapture, isAlly, isEnemy, isImmobile,
+    // naming, for the log lines the machine writes
+    pieceLabel,
     // queries, for the test suite
     legalMovesFor, simpleMoves, captureMoves, capturersFor, pendingSacrifice,
     hasAnyMove, hasTurnOption, immobileWipeout, heraldAdjacent, heraldShielded, legalHeraldSteps,

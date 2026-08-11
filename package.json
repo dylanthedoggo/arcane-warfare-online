@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "node test/engine.test.js",
-    "tournament": "node tools/tournament.js"
+    "selfplay": "node tools/selfplay.js",
+    "agreement": "node tools/agreement.js",
+    "test:ai": "node test/ai.test.js"
   },
   "engines": {
     "node": ">=18"
