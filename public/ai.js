@@ -38,18 +38,68 @@
    declarations run after this script does — by the time anything here is
    called, they exist.
 
-   ON RUNNING THIS UNDER NODE. It does not, yet, and the reason is worth
-   writing down because it is not obvious. In Node, engine.js is a CommonJS
-   module and its `G` is module-local; `require()` hands back a snapshot of the
-   exported values, not live bindings. This file says `G.board[i]` in several
-   hundred places, and every one of them would be reading a `G` frozen at the
-   moment of import. engine.js anticipates this and offers setG/getG, and a
-   Node shim could bridge it with an accessor property on globalThis — but the
-   driver would still be missing endTurnLocal, render and UI, which live in the
-   page. Headless self-play is therefore still a browser-only affair. Getting
-   it into Node is a real piece of work and a separate one; this file being its
-   own file is the half of it that had to happen first.
+   ON RUNNING THIS UNDER NODE. It does, via the bridge immediately below, and
+   the two problems it had to solve are worth writing down because neither is
+   obvious.
+
+   FIRST, THE LIVE BINDING. In Node, engine.js is a CommonJS module and its `G`
+   is module-local; `require()` hands back a snapshot of the exported values,
+   not live bindings. This file says `G.board[i]` in several hundred places,
+   and every one of them would be reading a `G` frozen at the moment of import
+   — which is `null`. engine.js anticipated this and offers setG/getG, so the
+   bridge defines `G` on globalThis as an ACCESSOR over that pair. Reads and
+   writes both reach the engine's own variable, so `G = newGame(...)` inside
+   aiPlayGame does what it says, and the browser's shared-scope `let G` is
+   never involved.
+
+   SECOND, THE PAGE. The driver reaches for nine names that live in index.html
+   — render, endTurnLocal, UI, FX and friends. Headless, all nine are either
+   inert or trivial, so the bridge supplies them rather than the search being
+   rewritten to do without. The only one with real behaviour is endTurnLocal,
+   which headlessly is just endTurn(): there is no curtain to raise and no
+   handover to animate.
+
+   WHAT THIS BUYS. Tournaments run in Node, at full search budgets, with no
+   browser tab to be throttled when it is hidden and no 30-second harness
+   limit. `npm run tournament` is the front door. That matters for measuring
+   the machine: strength questions need dozens of games, and dozens of games
+   were not previously answerable at all.
    ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── the Node bridge ────────────────────────────────────────────────────────
+   Guarded on `module`, which exists in Node and not in a classic browser
+   script, so loading this file in the page skips every line of it.
+   ─────────────────────────────────────────────────────────────────────────── */
+if (typeof module !== "undefined" && module.exports) {
+  const engine = require("./engine.js");
+  for (const k of Object.keys(engine)) {
+    if (k === "getG" || k === "setG") continue;
+    if (!(k in globalThis)) globalThis[k] = engine[k];
+  }
+  // The live binding. Not a copy — see above.
+  Object.defineProperty(globalThis, "G", {
+    get: engine.getG, set: engine.setG, configurable: true,
+  });
+  // The page, headlessly. `render` and the rest are genuinely nothing here;
+  // endTurnLocal is the one that has to do its job.
+  const g = globalThis;
+  g.UI = null;
+  g.NET = { on: false, seat: 0 };
+  g.freshUI = () => ({ sel: null, moves: [], targeting: null, heraldNoted: null,
+                       revealed: true, waitingRoom: false, modalOpen: false,
+                       modalTag: null, logOpen: false });
+  g.render = () => {};
+  g.clearSelection = () => {};
+  g.announceWinner = () => {};
+  g.raiseCurtain = () => {};
+  g.toast = () => {};
+  g.pieceLabel = (p) => (p && p.rank === "queen" ? "Queen" : "Pawn");
+  g.endTurnLocal = () => { engine.endTurn(); };
+  // FX exists only so the driver can ask whether the board is still moving.
+  // Headless it never is.
+  g.FX = { rate: 1, mode: "off", lock: 0, hidden: new Set(),
+           then: (cb) => cb(), busyMs: () => 0, reset: () => {}, pump: () => {} };
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
    THE MACHINE  —  a tier-2 opponent
@@ -87,31 +137,98 @@
  *   policyDepth   plies for the shallow search that prices one spell/transform
  *   policyMs      wall-clock for ONE such pricing search
  *   policyBudget  wall-clock for a whole policy decision, across all candidates
- *   castEdge      how much a spell must beat standing pat by before it is cast
- *   transformEdge the same margin for a transformation
+ *   castEdge      how much a candidate the evaluator can price on its own must
+ *                 beat standing pat by before it is cast
+ *   bonusEdge     the same, for a candidate carrying a hand-tuned bonus. Higher,
+ *                 and see BARS below for why they cannot be one number
  *   chronosEdge   the same margin for Chronos's Gaze, which rewinds the game
  *   width         multiplier on the candidate shortlists
  *   qply          depth cap on the captures-only quiescence search
  */
 const AI_LEVELS = {
   novice:   { name: "Novice",   depth: 3,  timeMs: 250,  spells: "basic", noise: 38, pace: 380,
-              policyDepth: 2, policyMs: 90,  policyBudget: 400,  castEdge: 30, transformEdge: 35,
+              policyDepth: 2, policyMs: 90,  policyBudget: 400,  castEdge: 6,  bonusEdge: 24, cardValue: 30, stallTax: 26,
               chronosEdge: 140, width: 1, qply: 6 },
   skilled:  { name: "Skilled",  depth: 4,  timeMs: 800,  spells: "full",  noise: 12, pace: 300,
-              policyDepth: 3, policyMs: 90,  policyBudget: 550,  castEdge: 25, transformEdge: 30,
+              policyDepth: 3, policyMs: 90,  policyBudget: 550,  castEdge: 1,  bonusEdge: 16, cardValue: 30, stallTax: 26,
               chronosEdge: 140, width: 1, qply: 6 },
   ruthless: { name: "Ruthless", depth: 10, timeMs: 3000, spells: "full",  noise: 0,  pace: 220,
-              policyDepth: 4, policyMs: 140, policyBudget: 1000, castEdge: 12, transformEdge: 18,
+              policyDepth: 4, policyMs: 140, policyBudget: 1000, castEdge: 0,  bonusEdge: 10, cardValue: 30, stallTax: 26,
               chronosEdge: 100, width: 2, qply: 8 },
 };
 
+/** The ladder, weakest first. The menus and the ordering test both read it. */
+const AI_ORDER = ["novice", "skilled", "ruthless"];
+
 /**
- * Skilled's policy figures are the old hardcoded constants exactly — 3 plies,
- * 90 ms, 550 ms, +25 / +30 / +140 — so the self-play regression tests below,
- * which are all played at Skilled, keep measuring the same machine they always
- * did. Novice's policyDepth is pinned at 2 rather than derived: the old code
- * said Math.min(3, depth), and raising its depth to 3 would otherwise have
- * quietly upgraded its spell play as a side effect.
+ * BARS — why there are two of them, and why one number could never have worked.
+ *
+ * The symptom: over a 315-turn Skilled mirror the machine cast three spells in
+ * the entire game, and logged eighty-two turns throwing away Focus it had no
+ * intention of spending. It was not short of cards. It sat on a full hand and a
+ * full pool and played pure checkers.
+ *
+ * There used to be a `transformEdge` here as well, documented as the bar for a
+ * transformation. It was never read. aiCastOnce applied `castEdge` to every
+ * candidate there was, so the second number had never once changed a decision,
+ * and tuning it — which is the obvious thing to reach for when the machine will
+ * not cast — did nothing at all.
+ *
+ * That mattered, because one bar was being asked to gate two DIFFERENT SCALES.
+ * A few candidates carry a hand-tuned `bonus` added on top of what the search
+ * can see: HOLLOW_SHELL, TWIN_TEMPO, STUTTER_DENIAL, QUANTUM_GAMBIT, below.
+ * Every other candidate — including all five of the true form changes — carries
+ * nothing, and is worth exactly what the evaluator makes of the position it
+ * leaves behind. The first kind arrives pre-inflated by a constant somebody
+ * chose; the second does not. Their margins are not the same currency.
+ *
+ * Measured, and the two requirements are flatly contradictory for one number:
+ *
+ *   Herald, no bonus, in a position where it is the best thing available:  +11
+ *   Hollow Shell on a pawn that can simply walk away — must DECLINE:       +17
+ *   Hollow Shell on a pawn that is frozen and cannot run — must CAST:     +105
+ *
+ * A single bar low enough to take the Herald buys the pointless shell too, and
+ * one high enough to refuse the shell refuses every transformation in the game.
+ * The old +25 chose the second, which is why nothing was ever cast: scoring the
+ * best candidate every turn for 102 turns put almost the entire usable mass of
+ * the distribution at exactly +11 — the same Herald, re-priced each turn
+ * because the turn before had declined it. +30 admitted 2% of turns, +10
+ * admitted 54%. It was not filtering weak spells out, it was filtering
+ * everything out.
+ *
+ * (That 54% is not a cast rate. It counts one standing opportunity many times;
+ * taking it once spends the card and the position moves on.)
+ *
+ * So the second bar is now real and keyed on what actually differs — whether
+ * the candidate carries a bonus — rather than on the card's group, which cuts
+ * across it: Hollow, Twin and Quantum are Transformations by group and all
+ * three are bonused, while Herald and Phaser are Transformations and neither
+ * is. castEdge takes the unbonused scale down to where the evaluator's own
+ * numbers live; bonusEdge stays in the twenties, where the hand-tuned constants
+ * were calibrated to work, and keeps both Hollow answers intact.
+ *
+ * THE NUMBERS CAME DOWN AGAIN when cardValue went up, and that is not a
+ * coincidence to be tuned around — it is the same measurement moving. Casting
+ * SPENDS a card, so a hand worth 30 a card rather than 20 makes every cast look
+ * about ten points worse, and the two positions above moved with it: the Herald
+ * from +12 to +2, the pointless shell from +17 to +7.
+ *
+ * The right response was to lower the bars rather than claw the card value
+ * back, because the two are charging for the same thing. A threshold on top of
+ * a properly-priced hand double-charges: the card's own worth is already inside
+ * the margin, doing the gatekeeping the threshold was invented to do back when
+ * a card was nearly free. What is left for the bars is the narrower job of
+ * discounting a hand-tuned bonus.
+ *
+ * The ladder holds on both: Novice still demands several times what Ruthless
+ * does, and still sees a pruned candidate list on top of that.
+ *
+ * Skilled's other policy figures are still the old hardcoded constants — 3
+ * plies, 90 ms, 550 ms, +140 chronos. Novice's policyDepth is pinned at 2
+ * rather than derived: the old code said Math.min(3, depth), and raising its
+ * depth to 3 would otherwise have quietly upgraded its spell play as a side
+ * effect.
  */
 
 /** Shortlist caps, widened for the levels that have the budget to score more. */
@@ -124,13 +241,84 @@ const aiWide = (n) => Math.round(n * aiCfg().width);
  * Game, resigned, or took an undo mid-think — would wake up and mutate the
  * fresh game.
  */
-let AI = { on: false, side: 1, level: "skilled", thinking: false, gen: 0 };
+let AI = {
+  on: false, side: 1, level: "skilled", thinking: false, gen: 0,
+  duel: null,        // exhibition: a level name per seat, or null in a normal game
+  paused: false,     // the watcher stopped the exhibition between beats
+  watch: 0,          // index into WATCH_SPEEDS — playback speed, never strength
+};
 
 /** Abandon whatever the machine was doing; any in-flight beat becomes a no-op. */
 function aiCancel() { AI.gen++; AI.thinking = false; AI.moveSteps = null; }
 const aiCfg = () => AI_LEVELS[AI.level];
-const isAISeat = (s) => AI.on && s === AI.side;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ── DUEL — both chairs are machines ────────────────────────────────────────
+   Everything above is written around ONE machine: `AI.side` is the seat it
+   plays and `AI.level` is how hard it plays, and the search reads both from
+   several hundred places. Giving each seat its own brain by threading a second
+   set of those through the search would be a rewrite of the whole file for a
+   spectator mode.
+
+   So it does not. `AI.duel` holds the two level names, and the pair above
+   becomes "whose turn is being thought about right now" — repointed at the top
+   of every turn by aiTakeSeat(). One brain is ever in the chair at a time,
+   which is also the truth of it: the turns are strictly alternating, so a
+   second simultaneous search would have nothing to do.
+
+   That leaves one trap, and it is worth naming because it is invisible.
+   Anything asking "how hard does SEAT s play?" must go through aiLevelFor(s)
+   and not read AI.level, which during a duel answers for whoever is thinking
+   rather than for the seat asked about. The player strip got this wrong first,
+   and labelled both machines with the level of the one on move.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const isDuel = () => AI.on && !!AI.duel;
+/** How hard `s` plays — the per-seat answer, which is not always AI.level. */
+const aiLevelFor = (s) => (AI.duel ? AI.duel[s] : AI.level);
+const aiNameFor = (s) => AI_LEVELS[aiLevelFor(s)].name;
+const isAISeat = (s) => AI.on && (AI.duel ? AI.duel[s] != null : s === AI.side);
+
+/** Put the brain that owns the seat on move into the chair. A no-op off duel. */
+function aiTakeSeat() {
+  if (!AI.duel) return;
+  AI.side = G.turn;
+  AI.level = aiLevelFor(G.turn);
+}
+
+/* ── how fast to play it back ───────────────────────────────────────────────
+   A turn takes the machine about eight seconds of wall clock, and almost none
+   of that is thinking: it is the deliberate gaps between the driver's beats
+   and the length of the animations, both there so a human can follow what just
+   happened while taking their own turn in between. Watching costs you two of
+   those a round and gives you nothing to do during either.
+
+   So an exhibition can be played back faster — and what "faster" scales is
+   PRESENTATION ONLY. `pace` is documented in the level table as cosmetic and
+   FX.rate stretches animations; neither is a search budget or a policy budget,
+   and nothing here may ever touch one. A machine that thought less hard
+   because the watcher was impatient would not be the machine you asked to
+   watch, and the result would say nothing about the level you picked.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const WATCH_SPEEDS = [
+  { label: "1×", rate: 1,    hint: "the pace it plays you at" },
+  { label: "2×", rate: 0.5,  hint: "half the pauses, the same thinking" },
+  { label: "4×", rate: 0.25, hint: "as fast as the board stays readable" },
+];
+
+/** The scale on every cosmetic wait. 1 outside an exhibition, always. */
+const watchRate = () => (AI.duel ? WATCH_SPEEDS[AI.watch].rate : 1);
+
+/** Push the current speed at the effects player. Call after changing AI.watch. */
+function watchApply() { FX.rate = watchRate(); }
+
+/** Cycle 1× → 2× → 4× → 1×. The choice outlives the game, within the session. */
+function watchCycle() {
+  AI.watch = (AI.watch + 1) % WATCH_SPEEDS.length;
+  watchApply();
+  render();
+}
 
 const MATE = 1e6;
 let AI_NODES = 0, AI_DEADLINE = 0, AI_TIMEUP = false;
@@ -524,8 +712,54 @@ function resourceValue(fp, cards) {
   // referee refuses to bank it. Clamping here is what stops the machine paying
   // a real tempo cost for income it can never collect.
   const banked = Math.min(fp, FP_CAP);
-  return Math.min(banked, 6) * 14 + Math.max(0, banked - 6) * 4
-       + Math.min(cards, 3) * 20 + Math.max(0, cards - 3) * 4;
+  // THE SHAPE OF THE FOCUS CURVE, AND WHY IT TURNS DOWN.
+  //
+  // Focus is worth what it can be spent on, and it is spent one spell at a
+  // time. The first few points buy nearly any card in the game; beyond that the
+  // pool is waiting on a hand that may never arrive, so each further point is
+  // worth much less than the last.
+  //
+  // The tail used to be worth 4 a point and still CLIMBING at the ceiling,
+  // which had two consequences, both bad and neither visible from the curve
+  // itself. A full pool read as a pawn's worth of wealth — 100 points of it —
+  // while the machine sat there logging a wasted point of income every turn.
+  // And because casting spends Focus, the descent down a still-climbing curve
+  // was charged against every spell as a cost: emptying four points from a full
+  // pool priced at 16 points, which is most of what a spell had to win back
+  // before it was worth casting at all.
+  //
+  // So the tail is nearly flat, and at the ceiling it goes negative. That last
+  // part is not a tuning weight but a fact the evaluator could not previously
+  // see: at the cap, income is not being banked, it is being destroyed on
+  // arrival, and a position quietly throwing away a point a turn is worse than
+  // one that is not.
+  const focus = Math.min(banked, 4) * 14
+              + Math.min(Math.max(0, banked - 4), 3) * 7
+              + Math.max(0, banked - 7) * 2;
+  const wasting = banked >= FP_CAP ? 10 : 0;
+  // CARDS ARE POWER, AND THE STALL TAX IS WHAT LETS US SAY SO.
+  //
+  // The hand curve used to flatten hard — 20 a card up to three, then 4 — and
+  // the comment above explains why: with flat values the machine worked out
+  // that drawing beat any quiet move and simply drew every turn forever.
+  //
+  // That is a real failure mode, but the diminishing return was the wrong
+  // answer to it. It priced the fourth card at almost nothing when a fourth
+  // card is genuinely more options, and it made a draw unaffordable in exactly
+  // the state the machine spends most of the game in. The right answer is to
+  // charge for the thing that was actually being abused, which is not holding
+  // cards but SPENDING TURNS to get them. That is the `idle` term in
+  // sideScore, and with it in place the reward here can say what is true: more
+  // cards is more power.
+  // Per-level, so the two halves of the balance can be moved together and
+  // measured against a version of the machine that does not have them. A level
+  // that sets cardValue must set stallTax as well: paying more for a hand
+  // without charging for the turns spent collecting one is the farmable
+  // combination the note above warns about.
+  const cfg = (typeof AI !== "undefined" && AI_LEVELS[AI.level]) || {};
+  const per = cfg.cardValue || 20;
+  return focus - wasting
+       + Math.min(cards, 4) * per + Math.max(0, cards - 4) * Math.round(per / 4);
 }
 
 /* ── the mobility term ──────────────────────────────────────────────────────
@@ -646,6 +880,24 @@ function sideScore(side) {
   }
   const P = G.players[side];
   s += resourceValue(P.fp, P.hand.length);      // hand SIZE only — never contents
+  /* THE STALL TAX, and note where it starts.
+
+     THE FIRST QUIET TURN IS FREE. Stopping once to draw a card is a normal
+     thing to do, and it is the thing this whole change exists to make possible;
+     taxing it immediately just cancels the larger card reward and the machine
+     draws even less than before. That was measured — a penalty from the first
+     idle turn took Skilled from a low draw rate to exactly zero draws in two
+     full games.
+
+     It is repetition that is the failure mode: draw, draw, draw while the
+     opponent takes the board. So the tax starts on the SECOND consecutive
+     quiet turn and escalates, which is what "not moving for too long" actually
+     means. Capped, so a position that has already gone wrong does not keep
+     getting worse for the same reason.
+
+     Public information — anyone can see a turn where nothing moved — so reading
+     it for both sides is fair. */
+  s -= Math.min(Math.max(0, P.idle - 1), 3) * (aiCfg().stallTax || 0);
   s += P.extraTurns * 90;
   s += mobility * 3;
   // Being locked out of your own options is a real cost, so price it.
@@ -1565,6 +1817,34 @@ function aiConsiderChronos() {
  * price it against actually moving: search both and take the better. This is
  * the tempo judgement humans tend to get wrong.
  */
+/* ── WHY THERE IS NO PENALTY HERE FOR HOLDING DEAD CARDS ────────────────────
+   A draw costs the whole turn and buys a random card, and the evaluator prices
+   a hand by SIZE — it has to, since sideScore runs for both players and reading
+   the other one's cards would be cheating. So a card that cannot be cast scores
+   exactly as well as one that wins the game.
+
+   That looks like an obvious hole, and it was measured: over 440 turns of
+   Skilled self-play, forty cards acquired, nineteen never cast, and 365
+   card-turns spent holding something uncastable. Tactician alone was drawn
+   seven times and cast none — it needs a capture available, and usually there
+   is not one.
+
+   Taxing the draw by the number of dead cards already in hand was tried. It
+   worked, in the sense that it did what it said: cards acquired fell from 40 to
+   17, never-cast from 19 to 9, dead card-turns from 365 to 127. It did not make
+   the machine play better. Head to head against its untaxed self, 39 decisive
+   games: 19–20. A dead heat.
+
+   It was reverted for a second reason as well. The complaint that started this
+   was that the machine barely touches its hand, and a tax that halves an
+   already-low draw rate answers that complaint by making it worse.
+
+   The turns it saves are real, but they buy moves that do not change outcomes,
+   because the thing actually limiting the machine's spell play is upstream of
+   any decision it makes: most of the pool is either uncastable in a typical
+   position or a material loss when cast. See the note above aiCastOnce.
+   ─────────────────────────────────────────────────────────────────────────── */
+
 function aiShouldDraw() {
   const P = G.players[AI.side];
   if (P.noDraw > 0 || !eligibleSpellIds().length) return false;
@@ -1576,7 +1856,16 @@ function aiShouldDraw() {
   if (stutterBans(AI.side, { t: "draw" })) return false;
   const d = aiCfg().policyDepth;
   const base = aiSearchValue(AI.side, d);
-  const v = aiSimValue(() => drawSpell(AI.side), 1 - AI.side, d);
+  // The stall tax has to be part of what is being priced, and it is applied by
+  // endTurn — which this simulation does not call, because aiSimValue models
+  // the handover with `movesNext` instead. Drawing ends the turn having moved
+  // nothing, every time, so the increment is not a guess about what might
+  // follow: it is the other half of the action being considered. Leaving it out
+  // would show the machine the new card and hide what it paid for it.
+  const v = aiSimValue(() => {
+    drawSpell(AI.side);
+    G.players[AI.side].idle++;
+  }, 1 - AI.side, d);
   return v > base + 10;
 }
 
@@ -1604,7 +1893,12 @@ function aiCastOnce(phaseName) {
   const base = phaseName === "end"
     ? -aiSearchValue(1 - AI.side, d - 1)
     : aiSearchValue(AI.side, d);
-  let best = null, bestV = base + cfg.castEdge;          // demand a real improvement
+  // Each candidate is judged against the bar for ITS OWN scale, and the winner
+  // is whichever clears its bar by the most — not whichever scores highest,
+  // which would be comparing a bonused number against an unbonused one. Nothing
+  // qualifies at zero excess, so a candidate that fails its bar cannot win by
+  // failing it less than the others. See BARS above.
+  let best = null, bestExcess = 0;
   const stop = performance.now() + aiPolicyBudget();
   let priced = 0;
   for (const c of cands) {
@@ -1617,7 +1911,8 @@ function aiCastOnce(phaseName) {
     // it is worth a queen. So the finder measures it and hands the number over
     // rather than teaching sideScore to guess. See STUTTER_DENIAL.
     const v = aiSimValue(() => aiExecuteSpell(c), movesNext, d) + (c.bonus || 0);
-    if (v > bestV) { bestV = v; best = c; }
+    const excess = v - (base + (c.bonus ? cfg.bonusEdge : cfg.castEdge));
+    if (excess > bestExcess) { bestExcess = excess; best = c; }
     if (performance.now() > stop) break;
   }
   if (priced < cands.length && !AI.fast)
@@ -1746,7 +2041,9 @@ function aiAbandonPlan(s) {
 
 /** The whole turn, synchronously. Used by headless self-play. */
 function aiRunTurn() {
-  if (!AI.on || G.over || G.turn !== AI.side) return;
+  if (!AI.on || G.over) return;
+  aiTakeSeat();
+  if (G.turn !== AI.side) return;
   AI.thinking = true;
   clearOrderingMemory();
   try {
@@ -1786,7 +2083,9 @@ function aiRunTurn() {
 const AI_STAGES = ["discard", "chronos", "draw", "castDeclare", "move", "castEnd", "finish"];
 
 function aiTakeTurn() {
-  if (!AI.on || G.over || G.turn !== AI.side || AI.thinking) return;
+  if (!AI.on || G.over || AI.thinking || AI.paused) return;
+  aiTakeSeat();                          // duel: the chair changes hands each turn
+  if (G.turn !== AI.side) return;
   AI.thinking = true;
   clearOrderingMemory();
   AI.stage = 0;
@@ -1795,7 +2094,7 @@ function aiTakeTurn() {
   UI.targeting = null;
   render();
   const gen = AI.gen;
-  setTimeout(() => aiStep(gen), aiCfg().pace);
+  setTimeout(() => aiStep(gen), aiCfg().pace * watchRate());
 }
 
 function aiStep(gen) {
@@ -1821,7 +2120,7 @@ function aiStep(gen) {
           drawSpell(AI.side);
           AI.thinking = false;
           render();
-          setTimeout(() => { if (gen === AI.gen && !G.over) endTurnLocal(); }, aiCfg().pace);
+          setTimeout(() => { if (gen === AI.gen && !G.over) endTurnLocal(); }, aiCfg().pace * watchRate());
           return;
         }
         AI.stage++; wait = 0; break;
@@ -1882,8 +2181,10 @@ function aiStep(gen) {
   render();
   if (G.over) { AI.thinking = false; announceWinner(); return; }
   // Never outrun the animation of the beat just taken — otherwise a machine
-  // chain-jump fires its second hop while the first is still in the air.
-  setTimeout(() => aiStep(gen), Math.max(wait, FX.busyMs()));
+  // chain-jump fires its second hop while the first is still in the air. The
+  // watch speed scales the gap but not this floor: FX.busyMs already reports a
+  // shortened animation, because FX.rate was scaled by the same number.
+  setTimeout(() => aiStep(gen), Math.max(wait * watchRate(), FX.busyMs()));
 }
 
 /**
@@ -1908,6 +2209,7 @@ function afterHandoff(sameSeat) {
   // effects-off game nothing.
   if (isAISeat(G.turn)) {
     UI.revealed = true; render();
+    if (AI.paused) return;               // an exhibition the watcher has stopped
     FX.then(() => setTimeout(aiTakeTurn, 40));
     return;
   }
@@ -1916,8 +2218,53 @@ function afterHandoff(sameSeat) {
   raiseCurtain();
 }
 
-/* ── self-play harness (used to measure strength; open the console) ─────────
-   aiTournament("skilled", "random", 20)  ->  win/loss record
+/* ── pause and resume ───────────────────────────────────────────────────────
+   Pause stops the exhibition where it stands rather than at the end of the
+   turn, because a Ruthless mirror spends three seconds a move and a button
+   that took that long to answer would read as broken.
+
+   Stopping mid-turn is safe, and it is worth writing down why. aiCancel only
+   invalidates the SCHEDULED beats; nothing is half-applied, because each beat
+   completes its own chunk of work synchronously before it schedules the next.
+   So the board is left after some legal prefix of a turn — a move played, the
+   end-phase casts not yet considered — which is a position the driver can
+   already re-enter: resuming runs aiTakeTurn from stage 0 again, and every
+   stage is written to no-op when its work is already done (`draw` checks
+   hasActed, `move` finds it and plans nothing, aiFinishMove closes out a chain
+   or a Herald step still owed). That re-entrancy exists for the mid-turn undo;
+   pause simply leans on it.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+function duelPause() {
+  if (!isDuel()) return;
+  AI.paused = true;
+  aiCancel();
+  render();
+}
+
+function duelResume() {
+  if (!isDuel()) return;
+  AI.paused = false;
+  render();
+  if (!G.over && isAISeat(G.turn)) aiTakeTurn();
+}
+
+/* ── self-play harness ──────────────────────────────────────────────────────
+   Prefer Node for anything you intend to draw a conclusion from:
+
+       npm run tournament -- ruthless skilled --games 20 --full
+
+   --full matters more than it looks: without it every search here is capped at
+   40ms by aiBudget(), so a default run measures a much weaker machine than the
+   one it names. Budget about four and a half minutes a game at full budgets,
+   and let --jobs play several at once — the games are independent.
+
+   A browser console still works — aiTournament("skilled", "random", 20) — but
+   a background tab has its timers throttled to about one tick a second, and
+   these budgets are wall-clock, so a hidden tab quietly measures a different
+   machine than a visible one. tools/tournament.js has neither problem and
+   reports how the games were PLAYED as well as who won, which is the half that
+   answers questions like "why does it never use its hand".
    ─────────────────────────────────────────────────────────────────────────── */
 
 function aiRandomTurn(side) {
@@ -1940,8 +2287,16 @@ function aiRandomTurn(side) {
   if (!G.over) endTurnLocal();
 }
 
-/** One headless game. `gold`/`violet` are level names or the string "random". */
-function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
+/**
+ * One headless game. `gold`/`violet` are level names or the string "random".
+ *
+ * `opts.fast` is the search budget switch, and it defaults to true because
+ * everything that called this before ran under it: the in-page regression
+ * tests play hundreds of turns and must not take a minute doing it. Pass false
+ * to play at the budgets a real game uses — which is what a strength
+ * measurement wants, and what Node can now afford. See aiBudget.
+ */
+function aiPlayGame(gold, violet, maxTurns = 300, seed = null, opts = {}) {
   const saved = { ...AI };
   // "ai", not the default "local" — self-play is how the machine's handling of
   // the concealment cards gets measured, and in a local-mode game it would
@@ -1949,7 +2304,10 @@ function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
   G = newGame(0, seed, { mode: "ai" });
   UI = freshUI();
   G.turnNo = 0;
-  AI.on = true; AI.fast = true; AI.thinking = false;
+  AI.on = true; AI.fast = opts.fast !== false; AI.thinking = false;
+  // The harness picks the brain per turn itself, below. Leaving a live duel
+  // pairing in place would have aiRunTurn re-point the seat underneath it.
+  AI.duel = null; AI.paused = false;
   beginTurn(0);
   let turns = 0;
   while (!G.over && turns < maxTurns) {
@@ -1959,10 +2317,21 @@ function aiPlayGame(gold, violet, maxTurns = 300, seed = null) {
     if (brain === "random") { aiRandomTurn(who); }
     else { AI.side = who; AI.level = brain; aiRunTurn(); }
   }
+  // How the game was PLAYED, not just who won it. These are the numbers behind
+  // "the machine never uses its hand" — a complaint no win/loss record can
+  // either confirm or refute.
+  const FORM_NAMES = SPELL_IDS.filter((id) => SPELLS[id].group === "Transformation")
+    .map((id) => SPELLS[id].name);
+  const castLines = G.log.filter((l) => /casts/i.test(l.text));
   const res = {
     winner: G.over ? G.over.winner : null,
     reason: G.over ? G.over.reason : "turn limit reached",
     turns, gold: countPieces(0), violet: countPieces(1),
+    casts: castLines.length,
+    transforms: castLines.filter((l) => FORM_NAMES.some((n) => l.text.includes(n))).length,
+    draws: G.log.filter((l) => /draws a Spell Card|draws a spell/i.test(l.text)).length,
+    // Turns on which a side was at the Focus ceiling and threw income away.
+    wasted: G.log.filter((l) => /is full at .* FP/.test(l.text)).length,
   };
   Object.assign(AI, saved);
   return res;
@@ -1988,4 +2357,25 @@ function aiTournament(a, b, n = 10, maxTurns = 200) {
   }
   console.log(`${a} ${rec[a]} — ${rec[b]} ${b}  (${rec.ties} tied)`);
   return rec;
+}
+
+/* ── the other end of the Node bridge ───────────────────────────────────────
+   The same `module` guard as the top: invisible to the page, which reaches
+   all of this through the shared classic-script scope instead.
+
+   The evaluator internals are exported alongside the harness deliberately.
+   Measuring the machine means asking what it thinks a position is worth, and
+   answering that from outside used to mean opening a browser console.
+   ─────────────────────────────────────────────────────────────────────────── */
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    // the machine, and how hard it plays
+    AI, AI_LEVELS, AI_ORDER, aiCfg, aiLevelFor, aiNameFor,
+    // the harness
+    aiPlayGame, aiTournament, aiRunTurn, aiRandomTurn,
+    // the search, for anyone measuring it
+    searchBestMove, evaluate, sideScore, resourceValue, aiSearchValue, aiSimValue,
+    // the policy layer, likewise
+    aiSpellCandidates, aiShortlist, aiCastOnce, aiShouldDraw, aiExecuteSpell,
+  };
 }

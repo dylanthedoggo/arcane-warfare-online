@@ -403,6 +403,11 @@ function newPlayerState() {
   return {
     fp: 0,
     turnsTaken: 0,      // your own turns, which is what paces the Focus drip
+    // Consecutive own turns ended without moving a piece OR casting anything —
+    // in practice, turns spent drawing or simply passing. Public: everyone can
+    // see you did nothing. Kept by endTurn, read by the machine's evaluator,
+    // and it is what stops a card reward from being farmable by stalling.
+    idle: 0,
     hand: [],
     noSpells: 0,        // turns during which no spell may be cast
     noDraw: 0,          // turns during which no card may be drawn
@@ -2428,6 +2433,11 @@ function endTurn() {
   if (checkGameOver()) return { sameSeat: false };
 
   const P = G.players[who];
+  // Did this turn move the game on at all? Drawing and passing do not: the
+  // board is exactly as the opponent left it. Counted before beginTurn clears
+  // the flags, and after the Stutter rewind above, which unmakes a turn
+  // entirely and must not count as one.
+  P.idle = (G.hasActed || G.castThisTurn > 0) ? 0 : P.idle + 1;
   if (P.extraTurns > 0) {
     P.extraTurns--;
     log(`Temporal Cascade — ${PLAYERS[who].name} takes another turn (${P.extraTurns} remaining after this).`, "big");
@@ -3690,12 +3700,29 @@ if (typeof module !== "undefined" && module.exports) {
     SECRET_PIECE_FIELDS, PRESSURE_SECONDS,
     // geometry
     rc, rowOf, colOf, isDark, sq, mirrorOf,
+    // the seeded RNG. Exported for ai.js, whose Zobrist tables are built from
+    // it at load time — see the Node bridge at the top of that file.
+    mulberry32,
     // lifecycle
     newGame, beginTurn, endTurn, snapshot, restore, checkGameOver, log,
     setG: (g) => { G = g; },
     getG: () => G,
     // the doorway
     applyAction, viewFor, undoTarget, applyUndoTo,
+    /* The machine's half of the surface. ai.js drives the rules directly rather
+       than through applyAction — it is the same engine either way, but it plays
+       its turn in pieces (cast, then move, then cast again) instead of as one
+       submitted action. These are what it needs to do that under Node, and they
+       are exported for no other reason. See the bridge at the top of ai.js.
+
+       Nothing here loosens the doorway: applyAction remains the only entry the
+       SERVER ever calls, and test/engine.test.js still proves it refuses what a
+       tampered client sends. A mutator being reachable from a require() in this
+       process was already true of performMove via the engine's own internals. */
+    mkPiece,
+    DIAG, ORTHO, moveDirs, adjacentTo, promoRow, homeRow,
+    isAlly, isEnemy, canAct, canCapture, isImmobile,
+    performMove, promoteIfDue, castSpell, applyTransform, drawSpell, discardCards,
     // queries, for the test suite
     legalMovesFor, simpleMoves, captureMoves, capturersFor, pendingSacrifice,
     hasAnyMove, hasTurnOption, immobileWipeout, heraldAdjacent, heraldShielded, legalHeraldSteps,
