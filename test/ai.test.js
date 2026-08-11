@@ -330,13 +330,30 @@ it("matches the transcript recorded in a browser", () => {
      noise 0 vs noise 60, after it                   3-4, 1 tied,  +1
 
    After the fix the noiseless machine does not beat the blundering one at all.
-   That is not the gate failing; it is the gate reporting, correctly, that root
-   jitter of 60 is worth about one pawn across eight games. Most of a checkers
-   turn is forced — a capture is all but compulsory, and a chain has no choices
-   in it — so there is much less room for a bad CHOICE to cost anything than
-   the size of the number suggests. The earlier +18 was measured against a
-   machine that spent five turns in six drawing cards, where the few real
-   decisions carried everything.
+   Note WHICH number says so: 3-4 is a win count over eight games that all ran
+   out of turns, so a "win" is a one-piece material lead and the tally turns
+   near-ties into decisive-looking results. The margin is the honest reading,
+   and +1 piece across eight whole games means the two are indistinguishable —
+   not that blundering helps.
+
+   The cause is the jitter design working exactly as intended. searchBestMove
+   keeps the sample too small to outweigh a real difference; measured across one
+   game, that covers nearly every position there is:
+
+     turn  legal moves  best-to-worst spread  inside a ±60 band
+       12       16              17 points        all 16
+       24       23              28 points        all 23
+       48       24             452 points        2 of 24
+       60       21             175 points       16 of 21
+
+   Quiet positions offer many moves worth the same to within a fraction of a
+   pawn, so jitter shuffles the interchangeable. The sharp position, where
+   choosing wrongly would cost four pawns, puts only two moves inside the band,
+   so jitter cannot reach a bad one. It only ever operates where the choice does
+   not matter.
+
+   (The earlier +18 was measured against a machine that spent five turns in six
+   drawing cards. Whatever that number was about, it was not this.)
 
    Keeping it would have meant a gate that fails on correct code. Raising the
    handicap until it did separate would have meant tuning the test until it

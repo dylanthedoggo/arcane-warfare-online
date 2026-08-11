@@ -565,14 +565,33 @@ whatever comes out of this.
 > | before the standoff fix | 5-1, 2 tied, **+18 pieces** |
 > | after it | 3-4, 1 tied, **+1 piece** |
 >
-> The noiseless machine no longer beats the blundering one. That is not a
-> regression — it is the gate reporting correctly that **root jitter is a far
-> weaker lever than its size suggests.** Most of a checkers turn is forced: a
-> capture is all but compulsory, a chain has no choices inside it, and many
-> positions offer one sane move. Jitter can only spoil a free choice, and there
-> are fewer of those here than in a game like chess. The old +18 was measured in
-> a game where almost nothing happened, so the few real decisions carried
-> everything.
+> The noiseless machine no longer beats the blundering one. Read the margin
+> rather than the tally: these games all run out of turns, so a "win" is a
+> one-piece material lead and 3-4 is a coin flip dressed as a result. **+1 piece
+> across eight whole games** is the honest figure, and it means indistinguishable.
+>
+> The cause is the jitter design working as intended. `searchBestMove` keeps the
+> sample too small to outweigh a real difference — "±38 of jitter is nowhere near
+> two pawns, so the triple must win every single time". Measured across one game,
+> that guarantee covers nearly every position there is:
+>
+> | turn | legal moves | best-to-worst spread | inside a ±60 band |
+> | --- | --- | --- | --- |
+> | 12 | 16 | 17 points | all 16 |
+> | 24 | 23 | 28 points | all 23 |
+> | 48 | 24 | **452 points** | **2 of 24** |
+> | 60 | 21 | 175 points | 16 of 21 |
+>
+> Quiet positions offer many moves worth the same to within a fraction of a
+> pawn, so the jitter shuffles the interchangeable. The sharp position — where
+> choosing wrongly would cost four pawns — puts only two moves inside the band,
+> so the jitter cannot reach a bad one. **Noise only ever operates where the
+> choice does not matter**, which is exactly what it was built to do.
+>
+> Making it a stronger lever would mean letting it shed material on purpose, and
+> that is a different card: a level that hangs pieces, not one that plays
+> loosely. The old +18 was measured against a machine that spent five turns in
+> six drawing cards; whatever it was about, it was not this.
 >
 > The twin was dropped rather than re-tuned until it passed, and what it guarded
 > — that the root ranking is used at all — is already covered in the page's own

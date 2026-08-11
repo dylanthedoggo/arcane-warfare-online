@@ -146,12 +146,28 @@ const AI_LEVELS = {
  * Novice's 38 — comes out 3-4 with one drawn, +1 piece across eight games. That
  * is no measurable handicap at all.
  *
- * The reason is the game rather than the number. Most of a checkers turn is
- * forced: a capture is all but compulsory, a chain has no choices inside it,
- * and a great many positions offer one sane move. Root jitter can only spoil a
- * free CHOICE, and there are fewer of those here than in a game like chess. A
- * blunder rate expressed in evaluation points does not convert into blunders at
- * anything like the rate you would expect.
+ * AND THE REASON IS THE DESIGN WORKING, not failing. searchBestMove is careful
+ * that a sample can never outweigh a real difference — "±38 of jitter is
+ * nowhere near two pawns, so the triple must win every single time". Measured
+ * across one game, that guarantee turns out to cover almost everything:
+ *
+ *     turn  legal moves  best-to-worst spread  inside a ±60 band
+ *       12       16              17 points        all 16
+ *       24       23              28 points        all 23
+ *       48       24             452 points        2 of 24
+ *       60       21             175 points       16 of 21
+ *
+ * In a quiet position every move is worth about the same, so the jitter
+ * shuffles moves that were interchangeable — a sixth of a pawn between the best
+ * and the worst of sixteen. In the sharp position, where choosing wrongly would
+ * cost four pawns, only two moves are inside the band at all, so the jitter
+ * cannot reach a bad one. Noise only ever operates where the choice does not
+ * matter, which is precisely what it was built to do.
+ *
+ * Making it a stronger lever would mean letting it lose material on purpose,
+ * and that is a different card to play: it would produce a level that hangs
+ * pieces rather than one that plays slightly loosely. Worth knowing before
+ * anyone reaches for this number to make Novice easier.
  *
  * The practical reading, for anyone making Novice easier or harder: `noise` is
  * a weak lever. `depth` does nothing without `timeMs`. `timeMs` itself, and the
