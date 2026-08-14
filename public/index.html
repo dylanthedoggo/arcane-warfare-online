@@ -2403,7 +2403,7 @@ function renderRules() {
       "Most of your Focus comes from fighting, not from waiting. A player who trades and pushes for the crown can afford roughly twice what a player who sits still can.",
     ]);
     card("The ceiling", [
-      `Your pool stops at ${FP_CAP} FP. Anything earned while full is wasted, and the log says so.`,
+      `Your pool stops at ${FP_CAP} FP. Anything earned while full is wasted, and the Focus pip says so.`,
       "Focus is spend-it-or-lose-it, not savings. A pool you never touch is income you threw away — and the Alchemist, which prints Focus you cannot bank, is a worse bargain than it looks.",
     ]);
     card("Spending FP", ["Transformations are cast like any other spell, for the same 3 FP most cards cost — except the Alchemist at 6 and the Phaser, which is free once its 3 FP spell is paid.", "Spell costs range from 2 to 6 FP."]);
@@ -3731,7 +3731,10 @@ function runTests() {
   G.players[0].fp = FP_CAP - 1;
   awardFP(0, 5, "a test");
   ok(`the pool stops at ${FP_CAP}`, G.players[0].fp === FP_CAP, G.players[0].fp);
-  ok("...and the wasted income is announced", G.log.some((l) => /is full at/.test(l.text)));
+  // Silently, and on purpose — see awardFP. The Focus pip says it once; the log
+  // used to say it on every coin. This asserts the silence so that restoring the
+  // announcement is a deliberate act rather than something that creeps back.
+  ok("...and says nothing about it in the log", !G.log.some((l) => /is full at/.test(l.text)));
   G.players[0].fp = 4;
   awardFP(0, 3, "a test");
   ok("...while income below the ceiling is paid in full", G.players[0].fp === 7, G.players[0].fp);
