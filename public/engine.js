@@ -1623,9 +1623,13 @@ function awardFP(owner, n, why) {
     P.fp += gained;
     log(`${PLAYERS[owner].name} +${gained} FP — ${why}.`, "p" + owner);
   }
-  const wasted = n - gained;
-  if (wasted > 0)
-    log(`${PLAYERS[owner].name} is full at ${FP_CAP} FP — ${wasted} FP from ${why} is wasted. Spend it or lose it.`, "rule");
+  // Overflow is deliberately SILENT. It used to announce itself in the log —
+  // "is full at 10 FP, N wasted, spend it or lose it" — and a rule that fires on
+  // income rather than on a decision fires constantly, so a player sitting on a
+  // full pool for a few turns got the same scolding half a dozen times for a
+  // thing they had already been told. The Focus pip carries it instead, which is
+  // where a player is looking when the number matters and which says it once
+  // rather than once per coin.
 }
 
 /**
