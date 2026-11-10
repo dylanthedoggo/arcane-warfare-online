@@ -5,8 +5,9 @@
 ```
 server.js               the referee — holds the real game, checks every action
 public/engine.js        the rules, shared verbatim by browser and server
-public/index.html       the interface
+public/index.html       the page; app.js, styles.css and the rest sit beside it
 test/engine.test.js     cheat-rejection suite, run at build time
+test/server.test.js     proves a bad message cannot stop the server, also at build time
 render.yaml             Render reads this and configures the service for you
 ```
 
@@ -99,4 +100,5 @@ Then <http://localhost:3000>.
 
 The offline modes need no server at all — opening `public/index.html` straight from
 the file system still plays hot-seat and vs-the-machine, and
-`public/index.html?test=1` runs the 131-assertion rules suite in the browser.
+`public/index.html?test=1` runs the rules suite in the browser. Opened from a file,
+the machine thinks on the page itself; from a server it uses a background thread.

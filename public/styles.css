@@ -1,0 +1,516 @@
+/* ══════════════════════════════════════════════════════════════════
+   THEME
+   ══════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#07080d;
+  --bg2:#0d0f18;
+  --panel:#121525;
+  --panel2:#181c30;
+  --line:#262c47;
+  --line2:#39406a;
+  --ink:#cfd6ef;
+  --ink-dim:#7d86ad;
+  --ink-faint:#525a7d;
+  --gold:#e8b84b;
+  --gold-deep:#8a6a1c;
+  --violet:#a86ef0;
+  --violet-deep:#5b348f;
+  --dark-sq:#1a1f36;
+  --light-sq:#2b3252;
+  --good:#4bd6a0;
+  --bad:#f0576b;
+  --warn:#f0b429;
+  --sel:#4bd6a0;
+  /* The two kinds of card. Transformation spells reshape one of your own
+     pieces for the rest of the game; everything else is a one-off effect.
+     Frost is already the effects layer's colour for a piece changing form,
+     and arcane is already its colour for "magic that belongs to neither
+     side" — so the hand borrows the grammar the board is using. Neither is a
+     player colour, so a card never reads as belonging to a seat. */
+  --spell-form:#7fb2ff;
+  --spell-arcane:#a86ef0;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:
+    radial-gradient(1200px 700px at 15% -10%, #1b1740 0%, transparent 60%),
+    radial-gradient(1000px 600px at 90% 110%, #10233f 0%, transparent 62%),
+    var(--bg);
+  color:var(--ink);
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  overflow:hidden;
+  user-select:none;-webkit-user-select:none;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+button:disabled{cursor:not-allowed}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+
+/* ══════════════════════════════════════════════════════════════════
+   LAYOUT
+   ══════════════════════════════════════════════════════════════════ */
+#app{
+  height:100vh;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 268px 320px;
+  grid-template-rows:auto minmax(0,1fr);
+  gap:0;
+}
+#topbar{
+  grid-column:1 / -1;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:9px 16px;
+  background:linear-gradient(180deg,rgba(20,24,44,.95),rgba(12,14,26,.9));
+  border-bottom:1px solid var(--line);
+}
+#title{
+  font-size:13px;letter-spacing:.22em;text-transform:uppercase;
+  font-weight:700;color:var(--ink-dim);white-space:nowrap;
+}
+#title b{color:var(--gold);font-weight:700}
+#turnbadge{
+  display:flex;align-items:center;gap:9px;
+  padding:5px 13px;border-radius:999px;
+  border:1px solid var(--line2);background:var(--panel);
+  font-size:13px;font-weight:600;white-space:nowrap;
+}
+#turnbadge .dot{width:11px;height:11px;border-radius:50%;box-shadow:0 0 12px currentColor}
+#phasechip{
+  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  padding:4px 9px;border-radius:5px;background:var(--panel2);
+  color:var(--ink-dim);border:1px solid var(--line);white-space:nowrap;
+}
+/* The sandbox says so, loudly and constantly. A workbench position that gets
+   mistaken for a real game is a bug report nobody can reproduce. */
+#devchip{
+  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  padding:4px 9px;border-radius:5px;background:#4a2a12;
+  color:#ffc978;border:1px solid #8a5520;white-space:nowrap;font-weight:700;
+}
+#topspacer{flex:1}
+.tbtn{
+  font-size:12px;padding:6px 12px;border-radius:7px;
+  border:1px solid var(--line2);background:var(--panel);
+  color:var(--ink-dim);transition:.15s;white-space:nowrap;
+}
+.tbtn:hover{background:var(--panel2);color:var(--ink);border-color:var(--ink-faint)}
+
+/* ── board column ── */
+#boardwrap{
+  display:flex;align-items:center;justify-content:center;
+  padding:14px;min-width:0;min-height:0;position:relative;
+}
+#boardstack{position:relative}
+#board{
+  display:grid;
+  grid-template-columns:repeat(12,1fr);
+  grid-template-rows:repeat(12,1fr);
+  width:min(calc(100vh - 108px), calc(100vw - 628px));
+  height:min(calc(100vh - 108px), calc(100vw - 628px));
+  border:2px solid var(--line2);
+  border-radius:6px;
+  overflow:hidden;
+  box-shadow:0 22px 70px rgba(0,0,0,.75), 0 0 0 1px rgba(255,255,255,.03) inset;
+  background:var(--dark-sq);
+}
+.cell{position:relative;display:flex;align-items:center;justify-content:center}
+.cell.light{background:var(--light-sq)}
+.cell.dark{background:var(--dark-sq);cursor:default}
+.cell.dark.playable{cursor:pointer}
+
+/* move / target markers */
+.cell .marker{
+  position:absolute;inset:0;pointer-events:none;
+  display:flex;align-items:center;justify-content:center;
+}
+.cell.movetarget .marker::after{
+  content:"";width:30%;height:30%;border-radius:50%;
+  background:var(--sel);opacity:.55;
+  box-shadow:0 0 14px var(--sel);
+}
+.cell.captarget .marker::after{
+  content:"";width:44%;height:44%;border-radius:50%;
+  border:2.5px solid var(--bad);background:rgba(240,87,107,.18);
+  box-shadow:0 0 14px rgba(240,87,107,.6);
+}
+.cell.selected{box-shadow:inset 0 0 0 3px var(--sel)}
+.cell.spelltarget{box-shadow:inset 0 0 0 3px var(--violet);cursor:pointer}
+.cell.spelltarget .marker::after{
+  content:"";width:100%;height:100%;
+  background:radial-gradient(circle,rgba(168,110,240,.28),transparent 70%);
+}
+.cell.lastfrom{box-shadow:inset 0 0 0 2px rgba(255,255,255,.14)}
+.cell.lastto{box-shadow:inset 0 0 0 2px rgba(255,255,255,.3)}
+
+/* ── pieces ── */
+.piece{
+  position:relative;
+  width:78%;height:78%;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:clamp(9px,1.55vh,17px);font-weight:800;
+  transition:transform .12s;
+  z-index:2;
+}
+.piece.p0{
+  background:radial-gradient(circle at 34% 28%, #ffe9a8, var(--gold) 46%, var(--gold-deep) 100%);
+  color:#3a2a05;
+  box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 1.5px rgba(255,230,160,.35) inset;
+}
+.piece.p1{
+  background:radial-gradient(circle at 34% 28%, #ddc4ff, var(--violet) 46%, var(--violet-deep) 100%);
+  color:#1e0f38;
+  box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 1.5px rgba(220,190,255,.32) inset;
+}
+.piece.queen{
+  box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2.5px #fff inset, 0 0 16px rgba(255,255,255,.28);
+}
+.piece.armored::before{
+  content:"";position:absolute;inset:-16%;border-radius:50%;
+  border:2.5px dashed rgba(255,255,255,.55);
+  animation:spin 9s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.piece.frozen{filter:saturate(.25) brightness(.62)}
+.piece.frozen::after{
+  content:"";position:absolute;inset:0;border-radius:50%;
+  background:repeating-linear-gradient(45deg,transparent 0 3px,rgba(140,200,255,.42) 3px 5px);
+}
+.piece.marked{outline:2.5px solid var(--bad);outline-offset:2.5px}
+.piece.veiled{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(120,255,220,.75) inset}
+/* Only ever drawn on your own shells — see renderBoard. A shield, not a ghost:
+   the pawn under it is alive and reads at full strength, with the shell sitting
+   around it. Deliberately NOT .piece.armored's spinning ring — that class is
+   public, and a shell that looked like armor would announce itself. Still quiet
+   enough to be legible to the player holding it without turning into a tell
+   over somebody's shoulder. */
+.piece.hollow{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(228,236,255,.5) inset, 0 0 0 2px rgba(228,236,255,.3)}
+/* The square one of YOUR shells will put its pawn back on — see renderBoard,
+   which gates it on the same redacted field the ring uses. Drawn as an empty
+   outline rather than a fill: it is a place, not a piece, and it must not read
+   as a move dot. `.blocked` is the same square with somebody standing on it,
+   which means the retreat has nowhere to go. */
+.cell.hollowhome::after{
+  content:"";position:absolute;inset:16%;border-radius:50%;pointer-events:none;
+  border:2px dashed rgba(228,236,255,.55);
+}
+.cell.hollowhome.blocked::after{border-color:rgba(240,87,107,.5);border-style:dotted}
+/* Both halves of a superposition, drawn for everybody. */
+.piece.quantum{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(150,190,255,.55) inset}
+/* And which half is which, drawn only for the player entitled to know. */
+.piece.qreal{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 3px rgba(150,220,255,.95) inset}
+.piece.qghost{opacity:.6}
+/* A twinned pair. Nothing secret about it, so it is drawn for everybody. */
+.piece.twinned{box-shadow:0 3px 9px rgba(0,0,0,.6), 0 0 0 2px rgba(255,205,120,.8) inset}
+.piece .glyph{line-height:1;pointer-events:none}
+.piece .fpdot{
+  position:absolute;top:-3px;right:-3px;
+  width:36%;height:36%;border-radius:50%;
+  background:var(--good);border:1.5px solid var(--bg);
+}
+.badge-stack{
+  position:absolute;bottom:-2px;left:50%;transform:translateX(-50%);
+  display:flex;gap:1px;pointer-events:none;z-index:3;
+}
+.badge-stack i{
+  width:5px;height:5px;border-radius:50%;background:var(--warn);
+  border:1px solid rgba(0,0,0,.5);font-style:normal;
+}
+.badge-stack i.veil{background:#78ffdc}
+.badge-stack i.pend{background:transparent;border:1px solid #7fb2ff}
+/* Pending penalty: a dashed halo. Drawn as a real element rather than a
+   pseudo-element because .armored already owns ::before and .frozen ::after. */
+.pendring{
+  position:absolute;inset:-13%;border-radius:50%;
+  border:1.5px dashed rgba(127,178,255,.9);
+  pointer-events:none;z-index:4;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   SIDEBAR
+   ══════════════════════════════════════════════════════════════════ */
+#side{
+  display:flex;flex-direction:column;min-height:0;
+  background:linear-gradient(180deg,rgba(15,18,34,.92),rgba(9,11,20,.96));
+  border-left:1px solid var(--line);
+}
+.sect{border-bottom:1px solid var(--line);padding:11px 13px}
+.sect h3{
+  font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--ink-faint);margin-bottom:8px;font-weight:700;
+}
+
+/* player strips */
+.pstrip{
+  display:flex;align-items:center;gap:9px;
+  padding:8px 10px;border-radius:8px;margin-bottom:6px;
+  border:1px solid var(--line);background:var(--panel);
+  transition:.18s;
+}
+.pstrip:last-child{margin-bottom:0}
+.pstrip.active{border-color:currentColor;background:var(--panel2);box-shadow:0 0 0 1px currentColor inset}
+.pstrip .swatch{width:14px;height:14px;border-radius:50%;flex:none;box-shadow:0 0 10px currentColor}
+.pstrip .nm{font-size:12.5px;font-weight:700;flex:1;color:var(--ink)}
+.pstrip .fp{
+  font-size:15px;font-weight:800;color:var(--good);
+  font-family:ui-monospace,monospace;
+}
+.pstrip .fp small{font-size:8.5px;color:var(--ink-faint);letter-spacing:.1em;margin-left:2px}
+/* At the ceiling: further income is being thrown away. */
+.pstrip .fp.full{color:var(--warn)}
+.pstrip .fp.full small{color:var(--warn);opacity:.7}
+.pstrip .meta{font-size:10px;color:var(--ink-faint);white-space:nowrap}
+.efflist{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
+.eff{
+  font-size:9px;padding:2px 6px;border-radius:4px;
+  background:rgba(240,180,41,.14);color:var(--warn);
+  border:1px solid rgba(240,180,41,.3);
+}
+/* a penalty already paid for that has not landed yet */
+.eff.pend{
+  background:rgba(120,170,255,.12);color:#7fb2ff;
+  border:1px dashed rgba(120,170,255,.45);
+}
+
+/* ── hand column ── */
+#handcol{
+  display:flex;flex-direction:column;min-height:0;
+  background:linear-gradient(180deg,rgba(17,14,32,.92),rgba(9,8,18,.96));
+  border-left:1px solid var(--line);
+}
+#handcol .sect{border-bottom:none;display:flex;flex-direction:column;min-height:0;flex:1}
+#hand{display:flex;flex-direction:column;gap:6px;flex:1;overflow-y:auto;padding-right:3px}
+#handfoot{
+  border-top:1px solid var(--line);padding:9px 13px;
+  font-size:10px;color:var(--ink-faint);line-height:1.5;
+}
+.card{
+  text-align:left;width:100%;
+  padding:7px 9px;border-radius:7px;
+  border:1px solid var(--line2);background:var(--panel);
+  transition:.14s;position:relative;
+}
+.card:not(:disabled):hover{background:var(--panel2);border-color:var(--kind,var(--violet));transform:translateX(2px)}
+.card:disabled{opacity:.4}
+.card .cname{font-size:12px;font-weight:700;display:flex;justify-content:space-between;gap:6px;align-items:baseline}
+.card .ccost{font-size:10.5px;color:var(--good);font-family:ui-monospace,monospace;flex:none}
+.card .cwhen{font-size:9.5px;color:var(--ink-faint);margin-top:2px}
+.card.selected{border-color:var(--kind,var(--violet));box-shadow:0 0 0 1px var(--kind,var(--violet)), 0 0 18px rgba(168,110,240,.35)}
+/* Which KIND of card this is, said in one stripe down the spine and in the
+   title. Deliberately quiet: the hand is scanned for cost and timing first,
+   and a card that shouts its category buries both. */
+.card.form{--kind:var(--spell-form)}
+.card.arcane{--kind:var(--spell-arcane)}
+.card.form,.card.arcane{padding-left:12px}
+.card.form::before,.card.arcane::before{
+  content:"";position:absolute;left:0;top:5px;bottom:5px;width:2px;
+  border-radius:2px;background:var(--kind);opacity:.85;
+}
+.card.form .cname>span:first-child,
+.card.arcane .cname>span:first-child{color:var(--kind)}
+.empty{font-size:11px;color:var(--ink-faint);font-style:italic;padding:5px 0}
+/* Watching two machines, the one hand panel carries both hands, so each needs
+   naming. `currentColor` inherits the side's colour, set on the row itself. */
+.handside{
+  display:flex;justify-content:space-between;gap:6px;align-items:baseline;
+  font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  padding-bottom:3px;border-bottom:1px solid currentColor;opacity:.85;
+}
+.handside+*{margin-top:1px}
+.handside:not(:first-child){margin-top:9px}
+.handside small{font-size:9px;font-weight:400;letter-spacing:0;text-transform:none;opacity:.75}
+
+/* actions */
+#actions{display:flex;flex-direction:column;gap:5px}
+.abtn{
+  padding:8px 11px;border-radius:7px;text-align:left;
+  border:1px solid var(--line2);background:var(--panel);
+  font-size:12px;font-weight:600;transition:.14s;
+  display:flex;justify-content:space-between;align-items:center;gap:8px;
+}
+.abtn:not(:disabled):hover{background:var(--panel2);border-color:var(--ink-faint)}
+.abtn:disabled{opacity:.35}
+.abtn .hint{font-size:9.5px;color:var(--ink-faint);font-weight:400;text-align:right}
+/* An action that also has a keyboard shortcut wears it, so the binding is
+   discoverable without a legend nobody reads. */
+.abtn .lbl{display:flex;align-items:center;gap:7px;min-width:0}
+.abtn .kbd{
+  font:600 9.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  padding:3px 5px;border-radius:4px;flex:none;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--ink-faint);
+}
+.abtn.primary{border-color:var(--good);color:var(--good)}
+.abtn.primary:not(:disabled):hover{background:rgba(75,214,160,.1)}
+.abtn.danger{border-color:rgba(240,87,107,.4);color:var(--bad)}
+
+/* log */
+#logzone{flex:1;min-height:0;display:flex;flex-direction:column;border-bottom:none}
+#logzone.collapsed{flex:0 0 auto}
+#logzone.collapsed #log{display:none}
+#logzone.collapsed h3{margin-bottom:0}
+.loghead{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.logtoggle{
+  display:flex;align-items:center;gap:6px;
+  font:inherit;font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--ink-faint);font-weight:700;padding:0;
+}
+.logtoggle:hover{color:var(--ink-dim)}
+.logtoggle .chev{
+  display:inline-block;font-size:10px;letter-spacing:0;
+  transition:transform .18s;
+}
+#logzone.collapsed .logtoggle .chev{transform:rotate(-90deg)}
+#logcount{
+  font-size:9px;color:var(--ink-faint);letter-spacing:.04em;
+  font-family:ui-monospace,monospace;text-transform:none;
+}
+#log{
+  flex:1;overflow-y:auto;font-size:11px;line-height:1.5;
+  display:flex;flex-direction:column;gap:3px;padding-right:3px;
+}
+.logline{padding:3px 7px;border-radius:5px;border-left:2px solid var(--line2);background:rgba(255,255,255,.02)}
+.logline.p0{border-left-color:var(--gold)}
+.logline.p1{border-left-color:var(--violet)}
+.logline.rule{border-left-color:var(--warn);color:var(--warn);background:rgba(240,180,41,.06)}
+.logline.big{border-left-color:var(--bad);color:var(--bad);background:rgba(240,87,107,.07);font-weight:600}
+.logline.sys{border-left-color:var(--ink-faint);color:var(--ink-faint);font-style:italic}
+::-webkit-scrollbar{width:7px;height:7px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--ink-faint)}
+
+/* ══════════════════════════════════════════════════════════════════
+   OVERLAYS
+   ══════════════════════════════════════════════════════════════════ */
+.overlay{
+  position:fixed;inset:0;z-index:80;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(4,5,10,.86);backdrop-filter:blur(9px);
+  padding:22px;
+}
+.overlay[hidden]{display:none}
+.sheet{
+  background:linear-gradient(180deg,var(--panel2),var(--panel));
+  border:1px solid var(--line2);border-radius:14px;
+  padding:24px;max-width:560px;width:100%;
+  max-height:86vh;overflow-y:auto;
+  box-shadow:0 30px 90px rgba(0,0,0,.8);
+}
+.sheet h2{font-size:19px;margin-bottom:6px;font-weight:800}
+.sheet .sub{font-size:12.5px;color:var(--ink-dim);margin-bottom:16px;line-height:1.6}
+.sheet .row{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}
+.sheet .row.stack{flex-direction:column}
+.bigbtn{
+  flex:1;min-width:130px;padding:12px 16px;border-radius:9px;
+  border:1px solid var(--line2);background:var(--panel);
+  font-size:13px;font-weight:700;transition:.15s;text-align:left;
+}
+.bigbtn:not(:disabled):hover{background:var(--panel2);border-color:var(--ink-faint);transform:translateY(-1px)}
+.bigbtn:disabled{opacity:.35}
+.bigbtn .d{display:block;font-size:10.5px;font-weight:400;color:var(--ink-faint);margin-top:3px;line-height:1.45}
+.bigbtn.gold{border-color:var(--gold);color:var(--gold)}
+.bigbtn.violet{border-color:var(--violet);color:var(--violet)}
+.bigbtn.go{border-color:var(--good);color:var(--good)}
+.bigbtn.no{border-color:rgba(240,87,107,.45);color:var(--bad)}
+
+/* curtain */
+#curtain .sheet{max-width:420px;text-align:center}
+#curtain .who{font-size:27px;font-weight:800;margin:6px 0 3px}
+#curtain .ready{
+  margin-top:20px;padding:14px;border-radius:9px;width:100%;
+  border:1px solid var(--good);color:var(--good);font-size:14px;font-weight:700;
+}
+#curtain .ready:hover{background:rgba(75,214,160,.1)}
+
+/* rules reference */
+#rules .sheet{max-width:760px}
+.rulegrid{display:grid;gap:10px}
+.rulecard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:rgba(255,255,255,.02)}
+.rulecard h4{font-size:12.5px;margin-bottom:3px;color:var(--gold)}
+.rulecard p{font-size:11px;color:var(--ink-dim);line-height:1.55;margin-bottom:2px}
+.rulecard .tag{font-size:9.5px;color:var(--ink-faint);font-family:ui-monospace,monospace}
+/* Same two colours as the hand, so a card looked up here is recognisable
+   when it is drawn. The heading carries it; gold stays the default for
+   everything that is not a spell. */
+.rulecard.form{--kind:var(--spell-form)}
+.rulecard.arcane{--kind:var(--spell-arcane)}
+.rulecard.form,.rulecard.arcane{border-left:2px solid var(--kind)}
+.rulecard.form h4,.rulecard.arcane h4{color:var(--kind)}
+.tabs{display:flex;gap:5px;margin-bottom:14px;flex-wrap:wrap}
+.tab{padding:6px 12px;border-radius:6px;border:1px solid var(--line);font-size:11.5px;color:var(--ink-dim)}
+.tab.on{border-color:var(--gold);color:var(--gold);background:rgba(232,184,75,.08)}
+
+/* toast */
+#toast{
+  position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(14px);
+  background:var(--panel2);border:1px solid var(--line2);
+  padding:10px 18px;border-radius:9px;font-size:12.5px;font-weight:600;
+  opacity:0;transition:.22s;pointer-events:none;z-index:120;
+  box-shadow:0 12px 40px rgba(0,0,0,.7);max-width:80vw;text-align:center;
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.bad{border-color:var(--bad);color:var(--bad)}
+#toast.good{border-color:var(--good);color:var(--good)}
+
+/* prompt list */
+.plist{display:flex;flex-direction:column;gap:6px;max-height:46vh;overflow-y:auto}
+
+/* test output */
+#testout{
+  position:fixed;inset:0;background:#05060a;color:#cfe6f5;z-index:200;
+  padding:26px;overflow:auto;font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.65;
+}
+#testout .ok{color:#4bd6a0}
+#testout .fail{color:#f0576b;font-weight:700}
+#testout h1{font-size:17px;margin-bottom:14px;font-family:inherit}
+#testout .grp{margin:14px 0 5px;color:#e8b84b;font-weight:700}
+
+/* Three columns need roughly 1200px. Below that, tighten them; below 1000px
+   there is no room at all, so the two panels stack under the board. */
+@media (max-width:1200px){
+  #app{grid-template-columns:minmax(0,1fr) 232px 272px}
+  #board{width:min(calc(100vh - 108px), calc(100vw - 532px));height:min(calc(100vh - 108px), calc(100vw - 532px))}
+}
+/* One column. The board no longer has to share a fixed-height viewport with
+   two panels, so the page scrolls vertically instead of squeezing everything. */
+@media (max-width:1000px){
+  html,body{overflow:auto}
+  #app{
+    height:auto;min-height:100vh;
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto auto auto auto;
+  }
+  #topbar{position:sticky;top:0;z-index:20}
+  #boardwrap{grid-row:2;padding:12px}
+  #handcol{grid-row:3;border-left:none;border-top:1px solid var(--line)}
+  #side{grid-row:4;border-left:none;border-top:1px solid var(--line)}
+  #board{
+    width:min(calc(100vw - 24px), 68vh);
+    height:min(calc(100vw - 24px), 68vh);
+  }
+  #hand{max-height:270px;flex:none}
+  #handcol .sect{flex:none}
+  #log{max-height:230px}
+  #logzone{flex:none}
+}
+
+/* ── online: room code, share link, join box ─────────────────────────────── */
+.netcode{
+  margin:14px 0 6px;padding:10px;border-radius:9px;
+  background:var(--panel2);border:1px solid var(--line2);
+  font:700 34px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.32em;text-indent:.32em;text-align:center;color:var(--gold);
+}
+.netlink{
+  font:500 12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--ink-faint);word-break:break-all;text-align:center;
+}
+.netinput{
+  display:block;width:100%;margin:14px 0 2px;padding:10px;
+  border-radius:9px;background:var(--panel2);border:1px solid var(--line2);
+  font:700 34px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.32em;text-indent:.32em;text-align:center;
+  color:var(--gold);text-transform:uppercase;outline:none;
+}
+.netinput:focus{border-color:var(--gold-deep)}
+.netinput::placeholder{color:var(--ink-faint);opacity:.5}

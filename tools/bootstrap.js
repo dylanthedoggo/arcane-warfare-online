@@ -187,7 +187,7 @@ for (const [name, value] of Object.entries(engine)) {
    worth stopping to fix.
 
    pieceLabel is the case where that test was applied and came back the other
-   way. It reads like a presentation function; it is engine code, index.html has
+   way. It reads like a presentation function; it is engine code, app.js has
    no copy of it, and a "minimal text version for Node" would have forked a
    piece of the engine into a second implementation that drifts. It is exported
    from engine.js instead, and is not on this list.
@@ -202,7 +202,7 @@ const noted = (name, fn) => (...args) => {
   return fn(...args);
 };
 
-/** The headless turn-ender. index.html's is `endTurn(); render(); afterHandoff()`
+/** The headless turn-ender. app.js's is `endTurn(); render(); afterHandoff()`
  *  — and with no screen, render and the pass-the-device curtain are both
  *  nothing, so what is left is the first third of it. */
 globalThis.endTurnLocal = noted("endTurnLocal", () => engine.endTurn());
@@ -225,7 +225,7 @@ globalThis.FX = {
 globalThis.NET = { on: false };
 
 /** Interface state. Only the two fields the machine touches are real; the rest
- *  of index.html's freshUI is about selection and modals, which need a mouse. */
+ *  of app.js's freshUI is about selection and modals, which need a mouse. */
 globalThis.freshUI = noted("freshUI", () => ({ targeting: null, revealed: true }));
 globalThis.UI = globalThis.freshUI();
 

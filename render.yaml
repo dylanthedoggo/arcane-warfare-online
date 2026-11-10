@@ -3,7 +3,7 @@ services:
     name: checkers-arcane-warfare
     runtime: node
     plan: free
-    # npm test runs the cheat-rejection suite. A broken referee fails the build
+    # npm test runs the cheat-rejection and server suites. A broken referee fails the build
     # instead of shipping — worth the extra few seconds when the alternative is
     # discovering it mid-game.
     buildCommand: npm install && npm test

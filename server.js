@@ -11,12 +11,10 @@
    not the target of a spell. The board goes back out through viewFor(), which
    strips the opponent's hand and the undo snapshots.
 
-   Concurrency note. The engine keeps one module-level `G`, so a room's state is
-   swapped in with setG() immediately before each applyAction() and read back
-   with getG() immediately after — restore() (used by the rollback path and by
-   Chronos's Gaze) REPLACES G rather than mutating it, so skipping that read-back
-   silently loses moves. This is safe only because Node is single-threaded and
-   applyAction never awaits. Do not make anything on this path async.
+   One door to a game. The engine works on one game at a time. inGame() is the
+   only place this file opens a room's game: it loads the game, runs the engine
+   call, and saves the game back. The engine refuses an async callback, and it
+   holds no game between calls, so one room cannot touch another room's game.
    ══════════════════════════════════════════════════════════════════════════ */
 
 const path = require("path");
@@ -26,7 +24,7 @@ const { Server } = require("socket.io");
 
 const engine = require("./public/engine.js");
 const {
-  newGame, beginTurn, log, applyAction, viewFor, setG, getG, undoTarget, applyUndoTo,
+  newGame, beginTurn, log, applyAction, viewFor, withGame, undoTarget, applyUndoTo,
   playRandomTurn, PRESSURE_SECONDS,
 } = engine;
 
@@ -129,19 +127,22 @@ function expireClock(room, seat, turnNo) {
   room.clock = null;
   if (rooms.get(room.code) !== room) return;         // the room went away
 
-  setG(room.G);
-  const g = getG();
-  // The turn may have been played, undone or rewound between the timer being
-  // set and this firing, so the fixture it was set for has to still be there.
-  if (!g.over && g.turn === seat && g.turnNo === turnNo) {
-    playRandomTurn(seat);
-    room.G = getG();
-    room.lastSeen = Date.now();
-    pushState(room);
-    return;                                          // pushState re-syncs
+  // A timer callback has no caller to catch its errors. An error here must
+  // cost one turn, not the whole server.
+  try {
+    // The turn may have been played, undone or rewound between the timer being
+    // set and this firing, so the fixture it was set for has to still be there.
+    const g = room.G;
+    if (!g.over && g.turn === seat && g.turnNo === turnNo) {
+      inGame(room, () => playRandomTurn(seat));
+      room.lastSeen = Date.now();
+      pushState(room);
+      return;                                        // pushState re-syncs
+    }
+    syncClock(room);
+  } catch (e) {
+    console.error("expireClock threw:", e);
   }
-  room.G = getG();
-  syncClock(room);
 }
 
 /** One seat's view of a room, with everything the wire adds on top of it. */
@@ -174,11 +175,20 @@ function pushPresence(room) {
   }
 }
 
-/** Run one action against a room's state. See the concurrency note up top. */
+/**
+ * The one door to a room's game. Runs `fn` with the room's game loaded in the
+ * engine, then saves the game back — the engine can replace the game object
+ * (a rollback or Chronos's Gaze does), so the save is not optional.
+ */
+function inGame(room, fn) {
+  const { g, out } = withGame(room.G, fn);
+  room.G = g;
+  return out;
+}
+
+/** Run one action against a room's state. */
 function runAction(room, seat, action) {
-  setG(room.G);
-  const res = applyAction(seat, action);
-  room.G = getG();                 // restore() may have swapped the object out
+  const res = inGame(room, () => applyAction(seat, action));
   room.lastSeen = Date.now();
   return res;
 }
@@ -238,14 +248,40 @@ function ackJoined(socket, room, seat) {
   };
 }
 
+/**
+ * Register a handler that a client cannot crash.
+ *
+ * Nothing a client sends is trusted, and that includes the SHAPE of the
+ * message. A client can send null, a number, or nothing at all where an object
+ * is expected, and an error thrown in a socket handler stops the whole process
+ * — every room with it. So the payload is forced to an object, the reply
+ * function is found wherever it is, and any error is caught here.
+ */
+function onSafe(socket, event, handler) {
+  socket.on(event, (...args) => {
+    const last = args[args.length - 1];
+    const ack = typeof last === "function" ? last : null;
+    const first = args[0];
+    const data = first && typeof first === "object" && !Array.isArray(first) ? first : {};
+    try {
+      handler(data, ack);
+    } catch (e) {
+      console.error(`handler "${event}" threw:`, e);
+      if (ack) ack({ ok: false, err: "The server could not read that message." });
+      else socket.emit("rejected", { err: "The server could not read that message." });
+    }
+  });
+}
+
 io.on("connection", (socket) => {
   let budget = ACTION_BURST;
   const refill = setInterval(() => { budget = ACTION_BURST; }, ACTION_WINDOW_MS);
 
   const reply = (ack, payload) => { if (typeof ack === "function") ack(payload); };
+  const on = (event, handler) => onSafe(socket, event, handler);
 
   /* ── host a game ───────────────────────────────────────────────────────── */
-  socket.on("create", ({ token } = {}, ack) => {
+  on("create", ({ token }, ack) => {
     if (rooms.size >= MAX_ROOMS) return reply(ack, { ok: false, err: "The server is full — try again in a while." });
     if (!token || typeof token !== "string") return reply(ack, { ok: false, err: "Missing player token." });
     const code = makeCode();
@@ -263,12 +299,12 @@ io.on("connection", (socket) => {
       lastSeen: Date.now(),
     };
     // Mirror the client's boot(): turnNo starts at 0 so beginTurn makes it 1.
-    setG(room.G);
     room.G.turnNo = 0;
-    log("A new game begins. Pieces hold the dark squares; the four centre rows are the separation space.", "sys");
-    log(`Online game — room ${code}. The server is the referee.`, "sys");
-    beginTurn(0);
-    room.G = getG();
+    inGame(room, () => {
+      log("A new game begins. Pieces hold the dark squares; the four centre rows are the separation space.", "sys");
+      log(`Online game — room ${code}. The server is the referee.`, "sys");
+      beginTurn(0);
+    });
 
     rooms.set(code, room);
     seatSocket(room, 0, socket);
@@ -276,7 +312,7 @@ io.on("connection", (socket) => {
   });
 
   /* ── join a game ───────────────────────────────────────────────────────── */
-  socket.on("join", ({ room: code, token } = {}, ack) => {
+  on("join", ({ room: code, token }, ack) => {
     if (!token || typeof token !== "string") return reply(ack, { ok: false, err: "Missing player token." });
     const room = rooms.get(String(code || "").toUpperCase());
     if (!room) return reply(ack, { ok: false, err: "No game with that code. Check the letters, or ask for a new link." });
@@ -298,7 +334,8 @@ io.on("connection", (socket) => {
   });
 
   /* ── reclaim a seat after a refresh or a dropped connection ────────────── */
-  socket.on("hello", ({ room: code, token } = {}, ack) => {
+  on("hello", ({ room: code, token }, ack) => {
+    if (!token || typeof token !== "string") return reply(ack, { ok: false, err: "Missing player token." });
     const room = rooms.get(String(code || "").toUpperCase());
     if (!room) return reply(ack, { ok: false, err: "That game is no longer on the server." });
     const seat = room.seats.findIndex((s) => s && s.token === token);
@@ -309,7 +346,7 @@ io.on("connection", (socket) => {
   });
 
   /* ── play ──────────────────────────────────────────────────────────────── */
-  socket.on("action", (action) => {
+  on("action", (action) => {
     const ctx = contextOf(socket);
     if (!ctx) return socket.emit("rejected", { err: "You are not in a game." });
     if (budget-- <= 0) return socket.emit("rejected", { err: "Slow down." });
@@ -331,7 +368,7 @@ io.on("connection", (socket) => {
   });
 
   /* ── undo handshake ────────────────────────────────────────────────────── */
-  socket.on("undoRequest", () => {
+  on("undoRequest", () => {
     const ctx = contextOf(socket);
     if (!ctx) return;
     const { room, seat } = ctx;
@@ -339,8 +376,7 @@ io.on("connection", (socket) => {
     if (room.undoOffer) return socket.emit("rejected", { err: "There is already an undo request pending." });
     if (!seatOnline(room, 1 - seat)) return socket.emit("rejected", { err: "Your opponent is not here to agree." });
 
-    setG(room.G);
-    const t = undoTarget();
+    const t = inGame(room, () => undoTarget());
     if (!t) return socket.emit("rejected", { err: "Nothing to undo yet." });
 
     room.undoOffer = { from: seat, turn: t.turn, turnNo: t.turnNo };
@@ -348,7 +384,7 @@ io.on("connection", (socket) => {
     socketOf(room, 1 - seat).emit("undoOffer", { turn: t.turn, turnNo: t.turnNo });
   });
 
-  socket.on("undoRespond", ({ accept } = {}) => {
+  on("undoRespond", ({ accept }) => {
     const ctx = contextOf(socket);
     if (!ctx) return;
     const { room, seat } = ctx;
@@ -361,14 +397,12 @@ io.on("connection", (socket) => {
     if (asker) asker.emit("undoResult", { accepted: !!accept });
     if (!accept) return;
 
-    setG(room.G);
-    const target = getG().history.find((h) => h.turn === offer.turn && h.turnNo === offer.turnNo);
+    const target = room.G.history.find((h) => h.turn === offer.turn && h.turnNo === offer.turnNo);
     if (!target) {
       if (asker) asker.emit("rejected", { err: "That point in the game has scrolled out of history." });
       return;
     }
-    applyUndoTo(target);
-    room.G = getG();
+    inGame(room, () => applyUndoTo(target));
     pushState(room);
   });
 
@@ -384,8 +418,8 @@ io.on("connection", (socket) => {
     releaseSocket(socket);
   };
 
-  socket.on("leave", detach);
-  socket.on("disconnect", () => { clearInterval(refill); detach(); });
+  on("leave", detach);
+  on("disconnect", () => { clearInterval(refill); detach(); });
 });
 
 /* ── housekeeping ────────────────────────────────────────────────────────── */

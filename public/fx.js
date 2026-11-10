@@ -3,7 +3,7 @@
    FX — the effect player.
 
    Loaded as a classic script, like engine.js, so it shares the same global
-   lexical scope as index.html's inline script and can see `G`, `CELL_NODES`,
+   lexical scope as app.js (the interface) and can see `G`, `CELL_NODES`,
    `PLAYERS`, `FORMS` and `SPELLS` by bare name.
 
    ── What this is ────────────────────────────────────────────────────────

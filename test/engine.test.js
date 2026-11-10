@@ -1844,6 +1844,47 @@ it("the sandbox really does relax what it claims to", () => {
   equal(getG().players[0].fp, engine.FP_CAP, "and the pool has topped itself back up");
 });
 
+describe("withGame is the only door a server needs");
+
+it("runs a call against the game it is handed, and hands the game back", () => {
+  const mine = newGame(0, SEED, { mode: "online" });
+  mine.turnNo = 0;
+  const { g: after } = engine.withGame(mine, () => beginTurn(0));
+  equal(after.turnNo, 1, "the call ran against the game that was passed in");
+});
+
+it("holds no game afterwards, so a stray call cannot reach another room", () => {
+  setG(null);
+  engine.withGame(newGame(0, SEED, { mode: "online" }), () => 1);
+  equal(getG(), null, "nothing is left loaded once the door closes");
+});
+
+it("returns the replacement when the engine swaps the game object", () => {
+  // A refused action rolls back with restore(), which REPLACES the game. A
+  // caller that kept the old object would lose every later move.
+  const mine = newGame(0, SEED, { mode: "online" });
+  mine.turnNo = 0;
+  engine.withGame(mine, () => beginTurn(0));
+  const { g: after, out } = engine.withGame(mine, () => applyAction(1, { t: "endTurn" }));
+  refused(out, "not your turn");
+  assert(after !== mine, "the rolled-back game is a new object, and it is the one returned");
+});
+
+it("puts the previous game back even when the call throws", () => {
+  const outer = freshGame();
+  let threw = false;
+  try { engine.withGame(newGame(0, SEED), () => { throw new Error("boom"); }); }
+  catch (e) { threw = true; }
+  assert(threw, "the error still reaches the caller");
+  equal(getG(), outer, "and the game that was loaded before is loaded again");
+});
+
+it("refuses an async callback", () => {
+  let threw = false;
+  try { engine.withGame(newGame(0, SEED), async () => 1); } catch (e) { threw = true; }
+  assert(threw, "a promise means another room could run in the gap");
+});
+
 /* ── report ───────────────────────────────────────────────────────────── */
 
 console.log("");

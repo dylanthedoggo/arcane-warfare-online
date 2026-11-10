@@ -1,54 +1,19 @@
 /* ══════════════════════════════════════════════════════════════════════════
    ARCANE WARFARE — THE MACHINE
 
-   The opponent, lifted out of index.html and into a file of its own. Nothing
-   here changed in the move: this is the same code, in the same order, with the
-   same comments, and both test suites pass identically either side of it.
+   A classic script, loaded after engine.js and fx.js and before app.js. Classic
+   scripts share one scope, so this file reads the engine's live `G` and calls
+   the engine and the interface by bare name. Every such name is used inside a
+   function body, never at the top level, so load order does not matter.
 
-   HOW IT IS LOADED, AND WHY THAT MATTERS. This is a classic script, loaded
-   after engine.js and fx.js and before the page's own inline script:
-
-       <script src="engine.js"></script>
-       <script src="fx.js"></script>
-       <script src="ai.js"></script>
-       <script> ...the interface, and the self-test suite... </script>
-
-   Top-level `let` and `const` in a classic script live in a lexical scope that
-   every classic script on the page shares. So this file reads `G` — declared
-   `let G = null` in engine.js — as a live binding rather than a copy, which is
-   exactly what a search that mutates the board in place and puts it back needs.
-   The same goes the other way: the interface and the tests below call into
-   searchBestMove, aiTakeTurn and the rest without importing anything.
-
-   What this file expects to find already in that shared scope:
-
-     from engine.js   G, CELLS, rc, rowOf, colOf, cellAt, isDark, isBarrier,
-                      DIAG, ORTHO, FORMS, SPELLS, PLAYERS, mkPiece, snapshot,
-                      restore, mulberry32, log, and the rules predicates —
-                      legalMovesFor, captureMoves, capturersFor, simpleMoves,
-                      canAct, canCapture, isAlly, isEnemy, promoRow, homeRow,
-                      countPieces, performMove, castSpell, drawSpell,
-                      discardCards, spellBlocker, and the various *Targets()
+   It expects:
+     from engine.js   G and the rules (performMove, castSpell, captureMoves, …)
      from fx.js       FX
-     from index.html  UI, NET, render, endTurnLocal, clearSelection,
-                      announceWinner, sq, pieceLabel, toast
+     from app.js      UI, NET, render, endTurnLocal, clearSelection,
+                      announceWinner, toast, raiseCurtain
 
-   Every one of those is referenced from inside a function body, never at the
-   top level of this file, so it does not matter that index.html's own
-   declarations run after this script does — by the time anything here is
-   called, they exist.
-
-   ON RUNNING THIS UNDER NODE. It does not, yet, and the reason is worth
-   writing down because it is not obvious. In Node, engine.js is a CommonJS
-   module and its `G` is module-local; `require()` hands back a snapshot of the
-   exported values, not live bindings. This file says `G.board[i]` in several
-   hundred places, and every one of them would be reading a `G` frozen at the
-   moment of import. engine.js anticipates this and offers setG/getG, and a
-   Node shim could bridge it with an accessor property on globalThis — but the
-   driver would still be missing endTurnLocal, render and UI, which live in the
-   page. Headless self-play is therefore still a browser-only affair. Getting
-   it into Node is a real piece of work and a separate one; this file being its
-   own file is the half of it that had to happen first.
+   Under Node, tools/bootstrap.js supplies the same scope. In a live game the
+   slow work also runs in ai-worker.js, which loads this same file.
    ══════════════════════════════════════════════════════════════════════════ */
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -79,8 +44,8 @@
  * gap between the machine and a good human.
  *
  *   depth         ceiling on iterative deepening; `timeMs` is what usually stops it
- *   timeMs        wall-clock for one root search — also the page freeze, since
- *                 the search runs on the main thread
+ *   timeMs        wall-clock for one root search. In a live game it runs on a
+ *                 worker thread (see aiThink), so the page stays responsive
  *   spells        "basic" prunes the candidate list hard and disables Chronos
  *   noise         root-only score jitter; the whole of "blunders on purpose"
  *   pace          animation pacing between driver beats. Cosmetic, not strength.
@@ -106,74 +71,22 @@ const AI_LEVELS = {
 };
 
 /**
- * Skilled's policy figures are the old hardcoded constants exactly — 3 plies,
- * 90 ms, 550 ms, +25 / +30 / +140 — so the self-play regression tests below,
- * which are all played at Skilled, keep measuring the same machine they always
- * did. Novice's policyDepth is pinned at 2 rather than derived: the old code
- * said Math.min(3, depth), and raising its depth to 3 would otherwise have
- * quietly upgraded its spell play as a side effect.
+ * The self-play tests are played at Skilled, so changing Skilled's figures
+ * changes what those tests measure. Novice's policyDepth is pinned at 2 on
+ * purpose: deriving it from `depth` would upgrade its spell play by accident.
  */
 
 /**
- * ── WHAT THESE KNOBS ARE ACTUALLY WORTH ────────────────────────────────────
+ * WHAT THE KNOBS ARE WORTH (measured with `npm run selfplay`)
  *
- * Measured with `npm run selfplay`, which is the first time any of it could be.
- * Before that, justifying a change to a number here meant running tournaments
- * by hand in a browser tab, and nobody was going to.
- *
- * `depth` AND `timeMs` ARE NOT INDEPENDENT, and `depth` is much the weaker of
- * the two. It is only a ceiling on iterative deepening; the budget is what
- * usually stops the search first, so the ceiling means nothing unless the
- * budget can reach it. Ruthless on the opening position, ceiling of 10:
- *
- *     4,800 nodes   (AI.fast, which the page's own suite uses)   reaches 4
- *     7,200 nodes   (selfplay --scale 0.02)                      reaches 5
- *     18,000 nodes  (selfplay --scale 0.05)                      reaches 6
- *     72,000 nodes  (--scale 0.2)                                reaches 8
- *     360,000 nodes (its own 3000 ms — what a player faces)      reaches 10
- *
- * So Ruthless plays at its stated depth against a person and nowhere else.
- * RAISING `depth` ON ITS OWN DOES NOTHING; the budget has to go up with it, and
- * `timeMs` is the knob that does that. Lowering it, on the other hand, bites
- * immediately and everywhere.
- *
- * And the extra plies buy less here than the ladder implies. Ruthless against a
- * copy of itself capped at depth 2 — every other figure identical — wins 7-1,
- * but by only 13 pieces across eight games. Real, and not a rout.
- *
- * `noise` IS WORTH MUCH LESS THAN ITS SIZE SUGGESTS, which was the surprise.
- * Ruthless against a copy of itself given `noise: 60` — blundering harder than
- * Novice's 38 — comes out 3-4 with one drawn, +1 piece across eight games. That
- * is no measurable handicap at all.
- *
- * AND THE REASON IS THE DESIGN WORKING, not failing. searchBestMove is careful
- * that a sample can never outweigh a real difference — "±38 of jitter is
- * nowhere near two pawns, so the triple must win every single time". Measured
- * across one game, that guarantee turns out to cover almost everything:
- *
- *     turn  legal moves  best-to-worst spread  inside a ±60 band
- *       12       16              17 points        all 16
- *       24       23              28 points        all 23
- *       48       24             452 points        2 of 24
- *       60       21             175 points       16 of 21
- *
- * In a quiet position every move is worth about the same, so the jitter
- * shuffles moves that were interchangeable — a sixth of a pawn between the best
- * and the worst of sixteen. In the sharp position, where choosing wrongly would
- * cost four pawns, only two moves are inside the band at all, so the jitter
- * cannot reach a bad one. Noise only ever operates where the choice does not
- * matter, which is precisely what it was built to do.
- *
- * Making it a stronger lever would mean letting it lose material on purpose,
- * and that is a different card to play: it would produce a level that hangs
- * pieces rather than one that plays slightly loosely. Worth knowing before
- * anyone reaches for this number to make Novice easier.
- *
- * The practical reading, for anyone making Novice easier or harder: `noise` is
- * a weak lever. `depth` does nothing without `timeMs`. `timeMs` itself, and the
- * policy figures, are where the difficulty actually lives — and note that
- * Novice's shallow search and small budget, not its jitter, are most of why it
- * is beatable. None of this was knowable before there was a way to measure it.
+ * - `depth` is only a ceiling. The budget (`timeMs`) usually stops the search
+ *   first, so raising `depth` alone does nothing. Ruthless reaches its depth
+ *   of 10 only on its full 3000 ms (about 360,000 nodes).
+ * - `noise` is a weak lever. The jitter can only swap moves whose scores are
+ *   close, so it never throws material away. Ruthless with noise 60 scored
+ *   level with Ruthless with none.
+ * - The difficulty lives in `timeMs` and the policy figures. Novice is
+ *   beatable because of its shallow search and small budget, not its jitter.
  */
 
 /** Shortlist caps, widened for the levels that have the budget to score more. */
@@ -197,40 +110,23 @@ let AI = {
   // neighbour, is set the same ad-hoc way and clamps the budget rather than
   // changing its currency. See "what a search may spend".
   deterministic: false,
-  // Multiplier on every search budget; 1 is each level's own figure.
-  //
-  // It exists because `fast` cannot do this job. Clamping to 40 ms makes
-  // Ruthless's 3000 and Novice's 250 into the same number, and twelve times the
-  // thinking is most of what separates those two rungs — so the ladder measured
-  // through `fast` has had the greater part of its own ladder removed. A scale
-  // buys games-per-minute at a cost every level pays in proportion, which is
-  // the difference between a cheap measurement and a misleading one.
-  //
-  // It is also what makes `timeMs` tunable at all: a harness that ignores a
-  // knob cannot be used to set it.
+  // Multiplier on every search budget; 1 is each level's own figure. `fast`
+  // cannot do this job: it clamps every level to the same 40 ms, which removes
+  // most of the difference between the levels being measured.
   budgetScale: 1,
 };
 
-/** Abandon whatever the machine was doing; any in-flight beat becomes a no-op. */
-function aiCancel() { AI.gen++; AI.thinking = false; AI.moveSteps = null; }
+/** Abandon whatever the machine was doing; any in-flight beat becomes a no-op,
+ *  and a thought still running on the worker thread is thrown away. */
+function aiCancel() { AI.gen++; AI.thinking = false; AI.moveSteps = null; aiDropThought(); }
 const aiCfg = () => AI_LEVELS[AI.level];
 /* ── DUEL — both chairs are machines ────────────────────────────────────────
-   Everything else here is written around ONE machine: `AI.side` is the seat it
-   plays and `AI.level` is how hard it plays, and the search reads both from
-   several hundred places. Giving each seat its own brain by threading a second
-   set through the search would be a rewrite of the file for a spectator mode.
+   The search is written around ONE machine (`AI.side`, `AI.level`). A duel
+   keeps that: `AI.duel` holds a level per seat, and aiTakeSeat() repoints
+   side and level at the top of every turn.
 
-   So it does not. `AI.duel` holds the two level names, and that pair becomes
-   "whose turn is being thought about right now" — repointed at the top of every
-   turn by aiTakeSeat(). One brain is ever in the chair at a time, which is also
-   the truth of it: turns strictly alternate, so a second simultaneous search
-   would have nothing to do.
-
-   The trap, worth naming because it is invisible: anything asking "how hard
-   does SEAT s play?" must go through aiLevelFor(s) and not read AI.level, which
-   during a duel answers for whoever is thinking rather than for the seat asked
-   about. The player strip got this wrong first, and labelled both machines with
-   the level of the one on move.
+   The trap: "how hard does SEAT s play?" must go through aiLevelFor(s).
+   AI.level answers for whoever is thinking, not for the seat asked about.
    ─────────────────────────────────────────────────────────────────────────── */
 
 /** The ladder, weakest first. The menus and the ordering test both read it. */
@@ -250,17 +146,9 @@ function aiTakeSeat() {
 }
 
 /* ── how fast to play an exhibition back ────────────────────────────────────
-   A turn takes about eight seconds of wall clock and almost none of it is
-   thinking: it is the deliberate gaps between the driver's beats and the length
-   of the animations, both there so a person can follow what happened while
-   taking their own turn in between. Watching costs you two of those a round and
-   gives you nothing to do during either.
-
-   What "faster" scales is PRESENTATION ONLY. `pace` is documented in the level
-   table as cosmetic and FX.rate stretches animations; neither is a search or
-   policy budget, and nothing here may ever touch one. A machine that thought
-   less hard because the watcher was impatient would not be the machine you
-   asked to watch.
+   "Faster" scales PRESENTATION ONLY: the pauses between beats and the length
+   of the animations. It must never touch a search or policy budget — a
+   machine that thinks less because the watcher is impatient is a weaker one.
    ─────────────────────────────────────────────────────────────────────────── */
 
 const WATCH_SPEEDS = [
@@ -277,31 +165,14 @@ const watchRate = () => (AI.duel ? WATCH_SPEEDS[AI.watch].rate : 1);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ── the machine's own randomness ───────────────────────────────────────────
-   Two things here are decided by a coin flip: the root jitter that makes the
-   easier levels beatable, and the "random" opponent self-play is measured
-   against. Both used to call Math.random(), and that made a nonsense of the
-   engine's care about seeds. Every draw, every quantum roll and every refereed
-   timeout derives from G.seed, which is what makes a game replayable — and the
-   seed reached the referee and stopped there. Two runs of the same seeded game
-   picked different moves.
+   Two coin flips: the root jitter of the easier levels, and the "random"
+   opponent of self-play. Both are seeded from the game seed, the turn number
+   and a counter, like drawSpell — Math.random() would make a seeded game
+   unrepeatable. Each has its own multiplier so the streams never fall in step.
 
-   Worse, it was invisible from Ruthless, which is where anyone would look
-   first: noise 0 multiplies the sample to zero, so the one level that never
-   jitters reproduced perfectly and the two that do never did.
-
-   So both are seeded the way drawSpell is — off the game seed, the turn number
-   and a monotonic counter — each with a multiplier of its own so the two
-   streams cannot fall into step with each other or with the draw stream.
-
-   THE COUNTER LIVES ON G, which is deliberate on both counts: a snapshot
-   carries it, and a rewind takes it back. Chronos's Gaze and the policy layer's
-   simulations both put the game back to an earlier state, and a stream that
-   kept running through a rewind would make the replay of a rewound game diverge
-   from the game itself.
-
-   IT ADVANCES PER CALL, not per turn. Sixteen searches of one position must not
-   all blunder identically — see the "varies from run to run" test in the page's
-   suite, which is the check that a per-turn counter would silently break.
+   The counter (G.aiSeq) lives on G so a snapshot carries it and a rewind takes
+   it back. It advances per CALL, not per turn: sixteen searches of one
+   position must not all blunder the same way.
    ─────────────────────────────────────────────────────────────────────────── */
 
 const AI_SALT_JITTER = 5279;      // root-move jitter
@@ -309,13 +180,8 @@ const AI_SALT_RANDOM = 3001;      // the "random" opponent choosing its move
 
 /**
  * A seeded stream for one decision. `salt` names which stream.
- *
- * The guard is not decoration. `G.aiSeq` is declared in newGame, so any game
- * this file plays has it — but a game restored from a state written before that
- * field existed would not, and `undefined++` is NaN, which sticks: every later
- * call would seed identically and the machine would blunder the same way
- * forever without once throwing. Silent, and exactly the kind of thing seeding
- * exists to rule out.
+ * The guard matters: a game saved before `aiSeq` existed has none, and
+ * `undefined++` is NaN, which would seed every later call identically.
  */
 function aiRng(salt) {
   if (typeof G.aiSeq !== "number") G.aiSeq = 0;
@@ -328,50 +194,28 @@ let AI_NODES = 0, AI_DEADLINE = 0, AI_TIMEUP = false, AI_NODE_DEADLINE = 0;
 /* ── fast make / unmake (search only — no logging, no FP, no penalties) ──── */
 
 /**
- * A Hollow's shell the search is entitled to know about.
+ * A Hollow's shell the search is entitled to know about: its OWN. It may not
+ * reason about an enemy shell — viewFor deletes that field for a person, and
+ * the machine plays by the same rule. It finds out by spending the jump.
  *
- * The machine may reason about its OWN shells — it cast them — and it has to,
- * or a shell it paid 3 Focus for would be worth nothing to it. It may NOT
- * reason about the opponent's: a search that steers around a shelled enemy
- * pawn has read a field viewFor deletes, and the card is dead. So the machine
- * jumps into enemy shells exactly like a person does, and finds out the same
- * way — by spending the jump.
- *
- * (canCapture still reads `hollow` on both sides, so the search can infer an
- * enemy shell from a pawn that declines a jump it plainly has. That leak is
- * older than this function and is documented at engine.js canCapture. Named
- * here so it is not rediscovered as something new.)
+ * (canCapture reads `hollow` on both sides, so an enemy shell can still be
+ * inferred from a pawn that declines a jump. Known; see engine.js canCapture.)
  */
 const aiOwnShell = (v) => !!v.hollow && v.owner === AI.side;
 
 /* ── position hashing ───────────────────────────────────────────────────────
-   A single number that names the position, so the search can recognise one it
-   has already scored. With whole-turn moves and chain jumps, the same position
-   is reached by different routes constantly — two pawns advancing in either
-   order, a chain that could have started at either end — and without a name for
-   it, every one of those is searched again from nothing.
+   One number that names the position, so the search can recognise a position
+   it already scored. Zobrist hashing: every (square, attribute) pair has a
+   fixed number, and the hash is the XOR of the ones that are true. XOR undoes
+   itself, so the hash is cheap to keep up to date.
 
-   ZOBRIST HASHING is the standard trick: give every (square, attribute) pair a
-   fixed random number and XOR together the ones that are true. XOR is its own
-   inverse, so a piece leaving a square is undone by XORing the very same value
-   back in, which is what makes the hash cheap to keep up to date.
+   The numbers are SEEDED, so a noiseless level picks the same move twice.
 
-   THE NUMBERS ARE SEEDED, not random. mulberry32 with a fixed seed gives the
-   same table on every page load, which is what lets a noiseless level pick the
-   same move twice — see the determinism test. Math.random() here would make the
-   machine's play depend on when the tab was opened.
+   NOT in the hash: `quantumReal`, and `hollow` on an enemy piece. The machine
+   may not see those, and a cache key would be a back door to them.
 
-   WHAT IS NOT IN IT. `quantumReal` never appears, and neither does `hollow` on
-   an enemy piece. Those are the two things the machine is not entitled to see,
-   and a cache key is a back door into exactly that: two positions differing
-   only in a secret would get different keys, and the search would be steering
-   by information it is supposed to be guessing at. Own shells ARE included,
-   because applyStep already reasons about those and must not confuse one with
-   a bare pawn. See aiOwnShell.
-
-   Everything sideScore reads is in here. That is not decoration — a field the
-   evaluator prices but the key ignores means two positions that score
-   differently share a name, and the table hands back the wrong answer.
+   Everything sideScore reads IS in it. A field the evaluator prices but the
+   key ignores gives two different positions one name.
    ─────────────────────────────────────────────────────────────────────────── */
 
 const ZW = 24;                                   // hash channels per square
@@ -410,15 +254,10 @@ function boardHash() {
 
 let AI_HASH = 0;
 
-/* The squares one step can disturb. Reused rather than allocated: applyStep
-   runs millions of times a search, and it never re-enters itself between
-   filling this and reading it back — expandChain recurses AROUND applyStep,
-   not through it.
-
-   Being generous with what goes in here costs nothing at all. A square whose
-   occupant does not change is XORed out and then straight back in, and XOR
-   undoes itself. Being STINGY is what would cost, so the list is built from
-   what a step could touch rather than what it will. */
+/* The squares one step can disturb. Reused, not allocated: applyStep runs
+   millions of times a search and never re-enters itself. Listing a square that
+   does not change costs nothing (XORed out and back in); missing one corrupts
+   the hash, so the list is built from what a step COULD touch. */
 const ZTOUCH = new Int32Array(8);
 let ZTN = 0;
 function ztAdd(i) {
@@ -429,17 +268,12 @@ function ztAdd(i) {
 
 /**
  * One life between two bodies: when a twinned body leaves the board, the other
- * half goes with it. This is removePiece's tail and severTwin, minus the
- * logging and the animation — see engine.js removePiece.
+ * half goes with it (engine.js removePiece). Both ends are recorded so
+ * undoStep can restore the pair.
  *
- * Both ends of the link are cleared and both are recorded, because undoStep has
- * to put the `twin` id back on the survivor as well as on the body that died.
- * A pair is rare enough that the allocation here is never on the hot path.
- *
- * `G.twinStep` is deliberately NOT touched. The engine clears it when the
- * partner owed a movement, but the search has no concept of that obligation —
- * it explores one movement per turn per side — so there is nothing here to
- * clear. The live driver still takes the second movement; see aiFinishMove.
+ * `G.twinStep` is NOT touched: the search explores one movement per turn, so
+ * it has no second movement to cancel. The live driver takes it; see
+ * aiFinishMove.
  */
 function aiSeverTwin(host, hostIdx, rec) {
   const id = host.twin;
@@ -453,37 +287,22 @@ function aiSeverTwin(host, hostIdx, rec) {
 
 /**
  * Execute one hop on the live board, fast, and return what undoStep needs to
- * put it back. No logging, no Focus, no penalties — this is the search's
- * private copy of the referee, and it has to agree with the real one about
- * WHAT ENDS UP ON THE BOARD or the tree is scoring positions that cannot occur.
+ * put it back. No logging, no Focus, no penalties. It must agree with the
+ * referee about WHAT ENDS UP ON THE BOARD — test/ai.test.js compares the two
+ * jump by jump.
  *
- * Two of the cards need a word about how they are modelled here.
+ * TEMPORAL TWIN is public, so it is obeyed: a jump or a crown that removes one
+ * body removes both.
  *
- * TEMPORAL TWIN is unambiguous and entirely public, so it is simply obeyed: a
- * jump that kills one body kills both, and so does a coronation. Anything less
- * and the search undervalues every capture on a twinned pawn by a whole pawn.
+ * QUANTUM PAWN cannot be obeyed without reading `quantumReal`, which is the
+ * whole card. So a jump at a superposition is modelled by what is true either
+ * way: the struck square ends up empty, the partner is left alone (sideScore
+ * already prices it at half a pawn), and the chain stops, because the jump
+ * may have found nothing.
  *
- * QUANTUM PAWN cannot be obeyed, because obeying it would mean reading
- * `quantumReal` — which half is the real pawn — and that field is the entire
- * card. So the jump is modelled by what is true in BOTH outcomes and no more:
- *
- *   - The struck body always leaves the board. If it was real it was captured;
- *     if it was not, collapseQuantum nulls the square anyway. Either way that
- *     square is empty afterwards.
- *   - The partner is left exactly as it stands, link and all. Half of a
- *     superposition is already priced at half a pawn in sideScore, and half a
- *     pawn is precisely the expected value of a body that is a whole pawn half
- *     the time and nothing the other half. The existing discount IS the model.
- *   - The chain stops. This is the part the old code got wrong and the part
- *     that actually costs games: a jump into a superposition may whiff, and a
- *     whiff takes nothing and continues nothing (engine.js performMove). A
- *     search that plans four hops through a superposition is planning on a coin
- *     landing its way, and it should not be allowed to.
- *
- * Two consequences are left deliberately unmodelled, both coin flips the
- * machine has no right to resolve: the lifetime capture tally is incremented as
- * though the jump connected (it only gates the Phaser), and an Eye For An Eye
- * mark on a superposed body does not drag the attacker down.
+ * Not modelled, as coin flips the machine may not resolve: the capture tally
+ * is raised as if the jump connected, and an Eye For An Eye mark on a
+ * superposed body does not kill the attacker.
  */
 function applyStep(from, mv) {
   const p = G.board[from];
@@ -518,14 +337,20 @@ function applyStep(from, mv) {
     // The superposition is settled before anything else looks at the victim,
     // in the same order resolveCapture settles it — armor, the shell and the
     // Eye's mark all assume there is a piece there to reason about.
+    //
+    // WHICH of shell / armor / kill it is comes from the engine's jumpOutcome,
+    // not from a second list of checks here. Only the board update is ours.
     if (v.quantum) { G.board[mv.victim] = null; rec.quantumHalt = true; }
-    else if (v.armor) { v.armor = false; rec.victimKeptArmor = true; }
-    else if (aiOwnShell(v)) {
-      rec.victimKeptShell = true;
-      rec.victimHome = v.hollowHome;
-      v.hollow = false; v.hollowHome = -1;
+    else {
+      const outcome = jumpOutcome(v, aiOwnShell(v));
+      if (outcome === "shell") {
+        rec.victimKeptShell = true;
+        rec.victimHome = v.hollowHome;
+        v.hollow = false; v.hollowHome = -1;
+      }
+      else if (outcome === "armor") { v.armor = false; rec.victimKeptArmor = true; }
+      else { G.board[mv.victim] = null; aiSeverTwin(v, mv.victim, rec); }
     }
-    else { G.board[mv.victim] = null; aiSeverTwin(v, mv.victim, rec); }
     G.board[from] = null;
     G.board[mv.to] = p;
     // The retreat, mirroring breakShell — and for the same reason it is done
@@ -631,20 +456,10 @@ function expandChain(origin, at, steps, out, owner) {
   for (const mv of caps) {
     const rec = applyStep(at, mv);
     steps.push({ from: at, mv });
-    const stillThere = !rec.attackerDied && G.board[mv.to];
-    // `quantumHalt` is the jump that may have found nothing. The engine ends
-    // the sequence there whether it did or not — a chain is a chain of
-    // CAPTURES, and half the time that was not one — so the search must not
-    // keep extending past it and plan on the coin landing its way.
-    //
-    // `victimKeptShell` is the same story for a Hollow: the shell absorbed the
-    // jump, nothing was taken, and a chain is a chain of CAPTURES. Without it
-    // the search plans a free extra hop off the one piece that owes it nothing.
-    //
-    // The Sentinel used to add another way to halt here and no longer exists;
-    // promotion is otherwise the only thing that stops a sequence the attacker
-    // survived. performMove agrees — see engine.js.
-    const halt = !stillThere || rec.promoted || rec.quantumHalt || rec.victimKeptShell;
+    // The engine's own rule decides whether the chain goes on — the same
+    // function performMove asks. `quantumHalt` stands in for a whiff: the jump
+    // MAY have found nothing, and the search may not plan on the coin.
+    const halt = jumpEndsChain(rec.quantumHalt, rec.victimKeptShell, rec.attackerDied, rec.promoted);
     if (halt) out.push({ steps: steps.slice(), capture: true, from: origin, to: mv.to });
     else expandChain(origin, mv.to, steps, out, owner);
     steps.pop();
@@ -673,24 +488,13 @@ function turnMoves(owner) {
 }
 
 /**
- * The same list, minus anything Stutter has forbidden — what the machine may
- * actually choose from at the ROOT of its search.
+ * turnMoves minus anything Stutter has forbidden — what the machine may choose
+ * from at the ROOT. Only at the root: deeper plies are later turns, where the
+ * ban is spent. The machine does not go through the referee, so without this
+ * it could replay a move a player would be refused.
  *
- * Only at the root. Deeper plies are later turns, where the ban has long since
- * been spent, so filtering inside turnMoves would quietly delete legal replies
- * from every branch of the tree.
- *
- * The machine does not end its turn through the referee, so the refusal in
- * dispatchAction never binds it. Without this it would replay the very move
- * that was unmade, be refused online, and offline simply take it — getting
- * away with what a player cannot.
- *
- * The ban is compared against the FIRST STEP, because that is what the engine
- * records: performMove calls noteTurnAction on the opening hop, and a chain's
- * later hops are continuations of a turn already identified. A turn entry's own
- * `from`/`to` describe the whole sequence — `to` is where the piece finally
- * LANDS, and capture entries carry no `kind` at all — so comparing those
- * matched nothing on any capturing turn and the ban went unenforced.
+ * The ban is compared with the FIRST STEP of a turn, because that is what the
+ * engine records (performMove → noteTurnAction).
  */
 function banAction(m) {
   const s = m.steps[0];
@@ -728,29 +532,12 @@ const VAL_ARMOR = 60;
 const HAND_USEFUL = 5;
 
 /**
- * Focus Points and cards with DIMINISHING RETURNS, which matters more than it
- * sounds. With flat values the machine discovers that drawing (+1 FP, +1 card)
- * always scores better than any quiet move, and simply draws every turn
- * forever. In truth a turn only lets you spend so much: the ninth Focus Point
- * and the fourth card are nearly dead weight, so their marginal value has to
- * fall below the worth of actually developing the position.
+ * Focus Points and cards, with DIMINISHING RETURNS and a hard clamp.
  *
- * DIMINISHING WAS NOT ENOUGH, and the way that surfaced is worth keeping. The
- * card term fell to +4 and then stayed there — so the twentieth card was worth
- * exactly as much as the fifth, and drawing remained forever, if barely,
- * positive. That is harmless while a quiet move is worth more than 4. It is not
- * harmless in a standoff, where every move on offer is worth LESS than nothing
- * because the side that breaks the wall loses the pawn: measured in one
- * headless game, the best of twenty-two legal moves scored -96 and standing pat
- * scored better than all of them. Two machines found that equilibrium and drew
- * cards at each other for a hundred and forty turns, 120 draws to 20 moves,
- * finishing 24 pieces to 24 having never once made contact.
- *
- * So cards are clamped the way Focus already was, and for the same reason. The
- * clamp is not what breaks the standoff — passing is worth real tempo in a
- * zugzwang and no card price changes that — but it stops the evaluator paying
- * for a hand nobody can spend, and it is the half of the fix that belongs here.
- * The other half is aiShouldDraw's, which is where the pass actually lives.
+ * With flat values the machine finds that drawing (+1 FP, +1 card) beats every
+ * quiet move and draws forever. A turn can only spend so much, so the ninth
+ * Focus Point and the fourth card are worth little, and cards past
+ * HAND_USEFUL are worth nothing. aiShouldDraw holds the other half of this.
  */
 function resourceValue(fp, cards) {
   // Focus past the ceiling is not merely worth less, it does not exist: the
@@ -763,29 +550,17 @@ function resourceValue(fp, cards) {
 }
 
 /* ── the mobility term ──────────────────────────────────────────────────────
-   How many quiet moves a piece has, counted rather than listed.
+   How many quiet moves a piece has — the same number as
+   `simpleMoves(i).length` (the pinned-evaluation tests keep it so), but
+   counted without building an array at every leaf. This loop was most of
+   sideScore's cost.
 
-   This is the same number `simpleMoves(i).length` gives — the pinned-evaluation
-   tests exist to keep it that way — but it is arrived at without building an
-   array of move objects for every piece on the board at every leaf of the
-   search. Measured on a 46-piece midgame: the mobility term was 2.24µs of
-   sideScore's 3.68µs, and sideScore itself was between a third and two fifths
-   of the entire search.
-
-   The Enchanter is the reason this has its own function rather than being a
-   tighter loop in place. Its move is a SWAP WITH ANY PIECE ANYWHERE, so
-   simpleMoves walks all 144 squares for it — and the answer it walks 144
-   squares to compute is "how many pieces are on the board, less itself". One
-   Enchanter cost about 1.3µs of every evaluation in the game. Now it costs a
-   subtraction, and the count it subtracts from is gathered once per side
-   rather than once per Enchanter.
+   The Enchanter swaps with ANY piece, so its count is "pieces on the board,
+   less itself" — a subtraction, not a walk of all 144 squares.
    ─────────────────────────────────────────────────────────────────────────── */
-/* How many squares are occupied, gathered at most once per sideScore call and
-   only when something actually asks. Almost no position has an Enchanter in
-   it, and every position would otherwise pay for the count. Module-level
-   rather than a closure for the same reason ZTOUCH is: a closure here is an
-   allocation, and this runs twice per leaf. sideScore never re-enters itself,
-   so one scratch value is safe. */
+/* Occupied squares, counted at most once per sideScore call and only when an
+   Enchanter asks. Module-level, not a closure: this runs twice per leaf and
+   sideScore never re-enters itself. */
 let AI_OCC = -1;
 function aiOccupied() {
   if (AI_OCC < 0) { let n = 0; for (let j = 0; j < CELLS; j++) if (G.board[j]) n++; AI_OCC = n; }
@@ -822,22 +597,11 @@ function aiMobility(i, p) {
   return n;
 }
 
-/* WHAT WAS MEASURED, AND WHAT WAS LEFT ALONE. On a 48-piece board this costs
-   about 4.2µs, and evaluate() calls it twice at every leaf — between a third
-   and two fifths of an entire Ruthless search. Of that 4.2µs, roughly 3.0 is
-   the mobility loop, 1.1 the per-piece material and position, and 0.08 the
-   tail below (Focus, hands, the board-altering spells).
-
-   Keeping a running material total in applyStep/undoStep was considered and
-   not done. It can only ever reach that 1.1µs — about a tenth of the search —
-   and it would put a second, silently-desynchronisable copy of the evaluator
-   inside the make/unmake path, which is the one place in this file where a
-   quiet mistake is invisible until the machine starts playing badly. The
-   mobility loop was the expensive part and it was cheap to fix.
-
-   Caching the tail per search was also considered. It is 2% of this function,
-   and it would need invalidating against a G that tests and the policy layer
-   both replace underneath it. Not worth the trap. */
+/* sideScore is a third or more of the whole search; most of that was the
+   mobility loop, now fixed. A running material total in applyStep/undoStep was
+   considered and NOT done: it would save about a tenth of the search and put a
+   second copy of the evaluator inside make/unmake, where a mistake is
+   invisible. */
 function sideScore(side) {
   let s = 0, mobility = 0;
   AI_OCC = -1;
@@ -852,16 +616,9 @@ function sideScore(side) {
     // can count the bodies — but `quantumReal` is never touched, here or
     // anywhere else the machine looks. That is the blindness contract.
     if (p.quantum) s -= VAL_PAWN / 2;
-    // A twinned body is a whole pawn — both are real — but the pair shares one
-    // life, so a single jump collects both. Priced on each half, which comes to
-    // roughly a third of the pair.
-    //
-    // applyStep now takes both bodies when either dies, so within the horizon
-    // the search prices a shared life for itself and this term is only the
-    // standing risk beyond it. Left where it is: a pair the search cannot
-    // currently reach is still a pair worth less than two pawns, and a term
-    // that vanished as soon as a capture came into view would make the machine
-    // value its own twins differently depending on how far it could see.
+    // A twinned body is a whole pawn, but the pair shares one life. applyStep
+    // takes both bodies when one dies, so the search prices that inside its
+    // horizon; this term is the standing risk beyond it.
     if (p.twin) s -= 34;
     if (p.rank === "pawn") {
       // Closer to the crown is worth more; the last two rows sharply so.
@@ -888,15 +645,10 @@ function sideScore(side) {
   s -= Math.min(P.noTransform, 3) * 6;
   if (P.costCap > 0) s -= 10;
 
-  // The board-altering spells leave their effect in fields of their own rather
-  // than on any piece. Without a term here the evaluator cannot see the
-  // difference the cast made, aiSimValue returns roughly the baseline, and the
-  // machine quietly decides every one of them is worthless — so each gets
-  // priced, however roughly.
-  //
-  // The mobility loop above already reflects a Chokepoint's seal and a live
-  // Wraparound, since both change what simpleMoves returns; these are the
-  // things it CANNOT see.
+  // The board-altering spells leave their effect in fields of their own, not
+  // on a piece. Without a term here the evaluator cannot see what the cast
+  // did, and the machine decides every one of them is worthless. Chokepoint
+  // and Wraparound already show up in mobility; these do not.
   if (G.mustCapture && G.mustCapture.player === side) s -= 12;   // an obligation, not an option
   // Stutter, priced as a cost to its VICTIM — which evaluate() turns into the
   // caster's gain for free. This is only half the judgement, and deliberately
@@ -908,13 +660,8 @@ function sideScore(side) {
   if (G.stutter && G.stutter.player === side)
     s -= G.stutter.banned ? STUTTER_DENIAL + 20 : STUTTER_DENIAL;
   if (G.rift) {
-    // A rift is worth most to whoever has a piece near a mouth, and it is
-    // open to both sides — so price proximity, not ownership.
-    //
-    // Counted rather than collected, for the reason aiMobility is: adjacentTo
-    // builds an array, and the only thing wanted from it here is how long it
-    // is. Measured at 0.43µs of every evaluation for as long as a rift stands
-    // open, which is a tenth of the evaluator for a term worth a few points.
+    // Open to both sides, so price proximity to a mouth, not ownership.
+    // Counted, not collected — adjacentTo builds an array.
     s += 6 * (aiAdjacentAllies(G.rift.a, side) + aiAdjacentAllies(G.rift.b, side));
   }
   return s;
@@ -943,27 +690,17 @@ let KILLERS = [];          // KILLERS[ply] = [keyA, keyB], most recent first
 let HISTORY = new Map();   // key -> how often, and how deep, it caused a cutoff
 
 /* ── the transposition table ────────────────────────────────────────────────
-   "I have scored this exact position to at least this depth before, and here is
-   the answer." Unlike the two tables above, this one is NOT a pure ordering
-   hint — it returns scores, and a wrong entry is a wrong move. So the rules
-   about when an entry may be trusted are the whole of the design.
+   "I have scored this exact position to at least this depth before." Unlike
+   the ordering tables this returns SCORES, so a wrong entry is a wrong move.
 
-   THE HASH COVERS THE BOARD. The evaluation does not: resourceValue reads Focus
-   and hand size, and there are terms for G.stutter, G.rift, G.mustCapture and
-   P.extraTurns, none of which are pieces on squares. That is sound only for as
-   long as those cannot change, which within a single search they cannot —
-   applyStep moves pieces and nothing else.
+   The hash covers the board. The evaluation also reads Focus, hand size,
+   G.stutter, G.rift, G.mustCapture and extra turns. Within one search those
+   cannot change. Between searches they do — the policy layer casts a spell
+   and searches the result — so every entry carries AI_EPOCH, bumped at the
+   start of each search. An entry from an older epoch is simply not seen.
 
-   Between searches they very much can, and the POLICY layer changes them on
-   purpose: aiSimValue casts a spell on a snapshot and searches the result, so
-   the same board with the same pieces is genuinely worth something different.
-   Hence AI_EPOCH — a counter bumped at the start of every search, stamped on
-   every entry, and checked on every probe. An entry from a previous epoch is
-   not evicted, it is simply invisible, which costs nothing and means no array
-   ever has to be cleared.
-
-   AI_TT switches the whole thing off. The tests use it to prove the table
-   changes what the search COSTS and not what it CONCLUDES.
+   AI_TT switches the table off; the tests use it to prove the table changes
+   what a search COSTS and not what it CONCLUDES.
    ─────────────────────────────────────────────────────────────────────────── */
 
 const TT_BITS = 16, TT_SIZE = 1 << TT_BITS, TT_MASK = TT_SIZE - 1;
@@ -1039,41 +776,20 @@ function orderMoves(moves, ply = 0) {
 /* ── quiescence ─────────────────────────────────────────────────────────────
    Captures only, so the search never stops in the middle of a trade.
 
-   THERE IS NO STAND-PAT HERE, and that is the one thing about this function
-   worth knowing. "Standing pat" is the chess technique of assuming the side to
-   move can simply decline to capture and bank the position as it stands, which
-   puts a floor under the score: no sequence of trades can make things worse
-   than not trading at all.
-
-   In chess that is true. Here it is false — captures are compulsory, which is
-   why turnMoves offers nothing else when one exists, and why the referee
-   refuses a quiet move with a jump on the board. A side that is forced into a
-   losing exchange has no walking away from it, and a floor under the score is
-   simply a lie about a position the machine has looked directly at. It was
-   worth a piece to it, repeatedly: every trap that works by making a bad
-   capture mandatory read as free.
-
-   So the capture list is fetched FIRST, and the floor is only laid down when
-   the list is empty — when declining really is an option because there is
-   nothing to decline.
+   THERE IS NO STAND-PAT while a capture exists. In chess the side to move may
+   decline to capture, which puts a floor under the score. Here captures are
+   compulsory, so a side forced into a losing exchange cannot walk away, and a
+   floor would be a lie. The capture list is fetched FIRST and the floor is
+   used only when the list is empty.
    ─────────────────────────────────────────────────────────────────────────── */
 function quiesce(owner, alpha, beta, ply, base = 0) {
   // Capture chains can fan out badly in a crowded midgame, so this honours the
   // clock too — without it a single quiescence call could run unbounded.
   if ((++AI_NODES & 511) === 0 && aiOutOfBudget()) AI_TIMEUP = true;
 
-  /* A board swept clean is a WIN, not a large material lead, and alphabeta has
-     always said so. Quiescence did not, so the one place a forced win is most
-     likely to be found — in the middle of a capture flurry, which is the only
-     thing this function looks at — was the one place it came back priced as an
-     ordinary material edge, and therefore tradeable against one.
-
-     `base` is the caller's distance from the root, and it is threaded through
-     so the mate distance stays root-relative, exactly as alphabeta's own
-     -MATE + ply is. Counting only the quiescence ply would make a win found
-     five plies deep score HIGHER than one found two plies deep, purely because
-     the flurry it was found in started later — and the machine would take the
-     slower kill. */
+  /* A board swept clean is a WIN, not a material lead. `base` is the caller's
+     distance from the root, so the mate distance stays root-relative and a
+     faster win scores higher — the same scale as alphabeta's -MATE + ply. */
   if (countPieces(owner) === 0) return -MATE + base + ply;
   if (countPieces(1 - owner) === 0) return MATE - base - ply;
 
@@ -1184,31 +900,16 @@ function alphabeta(owner, depth, alpha, beta, ply = 0) {
 }
 
 /**
- * Iterative deepening with a wall-clock cap. Returns { move, score, depth }.
+ * Iterative deepening with a budget. Returns { move, score, depth, nodes }.
  *
- * THE JITTER IS NOT PART OF THE SEARCH, and keeping those two things apart is
- * most of what this function is careful about. "Search honestly, then choose
- * sloppily" is the intended shape of a level that blunders on purpose; the
- * blunder is meant to be a wrong CHOICE among moves it understood, not a
- * misunderstanding of the moves.
+ * THE JITTER IS NOT PART OF THE SEARCH. A level that blunders on purpose must
+ * search honestly and then choose sloppily. So alpha always comes from the
+ * raw score, a level that jitters searches every root move with a full window
+ * (a bound is not a score, and must not be jittered), and the sampling happens
+ * once, at the end, on the last completed ranking. Ruthless has noise 0 and
+ * none of this applies to it.
  *
- * It used to be the second thing, in three separate ways:
- *
- *   - the noised value became `alpha`, the "nothing worse than this is worth
- *     looking at" threshold, so one lucky roll on the first move quietly
- *     dismissed later moves for reasons unrelated to the intended blunder rate;
- *   - the noise was added to values that came back through a NARROW window,
- *     where a move that fails low returns an upper bound rather than a score —
- *     and a jittered bound is not a number that means anything, so a move
- *     already proven bad could be promoted;
- *   - it re-rolled at every deepening iteration, so the chosen move flipped at
- *     random between depths and the deepest search did not necessarily decide.
- *
- * So: alpha comes from the raw score, the levels that jitter pay for it with a
- * full root window, and the sampling happens once, at the end, on the finished
- * ranking. Ruthless has noise 0 and none of it applies to it at all.
- *
- * The sample is drawn from a seeded stream, not Math.random — see aiRng.
+ * The sample comes from a seeded stream — see aiRng.
  */
 function searchBestMove(owner) {
   const cfg = aiCfg();
@@ -1296,33 +997,15 @@ function searchBestMove(owner) {
    ─────────────────────────────────────────────────────────────────────────── */
 
 /* ── what a search may spend ────────────────────────────────────────────────
-   Every search here stops on a budget rather than on its depth ceiling: the
-   ceiling is where it would get to given forever, and forever is not on offer
-   on the main thread of a web page.
+   Every search stops on a budget, not on its depth ceiling.
 
-   The budget is normally WALL-CLOCK, which is the right currency for the
-   browser — a page that freezes for 800 ms has frozen for 800 ms whatever the
-   machine underneath it was doing. It is the wrong currency for anything you
-   mean to reproduce, and that is not a small effect: the opening position, at
-   Skilled, five searches running, reached depths 2, 3, 4, 4, 4. The first two
-   paid for the JIT that the last three then spent. Nothing about that is
-   seeded, so seeding the dice does not touch it, and a self-play run that still
-   wanders once the dice are pinned is no more use than one that never was.
+   The budget is normally WALL-CLOCK: the right currency for a person waiting.
+   It is the wrong one for anything to be reproduced — the same search reaches
+   a different depth on a cold and a warm engine. So `AI.deterministic` counts
+   the budget in NODES instead. Off by default; the headless tools turn it on.
 
-   So `AI.deterministic` changes the currency to NODES. Same shape — a budget
-   that can stop a search mid-iteration, and an iteration stopped that way is
-   thrown away rather than half-believed — but counted in a quantity the machine
-   cannot vary. Off by default; nothing in the page turns it on.
-
-   THE RATE below is nominal, not measured. Its job is to keep the level knobs
-   meaning what they say, so a level given twice the milliseconds still gets
-   twice the search; 120 nodes/ms is roughly what a warmed-up V8 manages here,
-   which lands a deterministic run near the depth a warm clock-bounded one
-   reaches rather than somewhere unrecognisable.
-
-   What this buys is agreement, not portability of strength. A number measured
-   this way is a number about THIS budget — but the budget is now written down,
-   instead of being however fast the laptop felt that afternoon.
+   AI_NODES_PER_MS is nominal, not measured. It keeps the level knobs meaning
+   what they say: twice the milliseconds is twice the search.
    ─────────────────────────────────────────────────────────────────────────── */
 
 /** Wall-clock budget for one search. Headless self-play runs on a shoestring. */
@@ -1469,16 +1152,11 @@ function aiSpellCandidates(phaseName) {
     for (const i of attacked.filter((i) => safe.has(i)).slice(0, aiWide(4)))
       for (const to of evasiveDests(i, AI.side)) out.push({ id: "evasive", payload: { from: i, to } });
   }
-  // Transformations — cast like any other spell now. Considered regardless of
-  // `basicOnly`, matching how the old direct transform action was never gated
-  // by the AI's spell-tactics setting.
-  /* The sacrifice-bearing spells offer two choices of victim, not one.
-     Which pawn you spend can matter more than whether you cast at all — a
-     Juggernaut armored with a pawn two squares from its crown is a bad trade
-     wearing a good card — and the simulation is perfectly able to tell the
-     difference if it is given both to look at. Two rather than all of them:
-     each extra option is a full clone-and-search, and the pool is ordered
-     sensibly enough that the third is rarely the answer. */
+  // Transformations are cast like any other spell, and are considered at
+  // every spell-tactics setting.
+  /* The sacrifice-bearing spells offer two choices of victim: which pawn is
+     spent can matter more than whether to cast. Two, not all — each option is
+     a full clone-and-search. */
   if (have("juggernautSpell"))
     for (const i of juggernautTargets(AI.side).slice(0, aiWide(3)))
       for (const s of juggernautArmorPool(i).slice(0, 2))
@@ -1528,19 +1206,13 @@ function aiSpellCandidates(phaseName) {
     out.push({ id: "tactician", payload: {} });
   if (have("chokepoint") && chokepointTarget(AI.side) >= 0)
     out.push({ id: "chokepoint", payload: {} });
-  // Hollow is a shield now, and most of what a shield is worth the search can
-  // see for itself: applyStep keeps the machine's own shelled pawn alive under
-  // an enemy jump, so the leaf position simply holds more material. What it
-  // CANNOT see is the concealment — the jumps the opponent never makes because
-  // they cannot tell which pawn is carrying the shell — and that is the part
-  // that rides in on `bonus`, the same way Stutter's does. It stays out of
-  // sideScore, which would price the OPPONENT's shells too and hand the
-  // machine a secret it is not entitled to. See STUTTER_DENIAL and aiOwnShell.
+  // Hollow. The search already sees the shell save the pawn (applyStep). What
+  // it cannot see is the concealment — the jumps the opponent never makes —
+  // and that rides in on `bonus`. It stays out of sideScore, which would price
+  // the OPPONENT's shells too. See STUTTER_DENIAL and aiOwnShell.
   //
-  // What can be judged here is which pawn to spend it on: one that is already
-  // under the axe, and one with no capture of its own to give up — the
-  // no-capture price is permanent, so shelling a live threat throws the threat
-  // away to save the pawn.
+  // Which pawn to spend it on: one already under attack, and one with no
+  // capture of its own — the no-capture price is permanent.
   if (have("hollow")) {
     const doomed = new Set(attacked);
     for (const c of hollowTargets(AI.side)
@@ -1601,36 +1273,19 @@ function aiSpellCandidates(phaseName) {
 }
 
 /* ── which candidates are worth the pricing ─────────────────────────────────
-   Pricing ONE candidate costs a structuredClone of the whole game plus a
-   shallow search of the result. On a crowded board with a full hand there are
-   more candidates than there is budget, so some of them will not be looked at.
-   The only question is which.
+   Pricing ONE candidate costs a clone of the whole game plus a shallow search.
+   A crowded board has more candidates than budget, so some are not priced.
+   Two rules decide which:
 
-   It used to be whichever came last, and the order was the order the finder
-   happens to build the list in — which is by card type. Veil, Evasive, the
-   transformations, Mirror, Eye, Mind Control, Phaser, Martyr, Cascade,
-   Tactician, Chokepoint, Hollow, Twin, Quantum, Stutter, Echo, Wraparound,
-   Anchor, Rift. Everything from Stutter onwards was, in practice, never
-   priced at all. The machine was not judging Rift badly; it had never once
-   looked at it.
+   1. A CHEAP PRE-SCORE, so the budget goes to the promising end. These weights
+      never reach the evaluator; they only decide what gets measured properly.
 
-   Two rules fix that, and the second matters more than the first.
-
-   1. A CHEAP PRE-SCORE, so the budget is spent on the promising end. These
-      weights never reach the evaluator and are not comparable with its
-      numbers — they only decide what gets measured properly, and being
-      roughly right is all that is asked of them.
-
-   2. ONE SLOT PER CARD BEFORE ANY CARD GETS TWO. A card that generates six
-      targets could otherwise crowd out a card that generates one, and the
-      question "is a Rift worth casting here?" would go unasked because Veil
-      had a lot of targets. Every card that offers anything at all gets its
+   2. ONE SLOT PER CARD BEFORE ANY CARD GETS TWO. A card with six targets must
+      not crowd out a card with one. Every card that offers anything gets its
       best offer measured.
 
-   The Tactician gate below is the same reasoning with cheaper arithmetic: it
-   pays for captures that were going to happen anyway, so it is not even
-   offered unless there are two on the board. Where a static test that sharp
-   exists, it belongs in the finder; where it does not, it belongs here.
+   Where a sharp static test exists (Tactician needs two captures on the
+   board), it belongs in the finder; otherwise it belongs here.
    ─────────────────────────────────────────────────────────────────────────── */
 
 function aiPreScore(cands) {
@@ -1675,40 +1330,21 @@ function aiShortlist(cands) {
     if (seen.has(c.id)) rest.push(c);
     else { seen.add(c.id); firstOfEach.push(c); }
   }
-  /* The cap is a bound on the worst case, NOT a tighter budget. Measured on a
-     full sandbox hand: 10 cards offer 56 candidates and one costs about 10ms
-     to price, so Skilled's 550ms affords roughly 54 and Ruthless's 1000ms
-     roughly 98. A cap below those would throw away work the machine had time
-     to do — so it sits above them, and in ordinary positions the clock is what
-     binds. It earns its place in the crowded position where the candidate
-     count runs away, and both it and the clock now say so out loud.
-
-     Never below one-per-card, whatever the arithmetic says: that guarantee is
-     the entire point, and a cap that could cut into it would quietly bring
-     back the bug this replaced. */
+  /* The cap bounds the worst case; it is NOT a tighter budget. It sits above
+     what the clock affords in ordinary positions (about 54 candidates for
+     Skilled, 98 for Ruthless), and never below one per card. */
   const cap = Math.max(firstOfEach.length, aiWide(60));
   return firstOfEach.concat(rest).slice(0, cap);
 }
 
 /* ── Stutter's worth ────────────────────────────────────────────────────────
-   Every other card here is priced by a flat term in sideScore. Stutter cannot
-   be, and measuring it is what shows why.
+   Stutter cannot be priced by a flat term. Measured over a real game, denying
+   somebody their best turn costs them nothing three times in four (the second
+   best is as good) and up to two pieces in the rest.
 
-   Sampling best-minus-second-best over a real game, in this evaluator's own
-   units: the MEDIAN gap is 0, the 75th percentile is 3, the 90th is 10 — and
-   the maximum is 490. Three quarters of the time, denying somebody their best
-   turn costs them nothing at all, because their second-best is just as good. A
-   flat term would therefore be wrong in both directions at once: far too
-   generous in the ordinary position, and nowhere near generous enough in the
-   one position out of ten where their reply is close to forced and taking it
-   away is worth two pieces.
-
-   So the position-dependent half of the judgement lives here, in the gate,
-   where it is computed ONCE per turn rather than at every leaf of the search;
-   and the flat half lives in sideScore, priced at this same constant, so that
-   a candidate which clears the gate is one the search will also agree to pay
-   for. Tactician's `availableCaptures >= 2` gate is the same idea with cheaper
-   arithmetic.
+   So the position-dependent half is computed here, ONCE per turn, in the gate;
+   the flat half is in sideScore at this same constant, so a candidate that
+   clears the gate is one the search also agrees to pay for.
    ─────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -1721,22 +1357,11 @@ function aiShortlist(cands) {
 const STUTTER_DENIAL = 90;
 
 /**
- * And what a Hollow's concealment is worth, on the same terms — only the
- * concealment, because the shell itself is no longer invisible to the search.
- *
- * The old number here was 62, roughly what the cast costs, and it was set that
- * way for a reason that has since stopped being true: back when the card was a
- * pure bluff, NO position after the cast could score better than the position
- * before it, so the bonus had to carry the entire case for playing it. It does
- * not any more. applyStep keeps a shelled pawn alive under an enemy jump, so
- * the search now prices the saved pawn on its own. Leaving this at 62 would
- * count the card twice and the machine would spam it.
- *
- * What is left for this constant to cover is the half the search still cannot
- * reach at depth: the opponent declining a jump because they do not know which
- * pawn is shelled. 24 is "worth playing in a quiet position, not worth paying
- * a tempo for" — and the premium at the call site is the part with a real
- * argument behind it: a shell nobody is swinging at has not saved anything.
+ * What a Hollow's CONCEALMENT is worth — only the concealment. The search
+ * already prices the saved pawn (applyStep keeps a shelled pawn alive), so a
+ * larger number would count the card twice. This covers what the search cannot
+ * reach: the opponent declining a jump because they do not know which pawn is
+ * shelled. 24 is "worth playing in a quiet position, not worth a tempo".
  */
 const HOLLOW_SHELL = 24;
 
@@ -1869,33 +1494,13 @@ function aiConsiderChronos() {
 
 /**
  * Drawing costs the whole turn for 1 FP and a card. Rather than guess a rule,
- * price it against actually moving: search both and take the better. This is
- * the tempo judgement humans tend to get wrong.
+ * price it against moving: search both and take the better.
  *
- * ── WHY THERE IS A HARD LIMIT AND NOT ONLY A SEARCH ───────────────────────
- *
- * Because drawing is also a PASS, and the search likes passing rather too much.
- *
- * A drawn turn is the only turn in the game that does not move a piece, and in
- * a standoff that is exactly what both sides want. Pawns advance and do not
- * retreat, so two armies facing each other across one empty rank are in mutual
- * zugzwang: whoever steps in first is jumped. The search sees that correctly —
- * every legal move scoring below standing pat is not a bug — and then draws a
- * card to hand the problem back. So does the other side. Neither ever has to
- * stop, and two Ruthless machines have played out a hundred and forty turns
- * this way, 120 draws against 20 moves, finishing 24 pieces to 24 without a
- * single capture between them.
- *
- * No amount of pricing fixes that, because passing genuinely IS worth the
- * tempo; the comparison below is answering its question correctly. What is
- * wrong is that the machine is allowed to ask it forever. So the hand size is
- * a floor under the argument: once you are holding more cards than a game can
- * spend, drawing has stopped being a resource decision and become a way of
- * declining to play, and this refuses on those grounds without consulting the
- * search at all.
- *
- * It is not a handicap. Drawing a sixth card while five sit unplayed is a
- * wasted turn against a human too — the rule only makes the machine admit it.
+ * THE HARD LIMIT (HAND_USEFUL) is there because drawing is also a PASS. In a
+ * standoff every move loses a pawn, so passing really is best, and two
+ * machines will draw at each other forever. Pricing cannot fix that — the
+ * comparison is answering correctly. So past a hand nobody can spend, drawing
+ * is refused without asking the search.
  */
 function aiShouldDraw() {
   const P = G.players[AI.side];
@@ -2025,24 +1630,13 @@ function aiFinishMove() {
 }
 
 /* ── the plan versus the board ──────────────────────────────────────────────
-   A turn is CHOSEN under applyStep's model of the rules and PLAYED OUT under
-   performMove's. Modelling Temporal Twin and Quantum Pawn closed most of the
-   distance between those two, but they will never agree perfectly and they do
-   not have to: a quantum whiff, an Eye For An Eye retaliation, an enemy Hollow
-   shell the machine is not entitled to see, or an early promotion can each end
-   a sequence the search expected to continue. What is left in the plan then
-   describes hops from squares that are now empty.
-
-   Nothing crashes if those are played — performMove returns immediately when
-   handed an empty square — so the failure is silent, and what the player sees
-   is the machine taking half a turn for no stated reason.
-
-   Worse, one case is not silent at all. A promotion closes the SEQUENCE while
-   leaving the jump sitting there on the board, still perfectly playable — as
-   the Sentinel's halt also did, before that card was retired. Replaying the
-   plan through one of those would take a second action in one turn, which no
-   player can do. The referee would refuse it; the machine does not go through
-   the referee.
+   A turn is CHOSEN under applyStep's model and PLAYED OUT under performMove.
+   They agree on everything the machine may know (test/ai.test.js checks it),
+   but a quantum whiff or an enemy Hollow shell can end a sequence the search
+   expected to continue. The rest of the plan then describes hops from empty
+   squares — or, after a promotion, a jump that is still on the board but
+   would be a second action in one turn. So every planned step is re-checked
+   before it is played.
    ─────────────────────────────────────────────────────────────────────────── */
 
 /** Is a step the search planned still something the rules allow, right now? */
@@ -2114,6 +1708,29 @@ function aiRunTurn() {
   if (!G.over) endTurnLocal();
 }
 
+/* ── jobs: the thinking, one named piece at a time ──────────────────────────
+   Every slow decision of a turn, by name. The live driver hands a name to
+   aiThink(), which runs the job on a worker thread so the page stays
+   responsive, and falls back to running it right here. Headless play
+   (aiRunTurn) calls the same functions directly.
+
+   A job runs on whatever G is loaded, may change it, and returns plain data —
+   it has to survive a trip between threads. It is the SAME code on either
+   side of that trip, which is the whole point: a worker with its own copy of
+   the thinking would be a second machine.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const AI_JOBS = {
+  chronos: () => aiConsiderChronos(),
+  draw: () => aiShouldDraw(),
+  cast: (phaseName) => aiCastOnce(phaseName),
+  search: () => {
+    const res = searchBestMove(AI.side);
+    return res ? { steps: res.move.steps, depth: res.depth, nodes: res.nodes } : null;
+  },
+  finishMove: () => { aiFinishMove(); return true; },
+};
+
 /* ══════════════════════════════════════════════════════════════════════════
    SEAM: BROWSER-ONLY BEGINS
 
@@ -2173,11 +1790,125 @@ function duelResume() {
 }
 
 
+/* ── the thinking thread ────────────────────────────────────────────────────
+   A Ruthless search takes three seconds. On the page's own thread that is
+   three seconds in which nothing paints and no button answers. So the live
+   driver sends each job (see AI_JOBS) to a worker — ai-worker.js, which loads
+   engine.js and this file — together with the game, and takes the game back
+   when the job is done.
+
+   THE WHOLE GAME GOES OVER AND COMES BACK. The jobs change G: they cast, they
+   write the log, they advance the seeded dice. Sending G and adopting the
+   answer keeps every one of those, with no list of "fields the machine
+   touches" to fall out of date.
+
+   WHILE A JOB IS OUT, THE PAGE MUST NOT MOVE THE GAME, because the answer
+   replaces it. Input is already refused while AI.thinking is set. As a second
+   lock, aiBoardMark() is taken when a job leaves and checked when it returns;
+   if the game moved anyway, the answer is dropped and the turn starts over.
+
+   NO WORKER IS NOT AN ERROR. A page opened straight from a file cannot start
+   one, and the suite's quick games (AI.fast) must stay synchronous. Both run
+   the job on this thread, exactly as the driver always did.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+let AI_WORKER = null;        // the worker, once one is running
+let AI_WORKER_OK = true;     // false once one has failed: think on this thread
+let AI_PENDING = null;       // the job in flight: { id, gen, job, arg, done, mark }
+let AI_JOB_ID = 0;
+
+/** A cheap fingerprint of "has the game moved?" — see the note above. */
+const aiBoardMark = () => [
+  G.turnNo, G.turn, G.fxSeq, G.history.length, G.over ? 1 : 0, G.log.length,
+  G.log.length ? G.log[G.log.length - 1].text : "",
+].join("|");
+
+function aiWorker() {
+  if (AI_WORKER || !AI_WORKER_OK) return AI_WORKER;
+  try {
+    AI_WORKER = new Worker("ai-worker.js");
+  } catch (err) {
+    AI_WORKER_OK = false;
+    return null;
+  }
+  AI_WORKER.onmessage = (ev) => aiThought(ev.data);
+  // The worker failed to load or died. Finish the job in flight on this thread
+  // and stop asking for one.
+  AI_WORKER.onerror = (ev) => {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    console.warn("AI: no worker thread; the machine will think on the page.");
+    AI_WORKER_OK = false;
+    if (AI_WORKER) { AI_WORKER.terminate(); AI_WORKER = null; }
+    const p = AI_PENDING;
+    AI_PENDING = null;
+    if (p && p.gen === AI.gen) aiGuarded(() => p.done(AI_JOBS[p.job](p.arg)));
+  };
+  return AI_WORKER;
+}
+
+/** Throw away a job in flight. The worker is busy with it, so the worker goes
+ *  too; the next job starts a new one. Called by aiCancel. */
+function aiDropThought() {
+  if (!AI_PENDING) return;
+  AI_PENDING = null;
+  if (AI_WORKER) { AI_WORKER.terminate(); AI_WORKER = null; }
+}
+
+/**
+ * Run the job named `job` and hand its result to `done`.
+ *
+ * `done` is called at once when the job runs on this thread, and later when it
+ * ran on the worker — so nothing may follow a call to this in its caller.
+ */
+function aiThink(job, arg, gen, done) {
+  const w = (AI.fast || AI.deterministic) ? null : aiWorker();
+  if (!w) { done(AI_JOBS[job](arg)); return; }
+  AI_PENDING = { id: ++AI_JOB_ID, gen, job, arg, done, mark: aiBoardMark() };
+  w.postMessage({
+    id: AI_PENDING.id, job, arg, G,
+    fresh: AI.fresh === true,
+    ai: { on: true, side: AI.side, level: AI.level, duel: AI.duel,
+          fast: false, deterministic: false, budgetScale: AI.budgetScale },
+  });
+  AI.fresh = false;
+}
+
+/** The worker answered. */
+function aiThought(msg) {
+  const p = AI_PENDING;
+  if (!p || !msg || msg.id !== p.id) return;       // nobody is waiting for this
+  AI_PENDING = null;
+  if (p.gen !== AI.gen) return;                    // the turn was abandoned
+  if (aiBoardMark() !== p.mark) {
+    // The game moved while the job was out. Its answer is about a board that
+    // no longer exists; start the turn again from the board that does.
+    aiCancel();
+    render();
+    if (!G.over && isAISeat(G.turn) && !AI.paused) aiTakeTurn();
+    return;
+  }
+  if (msg.error) { aiStepFailed(new Error(msg.error)); return; }
+  G = msg.G;
+  aiGuarded(() => p.done(msg.out));
+}
+
+/** The machine's turn cannot go on. Say so, and pass. */
+function aiStepFailed(err) {
+  log(`The machine hit an internal error and passes: ${err.message}`, "big");
+  console.error(err);
+  AI.thinking = false;
+  render();
+  if (!G.over) endTurnLocal();
+}
+
+const aiGuarded = (fn) => { try { fn(); } catch (err) { aiStepFailed(err); } };
+
 /* ── the live driver ────────────────────────────────────────────────────────
    A setTimeout state machine rather than one long async function. Each beat
-   does a chunk of synchronous work, paints, and schedules the next. Nothing
-   depends on promise continuations, so a backgrounded tab or a slow search
-   cannot leave a turn half-finished with the board frozen.
+   does one piece of work, paints, and schedules the next. The slow pieces go
+   through aiThink and the beat ends there; the answer schedules the next beat.
+   Nothing depends on promise continuations, so a backgrounded tab or a slow
+   search cannot leave a turn half-finished with the board frozen.
    ─────────────────────────────────────────────────────────────────────────── */
 
 const AI_STAGES = ["discard", "chronos", "draw", "castDeclare", "move", "castEnd", "finish"];
@@ -2188,6 +1919,7 @@ function aiTakeTurn() {
   if (G.turn !== AI.side) return;
   AI.thinking = true;
   clearOrderingMemory();
+  AI.fresh = true;                       // ...and the worker's copy of it, on its first job
   AI.stage = 0;
   AI.moveSteps = null;
   clearSelection();
@@ -2204,63 +1936,73 @@ function aiStep(gen) {
   // AI.thinking stuck true, which would freeze the game permanently.
   if (gen !== AI.gen) return;
   if (!AI.on || G.over || G.turn !== AI.side) { AI.thinking = false; render(); return; }
-  let wait = aiCfg().pace;
-  try {
+  const pace = aiCfg().pace;
+
+  // How every beat but the last one ends: paint, then schedule the next.
+  const next = (wait) => {
+    render();
+    if (G.over) { AI.thinking = false; announceWinner(); return; }
+    // Never outrun the animation of the beat just taken — otherwise a machine
+    // chain-jump fires its second hop while the first is still in the air.
+    setTimeout(() => aiStep(gen), Math.max(wait * watchRate(), FX.busyMs()));
+  };
+  const advance = () => { AI.stage++; next(0); };
+
+  // Play one planned hop, or close the movement out when none is left.
+  const playStep = () => {
+    if (AI.moveSteps.length && !G.over) {
+      const s = AI.moveSteps.shift();
+      // Re-checked against the live board, not trusted from the search that
+      // planned it a moment ago. See aiStepStillLegal.
+      if (aiStepStillLegal(s)) {
+        performMove(s.from, s.mv);
+        next(Math.max(110, pace * 0.7));
+        return;
+      }
+      aiAbandonPlan(s);
+    }
+    aiThink("finishMove", null, gen, advance);
+  };
+
+  aiGuarded(() => {
     switch (AI_STAGES[AI.stage]) {
       case "discard":
         if (G.owedDiscard && G.owedDiscard.player === AI.side) aiResolveDiscard();
-        AI.stage++; wait = 0; break;
+        advance();
+        return;
 
       case "chronos":
-        aiConsiderChronos();
-        AI.stage++; wait = 0; break;
+        aiThink("chronos", null, gen, advance);
+        return;
 
       case "draw":
-        if (aiShouldDraw()) {
+        aiThink("draw", null, gen, (yes) => {
+          if (!yes) { advance(); return; }
           drawSpell(AI.side);
           AI.thinking = false;
           render();
-          setTimeout(() => { if (gen === AI.gen && !G.over) endTurnLocal(); }, aiCfg().pace * watchRate());
-          return;
-        }
-        AI.stage++; wait = 0; break;
+          setTimeout(() => { if (gen === AI.gen && !G.over) endTurnLocal(); }, pace * watchRate());
+        });
+        return;
 
       case "castDeclare":
-        if (!aiCastOnce("declare")) { AI.stage++; wait = 0; }
-        break;
+        aiThink("cast", "declare", gen, (cast) => { if (cast) next(pace); else advance(); });
+        return;
 
-      case "move": {
-        if (!AI.moveSteps) {
-          if (G.hasActed) { AI.moveSteps = []; }
-          else {
-            const res = searchBestMove(AI.side);
-            AI.moveSteps = res ? res.move.steps.slice() : [];
-            if (res && res.depth)
-              log(`The machine looked ${res.depth} plies ahead (${res.nodes.toLocaleString()} positions).`, "sys");
-          }
-        }
-        if (AI.moveSteps.length && !G.over) {
-          const s = AI.moveSteps.shift();
-          // Re-checked against the live board, not trusted from the search that
-          // planned it a moment ago. See aiStepStillLegal.
-          if (aiStepStillLegal(s)) {
-            performMove(s.from, s.mv);
-            wait = Math.max(110, aiCfg().pace * 0.7);
-          } else {
-            aiAbandonPlan(s);
-            aiFinishMove();
-            AI.stage++; wait = 0;
-          }
-        } else {
-          aiFinishMove();
-          AI.stage++; wait = 0;
-        }
-        break;
-      }
+      case "move":
+        if (AI.moveSteps) { playStep(); return; }
+        if (G.hasActed) { AI.moveSteps = []; playStep(); return; }
+        aiThink("search", null, gen, (res) => {
+          AI.moveSteps = res ? res.steps.slice() : [];
+          if (res && res.depth)
+            log(`The machine looked ${res.depth} plies ahead (${res.nodes.toLocaleString()} positions).`, "sys");
+          playStep();
+        });
+        return;
 
       case "castEnd":
-        if (!aiCastOnce("end")) { AI.stage++; wait = 0; }
-        break;
+        aiThink("cast", "end", gen, (cast) => { if (cast) next(pace); else advance(); });
+        return;
 
       case "finish":
         aiPayTacticianDebt();
@@ -2269,20 +2011,7 @@ function aiStep(gen) {
         if (!G.over) endTurnLocal(); else announceWinner();
         return;
     }
-  } catch (err) {
-    log(`The machine hit an internal error and passes: ${err.message}`, "big");
-    console.error(err);
-    AI.thinking = false;
-    render();
-    if (!G.over) endTurnLocal();
-    return;
-  }
-
-  render();
-  if (G.over) { AI.thinking = false; announceWinner(); return; }
-  // Never outrun the animation of the beat just taken — otherwise a machine
-  // chain-jump fires its second hop while the first is still in the air.
-  setTimeout(() => aiStep(gen), Math.max(wait * watchRate(), FX.busyMs()));
+  });
 }
 
 /**

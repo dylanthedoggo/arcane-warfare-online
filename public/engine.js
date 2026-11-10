@@ -1701,6 +1701,37 @@ function promoteIfDue(i) {
   return true;
 }
 
+/* ── the jump rule, in one place ───────────────────────────────────────────
+   Two things read these: resolveCapture/performMove below, and the machine's
+   fast search copy in ai.js (applyStep/expandChain). The search cannot call
+   resolveCapture — it would be far too slow — so it keeps its own board
+   update. What it must NOT keep is its own copy of the DECISIONS. Those live
+   here, and test/ai.test.js compares the two board updates jump by jump.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/**
+ * What a jump does to the piece it lands on: "shell", "armor" or "kill".
+ *
+ * A superposition is settled BEFORE this is asked (see resolveCapture), so it
+ * is not one of the answers. `seesShell` is false when the asker is not
+ * entitled to know about the shell — the machine, looking at an enemy pawn.
+ */
+function jumpOutcome(victim, seesShell = true) {
+  if (victim.hollow && seesShell) return "shell";
+  if (victim.armor) return "armor";
+  return "kill";
+}
+
+/**
+ * Does this jump end the chain-jump? A chain is a chain of CAPTURES: a jump
+ * that found nothing (a whiff), broke on a shell, killed the attacker, or
+ * crowned it stops the sequence. Positional booleans, not an object — the
+ * search calls this millions of times.
+ */
+function jumpEndsChain(whiffed, shelled, attackerDied, promoted) {
+  return !!(whiffed || shelled || attackerDied || promoted);
+}
+
 /**
  * Resolve a single capture jump. Handles the Hollow's shell, Juggernaut armor
  * and the Eye For An Eye retaliation. Returns { destroyed, retaliated }.
@@ -1732,7 +1763,8 @@ function resolveCapture(fromIdx, mv) {
   // victim's own home lies in — so the two really can be the same square, and
   // breakShell has to be looking at a board the attacker is already standing on
   // to refuse it.
-  if (victim.hollow) {
+  const outcome = jumpOutcome(victim);
+  if (outcome === "shell") {
     // Returning here rather than falling through is the whole point. It skips
     // awardFP and attacker.captures++ below: a jump that took nothing must not
     // pay Focus, and must not be the capture that earns somebody a Phaser.
@@ -1742,7 +1774,7 @@ function resolveCapture(fromIdx, mv) {
     return { destroyed: false, retaliated: false, shelled: true, fled: rest !== mv.victim };
   }
 
-  if (victim.armor) {
+  if (outcome === "armor") {
     victim.armor = false;
     fx("armor", { at: mv.victim, from: fromIdx });
     log(`${pieceLabel(victim)} at ${sq(mv.victim)} loses its armor but survives.`, "rule");
@@ -2001,44 +2033,24 @@ function performMove(from, mv, opts = {}) {
     const before = G.chain != null;
     const res = resolveCapture(from, mv);
     log(`${PLAYERS[owner].name} jumps ${sq(from)} → ${sq(mv.to)}.`, "p" + owner);
-    if (res.whiffed) {
-      // The jump found an empty half of a superposition. It took nothing, so
-      // there is nothing for Hopscotch to reverse and nothing to chain from —
-      // a sequence of jumps is a sequence of CAPTURES, and this was not one.
-      G.lastCapture = null;
-      G.chain = null;
-      promoteIfDue(mv.to);
-      finishAction(mv.to);
-      return;
-    }
-    G.lastCapture = { from, to: mv.to, victim: mv.victim, survived: !res.destroyed };
+    // A whiff — the empty half of a superposition — took nothing, so there is
+    // nothing for Hopscotch to reverse. A jump that broke on a shell IS
+    // recorded: it happened, the victim survived it, and Hopscotch reverses it
+    // the way it reverses a jump that only stripped armor.
+    G.lastCapture = res.whiffed
+      ? null
+      : { from, to: mv.to, victim: mv.victim, survived: !res.destroyed };
 
-    // A jump that broke on a Hollow's shell took nothing either, and for the
-    // same reason it cannot feed a chain — a sequence of jumps is a sequence
-    // of CAPTURES. Without this the attacker was handed a free extra jump for
-    // hitting the one piece that owes them nothing, which is the opposite of
-    // what the shell is for.
-    //
-    // Unlike the whiff above, the jump IS still recorded: it happened, the
-    // victim survived it, and Hopscotch reverses it exactly the way it
-    // reverses a jump that only stripped armor.
-    if (res.shelled) {
+    // The crown is checked on every jump the attacker survived.
+    const promoted = !res.retaliated && promoteIfDue(mv.to);
+    if (jumpEndsChain(!!res.whiffed, !!res.shelled, !!res.retaliated, promoted)) {
+      // A jump that took nothing still LANDED, so the landing square is passed
+      // on (a rift, a Herald step and a twin's second move all key off it). A
+      // crown or a dead attacker closes the turn with no landing to speak of.
+      const tookNothing = !!(res.whiffed || res.shelled);
+      if (promoted && !tookNothing) log("Promotion ends the jump sequence.", "rule");
       G.chain = null;
-      promoteIfDue(mv.to);
-      finishAction(mv.to);
-      return;
-    }
-
-    if (res.retaliated) {           // the capturer is gone; nothing can chain
-      G.chain = null;
-      finishAction();
-      return;
-    }
-    const promoted = promoteIfDue(mv.to);
-    if (promoted) {
-      log("Promotion ends the jump sequence.", "rule");
-      G.chain = null;
-      finishAction();
+      finishAction(tookNothing ? mv.to : null);
       return;
     }
     if (captureMoves(mv.to).length) {
@@ -3699,10 +3711,10 @@ function viewFor(g, seat, extra = {}) {
    The browser needs none of this — it loads the file as a classic script and
    picks everything up from the global lexical scope.
 
-   `G` is module-private under Node. The server owns one game per room and calls
-   setG(room.G) immediately before each applyAction(). That is safe only because
-   Node is single-threaded and applyAction never awaits, so no second room can
-   interleave. Do not make anything on this path async.
+   `G` is module-private under Node. The server owns one game per room and
+   reaches each one through withGame() below, which loads the game for one
+   synchronous call and holds nothing afterwards. setG/getG are for the tests
+   and the tools, which only ever have one game.
 
    TWO AUDIENCES, NOT ONE. This list started as what the server needs plus what
    the Node test suite asks about, and both of those go through the doorway:
@@ -3721,6 +3733,30 @@ function viewFor(g, seat, extra = {}) {
    for. If the machine needs something the engine has, it gets the engine's.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * Run `fn` with `g` as the game, and return `{ g, out }`.
+ *
+ * This is the door a caller with MANY games (the server) must use. It loads
+ * the game, runs the call, hands the game back, and then holds no game at all.
+ * `g` in the result can be a different object from the one passed in —
+ * restore() replaces the game — so the caller must keep the returned one.
+ *
+ * The callback must be synchronous. A second room's action that ran while the
+ * first one waited would be applied to the wrong game, so a promise is refused.
+ */
+function withGame(g, fn) {
+  const prev = G;
+  G = g;
+  try {
+    const out = fn();
+    if (out && typeof out.then === "function")
+      throw new Error("withGame: the callback must not be async.");
+    return { g: G, out };
+  } finally {
+    G = prev;
+  }
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     // constants
@@ -3734,8 +3770,11 @@ if (typeof module !== "undefined" && module.exports) {
     mkPiece, mulberry32,
     setG: (g) => { G = g; },
     getG: () => G,
+    withGame,
     // the doorway
     applyAction, viewFor, undoTarget, applyUndoTo,
+    // the jump rule — shared with the machine's search, see resolveCapture
+    jumpOutcome, jumpEndsChain,
     // the rules, applied. The machine plays through these rather than through
     // the doorway, which is what keeps its captures, promotions, penalties and
     // logging identical to a human's turn. See ai.js's second invariant.

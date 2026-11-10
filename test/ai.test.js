@@ -266,6 +266,210 @@ it("...and hands the ban back when it is the only turn left", () => {
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
+   THE FAST COPY OF A JUMP
+
+   The search cannot ask the referee about every jump — that is far too slow —
+   so ai.js keeps its own board update, applyStep. The DECISIONS are the
+   engine's (jumpOutcome, jumpEndsChain). This plays random games, dresses the
+   pieces in armor, shells, marks and twins, and compares the two board updates
+   jump by jump. A rule added to one and not the other fails here, by name,
+   and not as a machine that quietly plays worse.
+
+   Two jumps are left out on purpose, because the machine may not know how
+   they end: a jump at a superposition, and a jump at an ENEMY shell.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("the search's fast copy of a jump agrees with the referee");
+
+/** Everything about the board a jump can change, square by square. */
+const boardSig = () => engine.getG().board.map((p) => (p
+  ? [p.id, p.owner, p.rank, p.armor ? "armor" : "", p.hollow ? "shell" : "", p.hollowHome,
+    p.twin, p.captures].join(",")
+  : ".")).join("|");
+
+/** Dress the live board so every branch of a jump has something to hit. */
+function dressBoard(rng) {
+  const g = engine.getG();
+  const plain = [[], []];
+  for (let i = 0; i < g.board.length; i++) {
+    const p = g.board[i];
+    if (!p) continue;
+    const r = rng();
+    if (r < 0.12) p.armor = true;
+    else if (r < 0.22) p.eyeMark = 2;
+    else if (r < 0.32 && p.rank === "pawn") { p.hollow = true; p.hollowHome = (rng() * g.board.length) | 0; }
+    else if (r < 0.38) p.rank = "queen";
+    else if (p.rank === "pawn") plain[p.owner].push(p);
+  }
+  // One twinned pair a side, out of pawns nothing else was done to.
+  for (const owner of [0, 1])
+    if (plain[owner].length >= 2) { plain[owner][0].twin = 900 + owner; plain[owner][1].twin = 900 + owner; }
+}
+
+it("on every jump of forty dressed-up random games", () => {
+  const applyStep = boot.read("applyStep"), undoStep = boot.read("undoStep");
+  const saved = { ...ai.AI };
+  const seen = { jumps: 0, armor: 0, shell: 0, kill: 0, eye: 0, crown: 0, twin: 0, chain: 0 };
+  const where = (seed, turn, from, mv) =>
+    `seed ${seed}, turn ${turn}, jump ${engine.sq(from)} → ${engine.sq(mv.to)}`;
+
+  try {
+    for (let seed = 1; seed <= 40; seed++) {
+      engine.setG(engine.newGame(0, seed, { mode: "ai" }));
+      engine.getG().turnNo = 0;
+      engine.beginTurn(0);
+      const rng = engine.mulberry32(seed * 7919 + 1);
+
+      for (let turn = 0; turn < 70 && !engine.getG().over; turn++) {
+        const base = engine.snapshot(engine.getG());
+        dressBoard(rng);
+        const mover = engine.getG().turn;
+        // Own shells are visible to the machine, enemy shells are not, so the
+        // seat it plays alternates to put both in front of it.
+        ai.AI.side = turn % 2 ? mover : 1 - mover;
+
+        for (const from of engine.capturersFor(mover)) {
+          for (const mv of engine.captureMoves(from)) {
+            const v = engine.getG().board[mv.victim];
+            if (v.quantum) continue;                                // a coin flip
+            if (v.hollow && v.owner !== ai.AI.side) continue;       // a secret
+            const had = { armor: v.armor, shell: v.hollow, twin: !!v.twin, eye: v.eyeMark > 0 };
+
+            const before = boardSig();
+            const rec = applyStep(from, mv);
+            const fast = boardSig();
+            const fastEnds = engine.jumpEndsChain(
+              rec.quantumHalt, rec.victimKeptShell, rec.attackerDied, rec.promoted);
+            const fastMore = !fastEnds && engine.captureMoves(mv.to).length > 0;
+            undoStep(rec);
+            assert(boardSig() === before,
+              `undoStep did not put the board back — ${where(seed, turn, from, mv)}`);
+
+            const snap = engine.snapshot(engine.getG());
+            engine.performMove(from, mv);
+            const real = boardSig();
+            const realMore = engine.getG().chain != null;
+            engine.restore(snap);
+
+            assert(fast === real,
+              `the search and the referee disagree about the board — ${where(seed, turn, from, mv)}`
+              + ` (victim ${JSON.stringify(had)})`);
+            assert(fastMore === realMore,
+              `the search says the chain ${fastMore ? "goes on" : "ends"} and the referee says it `
+              + `${realMore ? "goes on" : "ends"} — ${where(seed, turn, from, mv)}`);
+
+            seen.jumps++;
+            if (rec.victimKeptArmor) seen.armor++;
+            else if (rec.victimKeptShell) seen.shell++;
+            else seen.kill++;
+            if (rec.attackerDied) seen.eye++;
+            if (rec.promoted) seen.crown++;
+            if (rec.severed) seen.twin++;
+            if (realMore) seen.chain++;
+          }
+        }
+
+        engine.restore(base);                       // take the costumes off
+        engine.playRandomTurn(engine.getG().turn);
+      }
+    }
+  } finally {
+    Object.assign(ai.AI, saved);
+    engine.setG(null);
+  }
+
+  // A comparison that never reached a branch has proved nothing about it.
+  for (const [what, n] of Object.entries(seen))
+    assert(n > 0, `no jump exercised "${what}" — ${JSON.stringify(seen)}`);
+  assert(seen.jumps > 400, `only ${seen.jumps} jumps were compared`);
+  console.log(`         ${JSON.stringify(seen)}`);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   THE THINKING THREAD
+
+   In a live game the slow work runs in public/ai-worker.js. A browser is not
+   available here, so the worker file is loaded into a bare scope that has only
+   what a worker has: importScripts and postMessage, and NO page. That is the
+   useful part — it proves the thinking half needs nothing from the page, and
+   that a job run over there returns exactly what the same job returns here.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("the worker thread is the same machine");
+
+/** Load ai-worker.js the way a browser would, and return a way to send it jobs. */
+function fakeWorker() {
+  const fs = require("fs"), path = require("path"), vm = require("vm");
+  const pub = path.join(boot.ROOT, "public");
+  const replies = [];
+  const scope = vm.createContext({ console, performance, structuredClone });
+  scope.self = scope;
+  scope.postMessage = (m) => replies.push(structuredClone(m));
+  scope.importScripts = (...files) => {
+    for (const f of files)
+      vm.runInContext(fs.readFileSync(path.join(pub, f), "utf8"), scope, { filename: f });
+  };
+  vm.runInContext(fs.readFileSync(path.join(pub, "ai-worker.js"), "utf8"), scope,
+    { filename: "ai-worker.js" });
+  return (msg) => { scope.onmessage({ data: structuredClone(msg) }); return replies.pop(); };
+}
+
+/** A position a few turns into a seeded game, with the machine on move. */
+function midgame(seed) {
+  engine.setG(engine.newGame(0, seed, { mode: "ai" }));
+  engine.getG().turnNo = 0;
+  engine.beginTurn(0);
+  for (let k = 0; k < 6; k++) engine.playRandomTurn(engine.getG().turn);
+  return engine.getG();
+}
+
+it("a search sent to the worker picks the move the page thread picks", () => {
+  const send = fakeWorker();
+  const jobs = boot.read("AI_JOBS");
+  const saved = { ...ai.AI };
+  try {
+    for (const seed of [3, 17, 99]) {
+      const g = midgame(seed);
+      const brain = { on: true, side: g.turn, level: "skilled", duel: null,
+                      fast: true, deterministic: true, budgetScale: 1 };
+      const reply = send({ id: seed, job: "search", arg: null, G: g, ai: brain, fresh: true });
+      assert(reply && !reply.error, `the worker failed: ${reply && reply.error}`);
+      assert(reply.id === seed, "the answer carries the id of the question");
+
+      Object.assign(ai.AI, brain);
+      const here = jobs.search();
+      assert(JSON.stringify(reply.out) === JSON.stringify(here),
+        `seed ${seed}: the worker chose ${JSON.stringify(reply.out)}\n         and the page thread ${JSON.stringify(here)}`);
+      assert(reply.G.aiSeq === engine.getG().aiSeq,
+        "and the seeded dice were advanced the same number of times on both");
+    }
+  } finally {
+    Object.assign(ai.AI, saved);
+    engine.setG(null);
+  }
+});
+
+it("a job that changes the game sends the changed game back", () => {
+  const send = fakeWorker();
+  const g = midgame(5);
+  const side = g.turn;
+  const reply = send({ id: 1, job: "finishMove", arg: null, G: g, fresh: true,
+    ai: { on: true, side, level: "novice", duel: null, fast: true, deterministic: true, budgetScale: 1 } });
+  assert(reply && !reply.error, `the worker failed: ${reply && reply.error}`);
+  assert(reply.G && Array.isArray(reply.G.board) && reply.G.board.length === g.board.length,
+    "the whole game comes back, board and all");
+  assert(reply.G.history.length === g.history.length,
+    "including the history Chronos's Gaze needs");
+});
+
+it("a job that throws comes back as an error, not as silence", () => {
+  const send = fakeWorker();
+  const reply = send({ id: 9, job: "no-such-job", arg: null, G: midgame(5), ai: {}, fresh: false });
+  assert(reply && reply.id === 9 && typeof reply.error === "string",
+    `expected an error reply, got ${JSON.stringify(reply)}`);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
    REPRODUCIBILITY
 
    The foundation every threshold further down stands on. If this group fails,
