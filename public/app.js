@@ -1809,7 +1809,7 @@ function renderRules() {
       "Most of your Focus comes from fighting, not from waiting. A player who trades and pushes for the crown can afford roughly twice what a player who sits still can.",
     ]);
     card("The ceiling", [
-      `Your pool stops at ${FP_CAP} FP. Anything earned while full is wasted, and the log says so.`,
+      `Your pool stops at ${FP_CAP} FP. Anything earned while full is wasted, and the Focus pip says so.`,
       "Focus is spend-it-or-lose-it, not savings. A pool you never touch is income you threw away — and the Alchemist, which prints Focus you cannot bank, is a worse bargain than it looks.",
     ]);
     card("Spending FP", ["Transformations are cast like any other spell, for the same 3 FP most cards cost — except the Alchemist at 6 and the Phaser, which is free once its 3 FP spell is paid.", "Spell costs range from 2 to 6 FP."]);

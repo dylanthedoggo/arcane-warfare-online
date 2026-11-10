@@ -114,7 +114,35 @@ let AI = {
   // cannot do this job: it clamps every level to the same 40 ms, which removes
   // most of the difference between the levels being measured.
   budgetScale: 1,
+  // How many turns in a row this seat has spent drawing. Per SEAT, not one
+  // counter, because a duel runs both chairs through this same object and a
+  // shared streak would have each machine serving the other's sentence. See
+  // aiShouldDraw for what it is guarding against.
+  drawStreak: [0, 0],
 };
+
+/**
+ * How many turns running the machine may spend drawing before it is made to
+ * play.
+ *
+ * THIS NUMBER IS A BACKSTOP AND NOT THE MAIN GUARD, and it is worth being clear
+ * about that because the obvious small value here is wrong. Drawing several
+ * turns in a row is how the card game is actually played: from a position that
+ * is not under threat you draw, and draw, and keep drawing until the hand is
+ * deep enough to answer whatever comes, and only then go back to moving pieces.
+ * A cap of three would forbid that outright and leave the machine dribbling out
+ * one card between moves, which is neither the standoff it was meant to prevent
+ * nor anything a strong player does.
+ *
+ * What actually ends a legitimate burst is the hand filling up — past
+ * HAND_VALUED the curve is flat and drawing stops scoring. That is the real
+ * terminator, and it is the gate in aiShouldDraw doing the work. This counter
+ * only bounds the case where both machines burst at each other out of mutual
+ * zugzwang, so that the worst standoff left in the game is finite and short
+ * rather than the hundred and forty turns that prompted all of this. Set to the
+ * size of a real burst: allow the whole thing, then insist on a move.
+ */
+const DRAW_STREAK_MAX = 13;
 
 /** Abandon whatever the machine was doing; any in-flight beat becomes a no-op,
  *  and a thought still running on the worker thread is thrown away. */
@@ -520,33 +548,100 @@ const VAL_PAWN = 100, VAL_QUEEN = 250;
 const VAL_FORM = { juggernaut: 35, phaser: 55, herald: 55, enchanter: 130, alchemist: 95 };
 const VAL_ARMOR = 60;
 
+/* ── how much of a hand is worth having ─────────────────────────────────────
+   These three numbers are the shape of the card curve, and the reason there
+   are three of them rather than one is a mistake this file used to make.
+
+   THE OLD NUMBER WAS FIVE, and it was five for a defensible reason: a turn
+   buys at most three casts, the pool's costs run 2 to 6 against a Focus
+   ceiling of 10, so nobody SPENDS more than about three cards before running
+   dry. Everything past the fifth, the argument went, is a card you will still
+   be holding when the game ends.
+
+   That argument prices a hand as though its only job were to be spent, and
+   that is not what a hand is for. Most of these twenty-five cards do nothing
+   at all until the board hands them a use — Chokepoint wants a corridor, the
+   Rift wants a piece near a mouth, Stutter wants an opponent with a plan worth
+   unmaking. Holding one is not stockpiling fuel, it is holding the ANSWER to a
+   question that has not been asked yet, and the way you get the right answer is
+   to hold many. A human who plays this game well carries about thirteen.
+
+   So the curve has two regimes and a tail:
+
+     up to HAND_CORE      the cards you can plausibly spend soon — full price
+     up to HAND_VARIETY   variety: the answer, held before the question — most
+                          of full price, because a card you cannot yet use is
+                          still worth having, just not as much as one you can
+     beyond               a tail, because the pool is twenty-five and by the
+                          thirteenth card the odds that the fourteenth adds an
+                          answer you do not already hold have gone thin
+
+   HAND_VALUED is where the curve stops entirely, and it is also the only thing
+   HAND_USEFUL's hard refusal in aiShouldDraw still does. The rest of that
+   refusal's old job — stopping two machines drawing at each other forever —
+   has moved to DRAW_STREAK_MAX, which is a better guard for it. See the essay
+   above aiShouldDraw for why the hand size was the wrong place to put it.
+   ─────────────────────────────────────────────────────────────────────────── */
+const HAND_CORE = 5;
+const HAND_VARIETY = 13;
+const HAND_VALUED = 16;
+
 /**
- * How many cards are worth holding.
- *
- * A turn buys at most three casts, and the pool's costs run 2 to 6 against a
- * Focus ceiling of 10, so nobody spends more than about three cards before
- * running dry. Everything past the fifth is a card you will still be holding
- * when the game ends. See resourceValue and aiShouldDraw, which must agree
- * about this or the machine values a hand it will not go and get.
+ * What a cast costs on average, over the twenty-five-card pool: the mean of
+ * SPELLS[*].cost, which is 3.4. Used to ask how many casts a given pile of
+ * Focus could actually pay for. Written down rather than computed because
+ * resourceValue runs at every leaf of the search and this is a constant.
  */
-const HAND_USEFUL = 5;
+const AVG_SPELL_COST = 3.4;
 
 /**
  * Focus Points and cards, with DIMINISHING RETURNS and a hard clamp.
  *
  * With flat values the machine finds that drawing (+1 FP, +1 card) beats every
- * quiet move and draws forever. A turn can only spend so much, so the ninth
- * Focus Point and the fourth card are worth little, and cards past
- * HAND_USEFUL are worth nothing. aiShouldDraw holds the other half of this.
+ * quiet move and draws forever. So each extra card is worth less than the
+ * one before (see the curve above), Focus with no card to spend it on is
+ * worth little, and cards past HAND_VALUED are worth nothing. aiShouldDraw
+ * holds the other half of this.
  */
 function resourceValue(fp, cards) {
   // Focus past the ceiling is not merely worth less, it does not exist: the
   // referee refuses to bank it. Clamping here is what stops the machine paying
   // a real tempo cost for income it can never collect.
   const banked = Math.min(fp, FP_CAP);
-  const held = Math.min(cards, HAND_USEFUL);
-  return Math.min(banked, 6) * 14 + Math.max(0, banked - 6) * 4
-       + Math.min(held, 3) * 20 + Math.max(0, held - 3) * 4;
+  const held = Math.min(cards, HAND_VALUED);
+
+  // 1. OPTION VALUE — what the hand is worth as variety, independent of whether
+  //    any of it can be paid for this turn. See the curve's essay above.
+  let s = Math.min(held, HAND_CORE) * 30
+        + Math.max(0, Math.min(held, HAND_VARIETY) - HAND_CORE) * 20
+        + Math.max(0, held - HAND_VARIETY) * 5;
+
+  // 2. SPEND VALUE — and this is the term the old evaluator did not have.
+  //
+  //    Focus and cards were priced independently and then added, which reads as
+  //    obviously fine and is the whole bug. They are COMPLEMENTS: neither does
+  //    anything without the other. A card with no Focus behind it is a coaster,
+  //    and Focus with no card to spend it on is the position the machine
+  //    actually kept reaching — measured over three Ruthless mirrors it sat on
+  //    an average of 7.35 Focus of a possible 10 while its hand size piled up at
+  //    exactly three, because the fourth card was priced at 4 and one square of
+  //    pawn advance is worth 7. It was declining to go and get the thing that
+  //    would have let it spend what it was hoarding, and no additive pricing of
+  //    the two halves can ever notice that, because in an additive world the
+  //    hoard is already scoring well.
+  //
+  //    So price the PAIRING separately: how many casts this hand and this pool
+  //    could between them actually buy.
+  const castable = Math.min(held, Math.floor(banked / AVG_SPELL_COST));
+  s += castable * 25;
+
+  // 3. What is left of the Focus. Still worth something — income arrives before
+  //    the card that spends it does — but sharply less once no card in hand
+  //    could pay it out.
+  const spendable = Math.min(banked, held * AVG_SPELL_COST);
+  s += spendable * 12 + (banked - spendable) * 3;
+
+  return s;
 }
 
 /* ── the mobility term ──────────────────────────────────────────────────────
@@ -1496,18 +1591,27 @@ function aiConsiderChronos() {
  * Drawing costs the whole turn for 1 FP and a card. Rather than guess a rule,
  * price it against moving: search both and take the better.
  *
- * THE HARD LIMIT (HAND_USEFUL) is there because drawing is also a PASS. In a
- * standoff every move loses a pawn, so passing really is best, and two
- * machines will draw at each other forever. Pricing cannot fix that — the
- * comparison is answering correctly. So past a hand nobody can spend, drawing
- * is refused without asking the search.
+ * THE HARD LIMIT is there because drawing is also a PASS. In a standoff every
+ * move loses a pawn, so passing really is best, and two machines will draw at
+ * each other forever. Pricing cannot fix that — the comparison is answering
+ * correctly. So something must refuse without asking the search.
+ *
+ * That limit is the DRAW STREAK, not the hand size. A good player holds about
+ * thirteen cards, so a cap on the hand forbids good play. What is wrong in a
+ * standoff is that the machine passes again and again, so count that: after
+ * DRAW_STREAK_MAX drawn turns in a row it must move. Any other turn resets the
+ * count.
+ *
+ * HAND_VALUED is still a gate, but only as bookkeeping: past it the card curve
+ * is flat, so a draw cannot beat standing pat.
  */
 function aiShouldDraw() {
   const P = G.players[AI.side];
   if (P.noDraw > 0 || !eligibleSpellIds().length) return false;
   if (G.drewThisTurn || G.hasActed || G.castThisTurn > 0) return false;
   if (capturersFor(AI.side).length) return false;        // never pass up a capture
-  if (P.hand.length >= HAND_USEFUL) return false;        // see above
+  if (P.hand.length >= HAND_VALUED) return false;        // the curve is flat past here
+  if (AI.drawStreak[AI.side] >= DRAW_STREAK_MAX) return false;   // see above
   // A drawn turn that Stutter unmade may not simply be drawn again. rootMoves
   // does this for movements; the machine never goes through the referee, so
   // without this it would redraw where a player is refused. See rootMoves.
@@ -1674,6 +1778,22 @@ function aiAbandonPlan(s) {
   AI.moveSteps = [];
 }
 
+/* ── the draw streak ────────────────────────────────────────────────────────
+   Two functions rather than one `AI.drawStreak[side]++` at each site, because
+   there are two drivers — the synchronous one below and the staged one the page
+   uses — and the counter is only a guard if BOTH of them keep it. A site that
+   forgot to reset would leave the machine permanently barred from drawing, and
+   a site that forgot to increment would leave the standoff guard doing nothing;
+   neither failure announces itself. Named calls at least make the omission
+   visible to anyone reading the turn.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/** This turn was spent drawing. */
+function aiNoteDraw() { AI.drawStreak[AI.side]++; }
+
+/** This turn was spent on something else, so the streak is over. */
+function aiNoteActed() { AI.drawStreak[AI.side] = 0; }
+
 /** The whole turn, synchronously. Used by headless self-play. */
 function aiRunTurn() {
   if (!AI.on || G.over) return;
@@ -1684,7 +1804,11 @@ function aiRunTurn() {
   try {
     if (G.owedDiscard && G.owedDiscard.player === AI.side) aiResolveDiscard();
     aiConsiderChronos();
-    if (aiShouldDraw()) { drawSpell(AI.side); AI.thinking = false; endTurnLocal(); return; }
+    if (aiShouldDraw()) {
+      drawSpell(AI.side); aiNoteDraw();
+      AI.thinking = false; endTurnLocal(); return;
+    }
+    aiNoteActed();
     for (let i = 0; i < 3 && aiCastOnce("declare"); i++);
     if (!G.over && !G.hasActed) {
       const res = searchBestMove(AI.side);
@@ -1868,7 +1992,8 @@ function aiThink(job, arg, gen, done) {
     id: AI_PENDING.id, job, arg, G,
     fresh: AI.fresh === true,
     ai: { on: true, side: AI.side, level: AI.level, duel: AI.duel,
-          fast: false, deterministic: false, budgetScale: AI.budgetScale },
+          fast: false, deterministic: false, budgetScale: AI.budgetScale,
+          drawStreak: AI.drawStreak },
   });
   AI.fresh = false;
 }
@@ -1977,8 +2102,9 @@ function aiStep(gen) {
 
       case "draw":
         aiThink("draw", null, gen, (yes) => {
-          if (!yes) { advance(); return; }
+          if (!yes) { aiNoteActed(); advance(); return; }
           drawSpell(AI.side);
+          aiNoteDraw();
           AI.thinking = false;
           render();
           setTimeout(() => { if (gen === AI.gen && !G.over) endTurnLocal(); }, pace * watchRate());
@@ -2109,6 +2235,10 @@ function aiPlayGame(gold, violet, maxTurns = 300, seed = null, opts = {}) {
   // The harness picks the brain per turn itself, below. Leaving a live duel
   // pairing in place would have aiRunTurn re-point the seat underneath it.
   AI.duel = null; AI.paused = false;
+  // A fresh array, not a reset of the old one: `saved` above is a shallow copy,
+  // so mutating in place would reach through it and the streak would survive
+  // the restore into the next game of a tournament.
+  AI.drawStreak = [0, 0];
   AI.on = true; AI.thinking = false; AI.deterministic = true;
   AI.fast = opts.fast !== false;
   AI.budgetScale = opts.scale == null ? 1 : opts.scale;

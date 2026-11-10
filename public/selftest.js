@@ -1171,7 +1171,10 @@ function runTests() {
   G.players[0].fp = FP_CAP - 1;
   awardFP(0, 5, "a test");
   ok(`the pool stops at ${FP_CAP}`, G.players[0].fp === FP_CAP, G.players[0].fp);
-  ok("...and the wasted income is announced", G.log.some((l) => /is full at/.test(l.text)));
+  // Silently, and on purpose — see awardFP. The Focus pip says it once; the log
+  // used to say it on every coin. This asserts the silence so that restoring the
+  // announcement is a deliberate act rather than something that creeps back.
+  ok("...and says nothing about it in the log", !G.log.some((l) => /is full at/.test(l.text)));
   G.players[0].fp = 4;
   awardFP(0, 3, "a test");
   ok("...while income below the ceiling is paid in full", G.players[0].fp === 7, G.players[0].fp);
