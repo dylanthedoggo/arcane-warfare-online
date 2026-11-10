@@ -637,10 +637,14 @@ function expandChain(origin, at, steps, out, owner) {
     // CAPTURES, and half the time that was not one — so the search must not
     // keep extending past it and plan on the coin landing its way.
     //
-    // The Sentinel used to add a fourth way to halt here and no longer exists;
-    // promotion is now the only thing that stops a sequence the attacker
+    // `victimKeptShell` is the same story for a Hollow: the shell absorbed the
+    // jump, nothing was taken, and a chain is a chain of CAPTURES. Without it
+    // the search plans a free extra hop off the one piece that owes it nothing.
+    //
+    // The Sentinel used to add another way to halt here and no longer exists;
+    // promotion is otherwise the only thing that stops a sequence the attacker
     // survived. performMove agrees — see engine.js.
-    const halt = !stillThere || rec.promoted || rec.quantumHalt;
+    const halt = !stillThere || rec.promoted || rec.quantumHalt || rec.victimKeptShell;
     if (halt) out.push({ steps: steps.slice(), capture: true, from: origin, to: mv.to });
     else expandChain(origin, mv.to, steps, out, owner);
     steps.pop();
@@ -680,12 +684,23 @@ function turnMoves(owner) {
  * dispatchAction never binds it. Without this it would replay the very move
  * that was unmade, be refused online, and offline simply take it — getting
  * away with what a player cannot.
+ *
+ * The ban is compared against the FIRST STEP, because that is what the engine
+ * records: performMove calls noteTurnAction on the opening hop, and a chain's
+ * later hops are continuations of a turn already identified. A turn entry's own
+ * `from`/`to` describe the whole sequence — `to` is where the piece finally
+ * LANDS, and capture entries carry no `kind` at all — so comparing those
+ * matched nothing on any capturing turn and the ban went unenforced.
  */
+function banAction(m) {
+  const s = m.steps[0];
+  return { t: "move", from: s.from, to: s.mv.to, kind: s.mv.kind };
+}
+
 function rootMoves(owner) {
   const moves = turnMoves(owner);
   if (!G.stutter || G.stutter.player !== owner || !G.stutter.banned) return moves;
-  const legal = moves.filter((m) =>
-    !stutterBans(owner, { t: "move", from: m.from, to: m.to, kind: m.kind }));
+  const legal = moves.filter((m) => !stutterBans(owner, banAction(m)));
   // If the banned move was the only one, the ban has already stopped binding
   // and stutterBans says so — but be explicit rather than returning an empty
   // list and leaving the machine with nothing to play.

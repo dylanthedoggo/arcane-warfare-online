@@ -203,6 +203,69 @@ it("the real public/ai.js still passes it", () => {
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
+   STUTTER, AT THE ROOT
+
+   The engine refuses a repeat in dispatchAction, but the machine never goes
+   through the dispatcher — rootMoves is the only thing that binds it. This is
+   fast and does not play a game, so it lives up here with the structural
+   checks rather than down among the tournaments.
+
+   It went unenforced on every CAPTURING turn for a long time, silently. A turn
+   entry's own `from`/`to` describe the whole SEQUENCE — `to` is where the piece
+   finally lands, and expandChain never set `kind` at all — while the engine
+   records the FIRST HOP. So the comparison was "capture" against `undefined`
+   and matched nothing. It only ever worked on quiet moves, which is why it
+   looked like it worked at all.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe("Stutter binds the machine as well as the player");
+
+/** Two separate capturing turns for seat 1, so the ban has an alternative. */
+function twoJumps() {
+  const N = 12;
+  const rc = (r, c) => r * N + c;
+  engine.setG(engine.newGame(1, 12345, { mode: "online" }));
+  engine.beginTurn(1);
+  const live = engine.getG();
+  const shape = live.board.find(Boolean);
+  live.board = new Array(live.board.length).fill(null);
+  for (const [i, owner] of [[rc(4, 5), 1], [rc(5, 4), 0], [rc(4, 9), 1], [rc(5, 8), 0]])
+    live.board[i] = Object.assign({}, shape,
+      { id: live.seq++, owner, rank: "pawn", everAdjacent: false });
+  live.turn = 1;
+  live.phase = "declare";
+  live.hasActed = false;
+  return live;
+}
+
+it("takes a capturing turn off the machine's root list once it is banned", () => {
+  const live = twoJumps();
+  const all = boot.read("turnMoves")(1);
+  assert(all.length === 2,
+    `the fixture must offer exactly two capturing turns, not ${all.length}`);
+
+  // Armed by hand exactly as stutterRewind arms it: from the first hop.
+  const s = all[0].steps[0];
+  live.stutter = { player: 1, banned: { t: "move", from: s.from, to: s.mv.to, kind: s.mv.kind } };
+
+  const root = boot.read("rootMoves")(1);
+  assert(root.length === 1, `the banned turn must be gone, but ${root.length} remain`);
+  assert(!root.some((m) => m.steps[0].from === s.from && m.steps[0].mv.to === s.mv.to),
+    "and it must be the BANNED one that went");
+});
+
+it("...and hands the ban back when it is the only turn left", () => {
+  // "Take a different turn" cannot mean "lose the game". With one option the
+  // ban stops binding, and the machine must still be given something to play.
+  const live = twoJumps();
+  const all = boot.read("turnMoves")(1);
+  const s = all[0].steps[0];
+  live.board[all[1].steps[0].from] = null;          // remove the other option
+  live.stutter = { player: 1, banned: { t: "move", from: s.from, to: s.mv.to, kind: s.mv.kind } };
+  assert(boot.read("rootMoves")(1).length > 0, "the machine must never be left with nothing");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
    REPRODUCIBILITY
 
    The foundation every threshold further down stands on. If this group fails,

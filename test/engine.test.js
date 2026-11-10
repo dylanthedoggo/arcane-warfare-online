@@ -1205,16 +1205,26 @@ it("does not save a pawn sacrificed to a transformation either", () => {
   equal(getG().board[rc(7, 4)], null, "the Juggernaut eats it, shell and all");
 });
 
-it("keeps the chain going — the attacker lands and is still on a chain", () => {
-  // A shelled pawn absorbs the first jump; the attacker lands and, having
-  // another jump from there, is still on a chain — exactly as armor behaves.
-  const live = staged([[rc(7, 4), 0], [rc(5, 2), 0], [rc(6, 5), 1], [rc(0, 1), 1]], 1);
-  live.board[rc(7, 4)].hollow = true;
-  live.board[rc(7, 4)].hollowHome = rc(9, 8);
-  allowed(applyAction(1, { t: "move", from: rc(6, 5), to: rc(8, 3), kind: "capture" }));
+it("ENDS the chain — a jump that broke on a shell took nothing to chain from", () => {
+  // A chain is a chain of CAPTURES, and this was not one. Letting the shell
+  // feed a chain handed the attacker a free extra jump for hitting the one
+  // piece that owes them nothing, which is the opposite of what the card is
+  // for. The whiffed half of a superposition already stops here for the same
+  // reason. Armor does NOT — armor is a real hit that really strips something.
+  // Staged well back from the promotion rank so there is room for a second hop
+  // in the direction seat 1 actually travels.
+  const live = staged([[rc(5, 4), 0], [rc(7, 2), 0], [rc(4, 5), 1], [rc(0, 1), 1]], 1);
+  live.board[rc(5, 4)].hollow = true;
+  live.board[rc(5, 4)].hollowHome = rc(9, 8);
+
+  allowed(applyAction(1, { t: "move", from: rc(4, 5), to: rc(6, 3), kind: "capture" }));
   const after = getG();
   assert(after.board[rc(9, 8)], "the shelled pawn survived the first jump, from home");
-  assert(after.board[rc(8, 3)], "and the attacker is on its landing square");
+  assert(after.board[rc(6, 3)], "and the attacker is on its landing square");
+  assert(engine.captureMoves(rc(6, 3)).length > 0,
+    "the fixture really does offer the attacker a second jump from there");
+  equal(after.chain, null, "but it is not on a chain, so it may not take it");
+  equal(after.turn, 0, "the turn is over and has been handed across");
 });
 
 it("leaves an empty square behind, which can open a jump that was not there", () => {

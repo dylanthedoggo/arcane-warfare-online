@@ -2013,6 +2013,22 @@ function performMove(from, mv, opts = {}) {
     }
     G.lastCapture = { from, to: mv.to, victim: mv.victim, survived: !res.destroyed };
 
+    // A jump that broke on a Hollow's shell took nothing either, and for the
+    // same reason it cannot feed a chain — a sequence of jumps is a sequence
+    // of CAPTURES. Without this the attacker was handed a free extra jump for
+    // hitting the one piece that owes them nothing, which is the opposite of
+    // what the shell is for.
+    //
+    // Unlike the whiff above, the jump IS still recorded: it happened, the
+    // victim survived it, and Hopscotch reverses it exactly the way it
+    // reverses a jump that only stripped armor.
+    if (res.shelled) {
+      G.chain = null;
+      promoteIfDue(mv.to);
+      finishAction(mv.to);
+      return;
+    }
+
     if (res.retaliated) {           // the capturer is gone; nothing can chain
       G.chain = null;
       finishAction();
